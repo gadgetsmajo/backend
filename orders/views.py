@@ -12,7 +12,6 @@ from .tasks import send_product_rating_notifications
 from users.models import Notification
 from users.emails import (
     send_admin_new_order_email,
-    send_order_placed_email,
     send_order_confirmed_email,
     send_order_shipped_email,
     send_order_ready_for_pickup_email,
@@ -65,41 +64,8 @@ class OrderListCreateView(generics.ListCreateAPIView):
         return Order.objects.filter(user=self.request.user).prefetch_related('items__product').order_by('-created_at')
 
     def perform_create(self, serializer):
-        order = serializer.save(user=self.request.user)
-        items = [{'name': i.product.name, 'qty': i.quantity, 'price': f'{i.price:,.0f}', 'image': _product_image(i.product)} for i in order.items.select_related('product').all()]
-        try:
-            send_order_placed_email(order.user.name, order.user.email, order.code, f'{order.total:,.0f}', items, order.delivery_address)
-        except Exception:
-            logger.exception('Failed to send order placed email for order %s', order.code)
-        try:
-            send_admin_new_order_email(order.code, order.user.name, order.user.email, f'{order.total:,.0f}', items, order.delivery_address)
-        except Exception:
-            logger.exception('Failed to send admin new order email for order %s', order.code)
-        _notify(order.user, 'order', f'Order #{order.code} Placed', f'Your order has been placed and is being reviewed. Total: UGX {order.total:,.0f}.')
-
-        # Notify all admin users
-        from users.models import User as UserModel
-        admin_users = UserModel.objects.filter(is_staff=True)
-        item_summary = ', '.join(f'{i["qty"]}x {i["name"]}' for i in items)
-        for admin in admin_users:
-            _notify(admin, 'order', f'New Order #{order.code}',
-                    f'{order.user.name} placed an order. Items: {item_summary}. Total: UGX {order.total:,.0f}.')
-
-        # Notify traders whose products were ordered — no customer details exposed
-        order_items = order.items.select_related('product__trader__user').all()
-        notified_traders: dict = {}
-        for item in order_items:
-            trader_app = getattr(item.product, 'trader', None)
-            if not trader_app or not trader_app.user:
-                continue
-            tid = trader_app.id
-            if tid not in notified_traders:
-                notified_traders[tid] = {'user': trader_app.user, 'lines': []}
-            notified_traders[tid]['lines'].append(f'{item.product.name} x{item.quantity}')
-        for entry in notified_traders.values():
-            product_list = ', '.join(entry['lines'])
-            _notify(entry['user'], 'order', 'New Order for Your Product!',
-                    f'A customer placed an order for: {product_list}. Order #{order.code}.')
+        # Payment and all order notifications are handled after Pesapal verification.
+        serializer.save(user=self.request.user)
 
 
 class OrderDetailView(generics.RetrieveAPIView):
@@ -555,17 +521,47 @@ class PesapalIPNView(APIView):
                 order = payment.order
                 if order:
                     from products.models import Product
-                    if mapped == 'completed' and order.status == 'pending':
-                        # Deduct stock now that payment is confirmed
+                    if mapped == 'completed' and order.status in ('pending', 'processing'):
+                        # This is the first completed transition because completed payments return above.
                         for item in order.items.select_related('product').all():
                             if item.product:
                                 Product.objects.filter(pk=item.product.pk).update(
                                     stock=models.F('stock') - item.quantity
                                 )
-                        order.status = 'processing'
-                        order.save(update_fields=['status', 'updated_at'])
-                        _notify(order.user, 'order', f'Payment Confirmed — Order #{order.code}',
+                        if order.status == 'pending':
+                            order.status = 'processing'
+                            order.save(update_fields=['status', 'updated_at'])
+
+                        items = [{'name': i.product.name, 'qty': i.quantity, 'price': f'{i.price:,.0f}', 'image': _product_image(i.product)} for i in order.items.select_related('product').all()]
+                        try:
+                            send_admin_new_order_email(order.code, order.user.name, order.user.email, f'{order.total:,.0f}', items, order.delivery_address)
+                        except Exception:
+                            logger.exception('Failed to send paid order email for order %s', order.code)
+
+                        _notify(order.user, 'order', f'Payment Confirmed - Order #{order.code}',
                                 f'Payment received! UGX {order.total:,.0f}. Your order is being prepared.')
+
+                        from users.models import User as UserModel
+                        item_summary = ', '.join(f'{i["qty"]}x {i["name"]}' for i in items)
+                        for admin in UserModel.objects.filter(is_staff=True):
+                            _notify(admin, 'order', f'New Paid Order #{order.code}',
+                                    f'{order.user.name} paid for an order. Items: {item_summary}. Total: UGX {order.total:,.0f}.')
+
+                        order_items = order.items.select_related('product__trader__user').all()
+                        notified_traders: dict = {}
+                        for item in order_items:
+                            trader_app = getattr(item.product, 'trader', None)
+                            if not trader_app or not trader_app.user:
+                                continue
+                            tid = trader_app.id
+                            if tid not in notified_traders:
+                                notified_traders[tid] = {'user': trader_app.user, 'lines': []}
+                            notified_traders[tid]['lines'].append(f'{item.product.name} x{item.quantity}')
+                        for entry in notified_traders.values():
+                            product_list = ', '.join(entry['lines'])
+                            _notify(entry['user'], 'order', 'New Paid Order for Your Product!',
+                                    f'A customer paid for: {product_list}. Order #{order.code}.')
+
                         try:
                             items = [{'name': i.product.name, 'qty': i.quantity, 'price': f'{i.price:,.0f}', 'image': _product_image(i.product)} for i in order.items.select_related('product').all()]
                             send_payment_successful_email(
