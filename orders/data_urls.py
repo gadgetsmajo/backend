@@ -2,7 +2,7 @@ from django.urls import path
 from .data_views import (
     ExportProductsView, ExportOrdersView, ExportUsersView,
     ImportProductsView, ImportCategoriesView,
-    ClearAllOrdersView, ResetInventoryView,
+    ClearAllOrdersView, ResetInventoryView, ClearOtherDataView,
 )
 
 urlpatterns = [
@@ -13,4 +13,5 @@ urlpatterns = [
     path('import/categories/', ImportCategoriesView.as_view(), name='import-categories'),
     path('danger/clear-orders/', ClearAllOrdersView.as_view(), name='clear-orders'),
     path('danger/reset-inventory/', ResetInventoryView.as_view(), name='reset-inventory'),
+    path('danger/clear-other-data/', ClearOtherDataView.as_view(), name='clear-other-data'),
 ]

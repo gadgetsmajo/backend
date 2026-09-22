@@ -1,6 +1,7 @@
 import csv
 import io
 import json
+from django.db import transaction
 from django.http import HttpResponse
 from rest_framework.views import APIView
 from rest_framework import permissions, status
@@ -229,3 +230,59 @@ class ResetInventoryView(APIView):
         movements_deleted, _ = StockMovement.objects.all().delete()
         products_reset = Product.objects.update(stock=0)
         return Response({'products_reset': products_reset, 'movements_deleted': movements_deleted})
+
+
+class ClearOtherDataView(APIView):
+    permission_classes = (permissions.IsAdminUser,)
+
+    def post(self, request):
+        password = request.data.get('password', '')
+        if not request.user.check_password(password):
+            return Response({'detail': 'Incorrect password.'}, status=status.HTTP_403_FORBIDDEN)
+
+        from accounting.models import (
+            Account, AccountTransfer, AuditLog, Employee, Expense, ExpenseCategory,
+            FixedAsset, Payable, Purchase, Receivable, Refund, Supplier, TaxRecord,
+        )
+        from traders.models import TraderExpense, TraderOrderItem, TraderSale
+        from users.models import CartItem, Notification, UserBehaviour, WishlistItem
+        from products.models import FlashSale, ProductReview, ReviewImage
+
+        delete_sets = [
+            ('payments', Payment),
+            ('orders', Order),
+            ('service_ratings', ServiceRating),
+            ('return_requests', ReturnRequest),
+            ('order_items', OrderItem),
+            ('flash_sales', FlashSale),
+            ('product_reviews', ProductReview),
+            ('review_images', ReviewImage),
+            ('suppliers', Supplier),
+            ('purchases', Purchase),
+            ('expense_categories', ExpenseCategory),
+            ('expenses', Expense),
+            ('accounts', Account),
+            ('account_transfers', AccountTransfer),
+            ('receivables', Receivable),
+            ('payables', Payable),
+            ('tax_records', TaxRecord),
+            ('refunds', Refund),
+            ('employees', Employee),
+            ('fixed_assets', FixedAsset),
+            ('audit_logs', AuditLog),
+            ('trader_sales', TraderSale),
+            ('trader_expenses', TraderExpense),
+            ('trader_order_items', TraderOrderItem),
+            ('notifications', Notification),
+            ('cart_items', CartItem),
+            ('wishlist_items', WishlistItem),
+            ('user_behaviour', UserBehaviour),
+        ]
+
+        deleted = {}
+        with transaction.atomic():
+            for label, model in delete_sets:
+                deleted[label] = model.objects.count()
+                model.objects.all().delete()
+
+        return Response({'deleted': deleted, 'total_deleted': sum(deleted.values())})

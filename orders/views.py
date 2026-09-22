@@ -395,6 +395,15 @@ class InitiatePaymentView(APIView):
             return Response({'detail': f'Server error: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     def _handle(self, request, code):
+        if not all((
+            settings.PESAPAL_CONSUMER_KEY,
+            settings.PESAPAL_CONSUMER_SECRET,
+            settings.PESAPAL_IPN_URL,
+            settings.PESAPAL_CALLBACK_URL,
+        )):
+            logger.error('Pesapal configuration is incomplete for order %s', code)
+            return Response({'detail': 'Pesapal payment is not configured on the server.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
         rate_key = f'pay_attempt_{request.user.id}'
         attempts = cache.get(rate_key, 0)
         if attempts >= PAYMENT_RATE_LIMIT:
@@ -445,18 +454,18 @@ class InitiatePaymentView(APIView):
             resp.raise_for_status()
             data = resp.json()
             logger.info('Pesapal SubmitOrderRequest response: %s', data)
-            if not data.get('redirect_url'):
+            if not data.get('redirect_url') or not data.get('order_tracking_id'):
                 raise Exception(f"Pesapal submit failed: {data}")
             with transaction.atomic():
-                Payment.objects.update_or_create(
-                    pesapal_order_tracking_id=data['order_tracking_id'],
-                    defaults={
-                        'order': order,
-                        'merchant_reference': data.get('merchant_reference', order.code),
-                        'amount': order.total,
-                        'status': 'pending',
-                    },
-                )
+                payment, _ = Payment.objects.get_or_create(order=order)
+                payment.pesapal_order_tracking_id = data['order_tracking_id']
+                payment.merchant_reference = data.get('merchant_reference', order.code)
+                payment.amount = order.total
+                payment.currency = 'UGX'
+                payment.status = 'pending'
+                payment.payment_method = ''
+                payment.description = f'Payment for order {order.code}'
+                payment.save()
             logger.info('Payment initiated: order=%s tracking=%s user=%s', order.code, data['order_tracking_id'], request.user.email)
             return Response({'redirect_url': data['redirect_url'], 'order_tracking_id': data['order_tracking_id']})
         except http_requests.HTTPError as e:
