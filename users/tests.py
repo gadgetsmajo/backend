@@ -1,3 +1,6 @@
+import json
+from unittest.mock import Mock, patch
+
 from django.contrib.auth import get_user_model
 from django.test import TestCase
 from rest_framework.test import APIClient
@@ -61,3 +64,32 @@ class ProfilePasswordFlowTests(TestCase):
         self.assertIn('current_password', response.data)
         self.user.refresh_from_db()
         self.assertTrue(self.user.check_password('old-password-123'))
+
+
+class GoogleLoginAvatarTests(TestCase):
+    @patch('cloudinary.uploader.upload')
+    @patch('urllib.request.urlopen')
+    def test_google_login_stores_verified_profile_picture(self, mock_urlopen, mock_upload):
+        userinfo = {
+            'email': 'google-user@example.com',
+            'name': 'Google User',
+            'picture': 'https://lh3.googleusercontent.com/a/google-user-photo',
+        }
+        response_body = Mock()
+        response_body.read.return_value = json.dumps(userinfo).encode()
+        mock_urlopen.return_value.__enter__.return_value = response_body
+        mock_upload.return_value = {'public_id': 'avatars/google-user'}
+
+        response = APIClient().post(
+            '/api/auth/login/google/',
+            {'credential': 'google-access-token'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        user = User.objects.get(email='google-user@example.com')
+        self.assertEqual(str(user.avatar), 'avatars/google-user')
+        mock_upload.assert_called_once_with(
+            userinfo['picture'],
+            folder='avatars/',
+        )

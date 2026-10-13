@@ -1,4 +1,6 @@
+import logging
 import secrets
+from urllib.parse import urlparse
 from rest_framework import generics, permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -13,6 +15,29 @@ from .emails import send_welcome_email, send_password_reset_email, send_password
 from .sms import send_welcome_sms
 
 User = get_user_model()
+logger = logging.getLogger(__name__)
+
+
+def _store_google_avatar(user, picture_url):
+    if user.avatar or not picture_url:
+        return
+
+    parsed_url = urlparse(picture_url)
+    hostname = parsed_url.hostname or ''
+    if parsed_url.scheme != 'https' or not (
+        hostname == 'googleusercontent.com' or hostname.endswith('.googleusercontent.com')
+    ):
+        return
+
+    try:
+        import cloudinary.uploader
+        result = cloudinary.uploader.upload(picture_url, folder='avatars/')
+        public_id = result.get('public_id')
+        if public_id:
+            user.avatar = public_id
+            user.save(update_fields=['avatar'])
+    except Exception:
+        logger.exception('Failed to save Google profile photo for user %s', user.pk)
 
 
 class LoginView(APIView):
@@ -310,6 +335,7 @@ class GoogleLoginView(APIView):
             return Response({'detail': 'Could not get email from Google.'}, status=status.HTTP_400_BAD_REQUEST)
 
         user, created = User.objects.get_or_create(email=email, defaults={'name': name})
+        _store_google_avatar(user, info.get('picture'))
         if created:
             user.set_unusable_password()
             user.save()
