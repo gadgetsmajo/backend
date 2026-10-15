@@ -1,4 +1,5 @@
 import json
+import re
 from unittest.mock import Mock, patch
 
 from django.contrib.auth import get_user_model
@@ -10,17 +11,64 @@ from users import emails
 User = get_user_model()
 
 
-class EmailProgressTemplateTests(TestCase):
-    def test_order_progress_bar_contains_all_steps_and_active_line(self):
-        html = emails._progress_bar('shipped')
+class EmailStatusHeroTests(TestCase):
+    def test_email_templates_contain_no_emoji_characters(self):
+        email_senders = (
+            (emails.send_welcome_email, ('Customer', 'customer@example.com')),
+            (emails.send_admin_new_order_email, ('ORD-1', 'Customer', 'customer@example.com', '100', [], 'Kampala')),
+            (emails.send_order_placed_email, ('Customer', 'customer@example.com', 'ORD-1', '100', [], 'Kampala')),
+            (emails.send_order_confirmed_email, ('Customer', 'customer@example.com', 'ORD-1', '100', [], 'Kampala')),
+            (emails.send_order_shipped_email, ('Customer', 'customer@example.com', 'ORD-1', 'Kampala')),
+            (emails.send_order_ready_for_pickup_email, ('Customer', 'customer@example.com', 'ORD-1')),
+            (emails.send_order_delivered_email, ('Customer', 'customer@example.com', 'ORD-1')),
+            (emails.send_product_rating_email, ('Customer', 'customer@example.com', 'ORD-1', [])),
+            (emails.send_order_rating_email, ('Customer', 'customer@example.com', 'ORD-1', 'https://example.com/rate')),
+            (emails.send_order_cancelled_email, ('Customer', 'customer@example.com', 'ORD-1', 'Out of stock')),
+            (emails.send_password_reset_email, ('Customer', 'customer@example.com', 'https://example.com/reset')),
+            (emails.send_password_changed_email, ('Customer', 'customer@example.com')),
+            (emails.send_payment_successful_email, ('Customer', 'customer@example.com', 'ORD-1', '100', [])),
+            (emails.send_payment_failed_email, ('Customer', 'customer@example.com', 'ORD-1', '100')),
+            (emails.send_return_approved_email, ('customer@example.com', 'ORD-1')),
+            (emails.send_refund_processed_email, ('customer@example.com', 'ORD-1')),
+            (emails.send_trader_approved_email, ('Customer', 'customer@example.com', 'Majo Store', 'trader-1')),
+        )
+        emoji_pattern = re.compile(r'[\U0001F000-\U0001FAFF\u2600-\u27BF]')
 
-        self.assertIn('Order Progress', html)
-        self.assertIn('Placed', html)
-        self.assertIn('Confirmed', html)
-        self.assertIn('Shipped', html)
-        self.assertIn('Delivered', html)
-        self.assertIn('#F59E0B', html)
-        self.assertIn('#E2E8F0', html)
+        for sender, args in email_senders:
+            with self.subTest(sender=sender.__name__), patch.object(emails, '_send') as send:
+                sender(*args)
+                payload = send.call_args.args[0]
+
+                self.assertIsNone(emoji_pattern.search(payload['subject']))
+                self.assertIsNone(emoji_pattern.search(payload['html']))
+
+    def test_status_hero_uses_matching_image_and_full_width_layout(self):
+        html = emails._status_hero('shipped')
+
+        self.assertIn(emails._STEP_IMGS[2][1], html)
+        self.assertIn('alt="Order status: Shipped"', html)
+        self.assertIn('width:100%;max-width:360px', html)
+        self.assertNotIn('Order Progress', html)
+
+    def test_all_order_status_emails_use_status_image_hero(self):
+        email_senders = (
+            (emails.send_order_placed_email, ('Customer', 'customer@example.com', 'ORD-1', '100', [], 'Kampala'), 'pending'),
+            (emails.send_order_confirmed_email, ('Customer', 'customer@example.com', 'ORD-1', '100', [], 'Kampala'), 'processing'),
+            (emails.send_order_shipped_email, ('Customer', 'customer@example.com', 'ORD-1', 'Kampala'), 'shipped'),
+            (emails.send_order_ready_for_pickup_email, ('Customer', 'customer@example.com', 'ORD-1'), 'ready_for_pickup'),
+            (emails.send_order_delivered_email, ('Customer', 'customer@example.com', 'ORD-1'), 'delivered'),
+            (emails.send_payment_successful_email, ('Customer', 'customer@example.com', 'ORD-1', '100', [], 'Mobile Money'), 'processing'),
+        )
+
+        for sender, args, status in email_senders:
+            with self.subTest(status=status), patch.object(emails, '_send') as send:
+                sender(*args)
+                html = send.call_args.args[0]['html']
+                image_url = next(image for key, image, _ in emails._STEP_IMGS if key == status)
+
+                self.assertIn(image_url, html)
+                self.assertNotIn('🚚', html)
+                self.assertNotIn('Order Progress', html)
 
 
 class ProfilePasswordFlowTests(TestCase):

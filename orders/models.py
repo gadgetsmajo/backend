@@ -14,6 +14,7 @@ class Payment(models.Model):
     ]
     order = models.OneToOneField('Order', on_delete=models.CASCADE, related_name='payment', null=True, blank=True)
     pesapal_order_tracking_id = models.CharField(max_length=100, unique=True)
+    confirmation_code = models.CharField(max_length=100, blank=True)
     merchant_reference = models.CharField(max_length=100, blank=True)
     amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     currency = models.CharField(max_length=10, default='UGX')
@@ -89,13 +90,18 @@ class ServiceRating(models.Model):
 class ReturnRequest(models.Model):
     STATUS_CHOICES = [
         ('pending', 'Pending'),
+        ('processing', 'Refund Processing'),
         ('approved', 'Approved'),
+        ('refunded', 'Refunded'),
         ('rejected', 'Rejected'),
+        ('refund_failed', 'Refund Failed'),
     ]
     order = models.OneToOneField(Order, on_delete=models.CASCADE, related_name='return_request')
     reason = models.TextField()
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
     admin_note = models.TextField(blank=True)
+    refund_amount = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    refund_reference = models.CharField(max_length=100, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

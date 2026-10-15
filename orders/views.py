@@ -7,7 +7,7 @@ from django.views.decorators.cache import never_cache
 from django.core.cache import cache
 from django.db import transaction, models
 from .models import Order, ServiceRating, Payment, ReturnRequest
-from .serializers import OrderSerializer, ServiceRatingSerializer, PaymentSerializer, ReturnRequestSerializer
+from .serializers import OrderSerializer, ServiceRatingSerializer, PaymentSerializer, ReturnRequestSerializer, AdminReturnRequestSerializer
 from .tasks import send_product_rating_notifications
 from users.models import Notification
 from users.emails import (
@@ -20,6 +20,8 @@ from users.emails import (
     send_order_rating_email,
     send_payment_successful_email,
     send_payment_failed_email,
+    send_return_approved_email,
+    send_refund_processed_email,
 )
 import requests as http_requests
 import logging
@@ -165,6 +167,165 @@ class ReturnRequestListView(generics.ListAPIView):
 
     def get_queryset(self):
         return ReturnRequest.objects.filter(order__user=self.request.user).select_related('order').order_by('-created_at')
+
+
+class AdminReturnRequestListView(generics.ListAPIView):
+    serializer_class = AdminReturnRequestSerializer
+    permission_classes = (permissions.IsAdminUser,)
+
+    def get_queryset(self):
+        return ReturnRequest.objects.select_related('order__user', 'order__payment').order_by('-created_at')
+
+
+class AdminReturnRequestApproveView(APIView):
+    permission_classes = (permissions.IsAdminUser,)
+
+    def post(self, request, pk):
+        if not settings.PESAPAL_REFUND_USERNAME:
+            return Response(
+                {'detail': 'Automatic refunds are not configured. Check the payment provider refund settings.'},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        try:
+            with transaction.atomic():
+                return_request = ReturnRequest.objects.select_for_update().select_related(
+                    'order__user', 'order__payment'
+                ).get(pk=pk)
+                if return_request.status != 'pending':
+                    return Response({'detail': 'Only pending return requests can be approved.'}, status=status.HTTP_400_BAD_REQUEST)
+
+                try:
+                    payment = return_request.order.payment
+                except Payment.DoesNotExist:
+                    return Response({'detail': 'This order has no recorded payment to refund.'}, status=status.HTTP_400_BAD_REQUEST)
+                if payment.status != 'completed':
+                    return Response({'detail': 'Only completed payments can be refunded.'}, status=status.HTTP_400_BAD_REQUEST)
+
+                return_request.status = 'processing'
+                return_request.refund_amount = payment.amount
+                return_request.save(update_fields=['status', 'refund_amount', 'updated_at'])
+        except ReturnRequest.DoesNotExist:
+            return Response({'detail': 'Return request not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        try:
+            token = _pesapal_token()
+            if not payment.confirmation_code:
+                status_response = http_requests.get(
+                    f'{settings.PESAPAL_BASE_URL}/api/Transactions/GetTransactionStatus',
+                    params={'orderTrackingId': payment.pesapal_order_tracking_id},
+                    headers={'Accept': 'application/json', 'Authorization': f'Bearer {token}'},
+                    timeout=15,
+                )
+                status_response.raise_for_status()
+                transaction_data = status_response.json()
+                verified_amount = float(transaction_data.get('amount', 0))
+                if abs(verified_amount - float(payment.amount)) > 0.01:
+                    raise ValueError('Pesapal payment amount does not match the recorded payment.')
+                if transaction_data.get('payment_status_description', '').lower() != 'completed':
+                    raise ValueError('Pesapal does not report this payment as completed.')
+                payment.confirmation_code = transaction_data.get('confirmation_code', '')
+                if not payment.confirmation_code:
+                    raise ValueError('Pesapal has not provided a confirmation code for this payment.')
+                payment.save(update_fields=['confirmation_code', 'updated_at'])
+
+            refund_response = http_requests.post(
+                f'{settings.PESAPAL_BASE_URL}/api/Transactions/RefundRequest',
+                json={
+                    'confirmation_code': payment.confirmation_code,
+                    'amount': float(payment.amount),
+                    'username': settings.PESAPAL_REFUND_USERNAME,
+                    'remarks': return_request.reason[:250],
+                },
+                headers={'Accept': 'application/json', 'Content-Type': 'application/json', 'Authorization': f'Bearer {token}'},
+                timeout=15,
+            )
+            refund_response.raise_for_status()
+            refund_data = refund_response.json()
+            response_code = str(refund_data.get('status', refund_data.get('error', '')))
+            if response_code != '200':
+                error = refund_data.get('error')
+                error_message = error.get('message') if isinstance(error, dict) else error
+                raise ValueError(error_message or refund_data.get('message') or 'Pesapal did not accept the refund request.')
+        except Exception as exc:
+            logger.exception('Pesapal refund request failed for return %s', pk)
+            return_request.status = 'refund_failed'
+            return_request.admin_note = f'Refund request failed. Verify the transaction with the payment provider before taking further action. {str(exc)[:500]}'
+            return_request.save(update_fields=['status', 'admin_note', 'updated_at'])
+            return Response({'detail': return_request.admin_note}, status=status.HTTP_502_BAD_GATEWAY)
+
+        return_request.status = 'approved'
+        return_request.admin_note = 'Return approved. The refund request has been accepted and is being processed to the original payment method. This does not confirm that funds have been credited yet.'
+        return_request.save(update_fields=['status', 'admin_note', 'updated_at'])
+        _notify(
+            return_request.order.user,
+            'order',
+            f'Return Approved — #{return_request.order.code}',
+            f'Your return was approved. Your refund request for UGX {payment.amount:,.0f} is being processed to your original payment method.',
+        )
+        try:
+            send_return_approved_email(
+                return_request.order.user.email,
+                return_request.order.code,
+            )
+        except Exception:
+            logger.exception('Failed to send return approval email for return %s', pk)
+        return Response(AdminReturnRequestSerializer(return_request).data)
+
+
+class AdminReturnRequestRefundedView(APIView):
+    permission_classes = (permissions.IsAdminUser,)
+
+    def post(self, request, pk):
+        try:
+            return_request = ReturnRequest.objects.select_related('order__user').get(pk=pk)
+        except ReturnRequest.DoesNotExist:
+            return Response({'detail': 'Return request not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        if return_request.status != 'approved':
+            return Response({'detail': 'Only approved return requests can be marked as refunded.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        return_request.status = 'refunded'
+        return_request.admin_note = 'Refund confirmed as processed to the original payment method.'
+        return_request.save(update_fields=['status', 'admin_note', 'updated_at'])
+        _notify(
+            return_request.order.user,
+            'order',
+            f'Refund Processed — #{return_request.order.code}',
+            f'Your refund of UGX {return_request.refund_amount:,.0f} has been confirmed as processed.',
+        )
+        try:
+            send_refund_processed_email(
+                return_request.order.user.email,
+                return_request.order.code,
+            )
+        except Exception:
+            logger.exception('Failed to send refund processed email for return %s', pk)
+        return Response(AdminReturnRequestSerializer(return_request).data)
+
+
+class AdminReturnRequestRejectView(APIView):
+    permission_classes = (permissions.IsAdminUser,)
+
+    def post(self, request, pk):
+        try:
+            return_request = ReturnRequest.objects.select_related('order__user').get(pk=pk)
+        except ReturnRequest.DoesNotExist:
+            return Response({'detail': 'Return request not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        if return_request.status != 'pending':
+            return Response({'detail': 'Only pending return requests can be rejected.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        return_request.status = 'rejected'
+        return_request.admin_note = request.data.get('admin_note', '').strip()
+        return_request.save(update_fields=['status', 'admin_note', 'updated_at'])
+        _notify(
+            return_request.order.user,
+            'order',
+            f'Return Update — #{return_request.order.code}',
+            return_request.admin_note or 'Your return request was reviewed and could not be approved.',
+        )
+        return Response(AdminReturnRequestSerializer(return_request).data)
 
 
 # ── Admin views ──────────────────────────────────────────────────────────────
@@ -525,7 +686,8 @@ class PesapalIPNView(APIView):
             with transaction.atomic():
                 payment.status = mapped
                 payment.payment_method = data.get('payment_method', '')
-                payment.save(update_fields=['status', 'payment_method', 'updated_at'])
+                payment.confirmation_code = data.get('confirmation_code', '')
+                payment.save(update_fields=['status', 'payment_method', 'confirmation_code', 'updated_at'])
 
                 order = payment.order
                 if order:

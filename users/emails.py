@@ -1,3 +1,5 @@
+from html import escape
+
 import resend
 from django.conf import settings
 
@@ -9,6 +11,7 @@ def _send(payload: dict):
 FROM = 'Majo Gadgets <noreply@majogadgets.com>'
 LOGO = 'https://res.cloudinary.com/fhklnn0f/image/upload/v1789111152/Majo_Gadgets_logo_an2hbc.png'
 IMG_CART = 'https://res.cloudinary.com/fhklnn0f/image/upload/v1789551363/shopping_cart.png'
+IMG_WELCOME = 'https://res.cloudinary.com/fhklnn0f/image/upload/v1789298565/OG.png'
 
 # ── Icon paths ───────────────────────────────────────────────────────────────
 ICO_CHECK       = '<polyline points="20 6 9 17 4 12"/>'
@@ -27,35 +30,27 @@ ICO_PHONE       = '<path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-
 
 # ── Email-safe glyphs ────────────────────────────────────────────────────────
 def _icon(path_d: str, color: str = '#ffffff', size: int = 20) -> str:
+    if path_d == ICO_SHOPPING:
+        return f'<img src="{IMG_CART}" width="{size}" height="{size}" alt="Shopping cart" style="display:inline-block;vertical-align:middle" />'
+
     glyph_map = {
-        ICO_CHECK: '✓',
-        ICO_PACKAGE: '📦',
-        ICO_TRUCK: '🚚',
-        ICO_STAR: '★',
-        ICO_X_CIRCLE: '✕',
-        ICO_LOCK: '🔒',
-        ICO_CLOCK: '◔',
-        ICO_MAIL: '✉',
-        ICO_SHOPPING: '🛒',
-        ICO_HEART: '♥',
-        ICO_SETTINGS: '⚙',
-        ICO_MAP_PIN: '⌖',
-        ICO_PHONE: '☎',
+        ICO_CHECK: '+',
+        ICO_PACKAGE: '#',
+        ICO_TRUCK: '>',
+        ICO_STAR: '*',
+        ICO_X_CIRCLE: 'x',
+        ICO_LOCK: '!',
+        ICO_CLOCK: 'o',
+        ICO_MAIL: '@',
+        ICO_HEART: '+',
+        ICO_SETTINGS: '*',
+        ICO_MAP_PIN: '@',
+        ICO_PHONE: 'tel',
     }
-    glyph = glyph_map.get(path_d, '•')
+    glyph = glyph_map.get(path_d, '.')
     return (
         f'<span style="display:inline-block;font-size:{size}px;line-height:1;color:{color};'
         f'font-family:Arial,Helvetica,sans-serif;font-weight:700;vertical-align:middle">{glyph}</span>'
-    )
-
-
-def _circle_icon(path_d: str, bg: str, icon_color: str = '#ffffff', size: int = 48) -> str:
-    """Icon inside a colored circle — used as email section header."""
-    svg = _icon(path_d, icon_color, 24)
-    return (
-        f'<table cellpadding="0" cellspacing="0" style="margin:0 auto 12px"><tr><td align="center" valign="middle" '
-        f'style="width:{size}px;height:{size}px;border-radius:50%;background:{bg};text-align:center">'
-        f'{svg}</td></tr></table>'
     )
 
 
@@ -72,12 +67,13 @@ BASE = '''
             <img src="{logo}" height="48" alt="Majo Gadgets" style="display:block;margin:0 auto" />
           </td>
         </tr>
+        {hero}
         <tr><td style="padding:36px 40px 28px">{body}</td></tr>
         <tr><td style="padding:0 40px"><hr style="border:none;border-top:1px solid #E2E8F0;margin:0" /></td></tr>
         <tr>
           <td style="padding:20px 40px;text-align:center">
             <p style="margin:0 0 4px;font-size:13px;color:#111111">Majo Gadgets &mdash; Quality gadgets, great value.</p>
-            <p style="margin:0;font-size:11px;color:#333333">&copy; 2025 Majo Gadgets. All rights reserved.</p>
+            <p style="margin:0;font-size:11px;color:#333333">&copy; 2026 Majo Gadgets. All rights reserved.</p>
           </td>
         </tr>
       </table>
@@ -87,11 +83,11 @@ BASE = '''
 '''
 
 
-def _wrap(body: str) -> str:
-    return BASE.replace('{logo}', LOGO).replace('{body}', body)
+def _wrap(body: str, hero: str = '') -> str:
+  return BASE.replace('{logo}', LOGO).replace('{hero}', hero).replace('{body}', body)
 
 
-# ── Progress step images ─────────────────────────────────────────────────────
+# ── Order status images ──────────────────────────────────────────────────────
 _STEP_IMGS = [
     ('pending',          'https://res.cloudinary.com/fhklnn0f/image/upload/v1789549511/Order_placed.png',       'Placed'),
     ('processing',       'https://res.cloudinary.com/fhklnn0f/image/upload/v1789549477/order_confirmed.png',    'Confirmed'),
@@ -101,54 +97,18 @@ _STEP_IMGS = [
 ]
 
 
-def _progress_bar(active: str) -> str:
-    order = [s[0] for s in _STEP_IMGS]
-    active_idx = order.index(active) if active in order else 0
-
-    circle_cells = ''
-    label_cells = ''
-    pct = f'{100 // len(_STEP_IMGS)}%'
-    for idx, (key, img_url, label) in enumerate(_STEP_IMGS):
-        done = idx <= active_idx
-        is_active = idx == active_idx
-        opacity = '1' if done else '0.35'
-        label_color = '#111111' if is_active or done else '#888888'
-        label_weight = '700' if is_active or done else '400'
-
-        img_tag = f'<img src="{img_url}" width="40" height="40" alt="{label}" style="display:block;opacity:{opacity}" />'
-
-        if idx < len(_STEP_IMGS) - 1:
-            line_color = '#F59E0B' if idx < active_idx else '#E2E8F0'
-            circle_cells += (
-                f'<td align="center" valign="middle" style="width:{pct};padding:0">'
-                f'<table width="100%" cellpadding="0" cellspacing="0"><tr>'
-                f'<td align="center" valign="middle" style="padding:0">'
-                f'<table cellpadding="0" cellspacing="0" style="margin:0 auto"><tr>'
-                f'<td align="center" valign="middle" style="width:40px;height:40px">{img_tag}</td></tr></table></td>'
-                f'<td valign="middle" style="width:100%;padding:0"><div style="height:3px;background:{line_color};margin-left:4px;margin-right:4px;border-radius:999px"></div></td>'
-                f'</tr></table></td>'
-            )
-        else:
-            circle_cells += (
-                f'<td align="center" valign="middle" style="width:{pct};padding:0">'
-                f'<table cellpadding="0" cellspacing="0" style="margin:0 auto"><tr>'
-                f'<td align="center" valign="middle" style="width:40px;height:40px">{img_tag}</td></tr></table></td>'
-            )
-
-        label_cells += (
-            f'<td align="center" style="width:{pct};padding-top:8px">'
-            f'<p style="margin:0;font-size:10px;color:{label_color};font-weight:{label_weight};white-space:nowrap">{label}</p>'
-            f'</td>'
-        )
-
+def _status_hero(status: str) -> str:
+    image_url, label = next(
+        ((image_url, label) for key, image_url, label in _STEP_IMGS if key == status),
+        (_STEP_IMGS[0][1], _STEP_IMGS[0][2]),
+    )
     return f'''
-    <div style="background:#ffffff;border:1px solid #E2E8F0;border-radius:12px;padding:20px 16px 16px;margin-bottom:28px">
-      <p style="margin:0 0 16px;font-size:11px;font-weight:700;color:#111111;text-transform:uppercase;letter-spacing:0.5px;text-align:center">Order Progress</p>
-      <table width="100%" cellpadding="0" cellspacing="0">
-        <tr>{circle_cells}</tr>
-        <tr>{label_cells}</tr>
-      </table>
-    </div>'''
+      <tr>
+        <td style="padding:0;text-align:center;line-height:0">
+          <img src="{image_url}" width="360" alt="Order status: {label}" style="display:block;width:100%;max-width:360px;height:auto;margin:0 auto" />
+        </td>
+      </tr>
+    '''
 
 
 def _item_rows(items: list) -> str:
@@ -181,27 +141,35 @@ def _info_row(icon_path: str, text: str, color: str = '#111111') -> str:
 
 
 def send_welcome_email(name: str, email: str):
+    hero = f'''
+        <tr>
+          <td style="padding:0;text-align:center;line-height:0">
+            <img src="{IMG_WELCOME}" width="580" alt="Majo Gadgets" style="display:block;width:100%;max-width:580px;height:auto;margin:0 auto" />
+          </td>
+        </tr>
+    '''
     body = f'''
       <div style="text-align:center;margin-bottom:24px">
-        <img src="{IMG_CART}" width="56" height="56" alt="" style="display:block;margin:0 auto 12px" />
         <h2 style="margin:0 0 6px;font-size:22px;color:#111111">Welcome aboard, {name}!</h2>
         <p style="margin:0;font-size:14px;color:#333333">Your account has been created successfully</p>
       </div>
       <p style="margin:0 0 20px;font-size:15px;color:#111111;line-height:1.7">
         We&#39;re thrilled to have you join the <strong>Majo Gadgets</strong> family. You&#39;re all set to start shopping.
       </p>
-      <div style="background:#ffffff;border:1px solid #E2E8F0;border-radius:10px;padding:16px 20px;margin-bottom:28px">
+      <div style="padding:16px 20px;margin-bottom:28px">
         {_info_row(ICO_CHECK,    'Browse hundreds of quality gadgets')}
         {_info_row(ICO_STAR,     'Grab flash deals and exclusive offers')}
         {_info_row(ICO_HEART,    'Save your favourite items to your wishlist')}
         {_info_row(ICO_TRUCK,    'Fast and reliable delivery to your doorstep')}
       </div>
-      <a href="{settings.FRONTEND_URL}" style="display:inline-block;padding:14px 32px;background:#F59E0B !important;background-color:#F59E0B !important;color:#ffffff !important;border:1px solid #F59E0B;border-radius:8px;font-weight:700;font-size:15px;text-decoration:none !important">
-        Start Shopping &rarr;
-      </a>
+      <div style="text-align:center;margin:0 0 28px">
+        <a href="{settings.FRONTEND_URL}" style="display:inline-block;padding:14px 32px;background:#071A2B !important;background-color:#071A2B !important;color:#ffffff !important;border:1px solid #071A2B;border-radius:0;font-weight:700;font-size:15px;text-decoration:none !important">
+          Start Shopping &rarr;
+        </a>
+      </div>
       <p style="margin:28px 0 0;font-size:13px;color:#333333">If you have any questions, just reply to this email — we&#39;re always happy to help.</p>
     '''
-    _send({'from': FROM, 'to': email, 'subject': 'Welcome to Majo Gadgets!', 'html': _wrap(body)})
+    _send({'from': FROM, 'to': email, 'subject': 'Welcome to Majo Gadgets!', 'html': _wrap(body, hero=hero)})
 
 
 def send_admin_new_order_email(order_code: str, customer_name: str, customer_email: str, total: str, items: list, delivery_address: str):
@@ -213,7 +181,7 @@ def send_admin_new_order_email(order_code: str, customer_name: str, customer_ema
         <p style="margin:0;font-size:14px;color:#333333">A customer just placed an order.</p>
       </div>
 
-      <div style="background:#ffffff;border:1px solid #E2E8F0;border-radius:10px;padding:16px 20px;margin-bottom:24px">
+      <div style="padding:16px 20px;margin-bottom:24px">
         <p style="margin:0 0 2px;font-size:11px;font-weight:700;color:#333333;text-transform:uppercase;letter-spacing:0.5px">Order Code</p>
         <p style="margin:0 0 12px;font-size:22px;font-weight:800;color:#111111;letter-spacing:1.5px">{order_code}</p>
         <p style="margin:0 0 2px;font-size:11px;font-weight:700;color:#333333;text-transform:uppercase;letter-spacing:0.5px">Customer</p>
@@ -231,9 +199,11 @@ def send_admin_new_order_email(order_code: str, customer_name: str, customer_ema
         </table>
       </div>
 
-      <a href="{admin_url}" style="display:inline-block;padding:14px 32px;background:#071A2B !important;background-color:#071A2B !important;color:#ffffff !important;border:1px solid #071A2B;border-radius:8px;font-weight:700;font-size:15px;text-decoration:none !important">
-        View &amp; Confirm Order &rarr;
-      </a>
+      <div style="text-align:center">
+        <a href="{admin_url}" style="display:inline-block;padding:14px 32px;background:#071A2B !important;background-color:#071A2B !important;color:#ffffff !important;border:1px solid #071A2B;border-radius:0;font-weight:700;font-size:15px;text-decoration:none !important">
+          View &amp; Confirm Order &rarr;
+        </a>
+      </div>
       <p style="margin:16px 0 0;font-size:13px;color:#333333">Or track it at: <a href="{settings.FRONTEND_URL}/orders/{order_code}" style="color:#1E3A8A !important">{settings.FRONTEND_URL}/orders/{order_code}</a></p>
     '''
     _send({'from': FROM, 'to': settings.ADMIN_EMAIL, 'subject': f'New Order #{order_code} — UGX {total}', 'html': _wrap(body)})
@@ -254,9 +224,7 @@ def send_order_placed_email(name: str, email: str, order_code: str, total: str, 
         We&#39;ll notify you once it&#39;s confirmed and being prepared for shipment.
       </p>
 
-      {_progress_bar('pending')}
-
-      <div style="background:#ffffff;border:1px solid #E2E8F0;border-radius:10px;padding:16px 20px;margin-bottom:24px">
+      <div style="padding:16px 20px;margin-bottom:24px">
         <p style="margin:0 0 2px;font-size:11px;font-weight:700;color:#333333;text-transform:uppercase;letter-spacing:0.5px">Order Code</p>
         <p style="margin:0 0 12px;font-size:22px;font-weight:800;color:#111111;letter-spacing:1.5px">{order_code}</p>
         <p style="margin:0 0 2px;font-size:11px;font-weight:700;color:#333333;text-transform:uppercase;letter-spacing:0.5px">Delivering To</p>
@@ -275,19 +243,18 @@ def send_order_placed_email(name: str, email: str, order_code: str, total: str, 
       <p style="margin:0 0 12px;font-size:15px;color:#111111;line-height:1.7">Thank you for shopping with Majo Gadgets!</p>
       <p style="margin:0;font-size:13px;color:#333333;line-height:1.6">— The Majo Gadgets Team</p>
     '''
-    _send({'from': FROM, 'to': email, 'subject': f'Order Placed — #{order_code}', 'html': _wrap(body)})
+    _send({'from': FROM, 'to': email, 'subject': f'Order Placed — #{order_code}', 'html': _wrap(body, hero=_status_hero('pending'))})
 
 
 def send_order_confirmed_email(name: str, email: str, order_code: str, total: str, items: list, delivery_address: str):
     body = f'''
       <div style="text-align:center;margin-bottom:24px">
-        {_circle_icon(ICO_CHECK, '#ECFDF5', '#059669')}
         <h2 style="margin:0 0 6px;font-size:22px;color:#111111">Order Confirmed!</h2>
         <p style="margin:0;font-size:14px;color:#333333">Hi <strong>{name}</strong>,</p>
       </div>
 
       <p style="margin:0 0 16px;font-size:15px;color:#475569;line-height:1.7">
-        Great news! 🎉 Your order <strong>#{order_code}</strong> has been confirmed.
+        Great news! Your order <strong>#{order_code}</strong> has been confirmed.
       </p>
       <p style="margin:0 0 16px;font-size:15px;color:#475569;line-height:1.7">
         We’re now preparing your items for shipment.
@@ -299,9 +266,7 @@ def send_order_confirmed_email(name: str, email: str, order_code: str, total: st
         We’ll keep you updated as your order moves through the delivery process.
       </p>
 
-      {_progress_bar('processing')}
-
-      <div style="background:#ffffff;border:1px solid #E2E8F0;border-radius:10px;padding:16px 20px;margin-bottom:24px">
+      <div style="padding:16px 20px;margin-bottom:24px">
         <p style="margin:0 0 2px;font-size:11px;font-weight:700;color:#94A3B8;text-transform:uppercase;letter-spacing:0.5px">Order Code</p>
         <p style="margin:0 0 12px;font-size:22px;font-weight:800;color:#0F172A;letter-spacing:1.5px">{order_code}</p>
         <p style="margin:0 0 2px;font-size:11px;font-weight:700;color:#94A3B8;text-transform:uppercase;letter-spacing:0.5px">Delivering To</p>
@@ -317,24 +282,21 @@ def send_order_confirmed_email(name: str, email: str, order_code: str, total: st
         </table>
       </div>
 
-      <p style="margin:0 0 12px;font-size:15px;color:#475569;line-height:1.7">Thank you for shopping with Majo Gadgets! 🛍️</p>
+      <p style="margin:0 0 12px;font-size:15px;color:#475569;line-height:1.7">Thank you for shopping with Majo Gadgets! {_icon(ICO_SHOPPING, '#475569', 16)}</p>
       <p style="margin:0;font-size:13px;color:#94A3B8;line-height:1.6">— The Majo Gadgets Team</p>
     '''
-    _send({'from': FROM, 'to': email, 'subject': f'Order Confirmed — #{order_code}', 'html': _wrap(body)})
+    _send({'from': FROM, 'to': email, 'subject': f'Order Confirmed — #{order_code}', 'html': _wrap(body, hero=_status_hero('processing'))})
 
 
 def send_order_shipped_email(name: str, email: str, order_code: str, delivery_address: str):
     safe_address = (delivery_address or '').replace('{', '{{').replace('}', '}}')
     body = f'''
       <div style="text-align:center;margin-bottom:24px">
-        {_circle_icon(ICO_TRUCK, '#DCFCE7', '#16A34A')}
         <h2 style="margin:0 0 6px;font-size:22px;color:#0F172A">Your Order is On Its Way!</h2>
         <p style="margin:0;font-size:14px;color:#64748B">Hi <strong>{name}</strong>, your package has been shipped and is heading to you.</p>
       </div>
 
-      {_progress_bar('shipped')}
-
-      <div style="background:#ffffff;border:1px solid #E2E8F0;border-radius:10px;padding:16px 20px;margin-bottom:24px">
+      <div style="padding:16px 20px;margin-bottom:24px">
         <p style="margin:0 0 2px;font-size:11px;font-weight:700;color:#94A3B8;text-transform:uppercase;letter-spacing:0.5px">Order Code</p>
         <p style="margin:0 0 12px;font-size:22px;font-weight:800;color:#0F172A;letter-spacing:1.5px">{order_code}</p>
         <p style="margin:0 0 2px;font-size:11px;font-weight:700;color:#94A3B8;text-transform:uppercase;letter-spacing:0.5px">Delivering To</p>
@@ -347,20 +309,17 @@ def send_order_shipped_email(name: str, email: str, order_code: str, delivery_ad
 
       <p style="margin:0;font-size:13px;color:#94A3B8;line-height:1.6">If you have any questions about your delivery, reply to this email and we&#39;ll be happy to help.</p>
     '''
-    _send({'from': FROM, 'to': email, 'subject': f'Your Order is Shipped — #{order_code}', 'html': _wrap(body)})
+    _send({'from': FROM, 'to': email, 'subject': f'Your Order is Shipped — #{order_code}', 'html': _wrap(body, hero=_status_hero('shipped'))})
 
 
 def send_order_ready_for_pickup_email(name: str, email: str, order_code: str, pickup_address: str = ''):
     body = f'''
       <div style="text-align:center;margin-bottom:24px">
-        {_circle_icon(ICO_MAP_PIN, '#FEF3C7', '#F59E0B')}
         <h2 style="margin:0 0 6px;font-size:22px;color:#0F172A">Your Order is Ready for Pickup!</h2>
         <p style="margin:0;font-size:14px;color:#64748B">Hi <strong>{name}</strong>, your order is waiting for you.</p>
       </div>
 
-      {_progress_bar('ready_for_pickup')}
-
-      <div style="background:#ffffff;border:1px solid #E2E8F0;border-radius:10px;padding:16px 20px;margin-bottom:24px">
+      <div style="padding:16px 20px;margin-bottom:24px">
         <p style="margin:0 0 2px;font-size:11px;font-weight:700;color:#94A3B8;text-transform:uppercase;letter-spacing:0.5px">Order Code</p>
         <p style="margin:0 0 12px;font-size:22px;font-weight:800;color:#0F172A;letter-spacing:1.5px">{order_code}</p>
         {f'<p style="margin:0 0 2px;font-size:11px;font-weight:700;color:#94A3B8;text-transform:uppercase;letter-spacing:0.5px">Pickup Location</p><p style="margin:0 0 16px;font-size:13px;color:#334155">{pickup_address}</p>' if pickup_address else ''}
@@ -372,7 +331,7 @@ def send_order_ready_for_pickup_email(name: str, email: str, order_code: str, pi
 
       <p style="margin:0;font-size:13px;color:#94A3B8;line-height:1.6">If you have any questions, reply to this email and we&#39;ll be happy to help.</p>
     '''
-    _send({'from': FROM, 'to': email, 'subject': f'Your Order is Ready for Pickup — #{order_code}', 'html': _wrap(body)})
+    _send({'from': FROM, 'to': email, 'subject': f'Your Order is Ready for Pickup — #{order_code}', 'html': _wrap(body, hero=_status_hero('ready_for_pickup'))})
 
 
 def send_order_delivered_email(name: str, email: str, order_code: str, total: str = '', items: list | None = None, delivery_address: str = ''):
@@ -380,13 +339,12 @@ def send_order_delivered_email(name: str, email: str, order_code: str, total: st
     item_rows = _item_rows(items) if items else ''
     body = f'''
       <div style="text-align:center;margin-bottom:24px">
-        {_circle_icon(ICO_CHECK, '#ECFDF5', '#059669')}
         <h2 style="margin:0 0 6px;font-size:22px;color:#0F172A">Order Delivered!</h2>
         <p style="margin:0;font-size:14px;color:#64748B">Hi <strong>{name}</strong>,</p>
       </div>
 
       <p style="margin:0 0 16px;font-size:15px;color:#475569;line-height:1.7">
-        Your order <strong>#{order_code}</strong> has been delivered! 🎉📦
+        Your order <strong>#{order_code}</strong> has been delivered!
       </p>
       <p style="margin:0 0 16px;font-size:15px;color:#475569;line-height:1.7">
         We hope you enjoy your new purchase from Majo Gadgets.
@@ -395,12 +353,10 @@ def send_order_delivered_email(name: str, email: str, order_code: str, total: st
         Thank you for trusting us with your order. We truly appreciate your support and hope to see you again soon.
       </p>
       <p style="margin:0 0 24px;font-size:15px;color:#475569;line-height:1.7">
-        Enjoy your new gadget! ❤️
+        Enjoy your new gadget!
       </p>
 
-      {_progress_bar('delivered')}
-
-      <div style="background:#ffffff;border:1px solid #E2E8F0;border-radius:10px;padding:16px 20px;margin-bottom:24px">
+      <div style="padding:16px 20px;margin-bottom:24px">
         <p style="margin:0 0 2px;font-size:11px;font-weight:700;color:#94A3B8;text-transform:uppercase;letter-spacing:0.5px">Order Code</p>
         <p style="margin:0 0 12px;font-size:22px;font-weight:800;color:#0F172A;letter-spacing:1.5px">{order_code}</p>
         <p style="margin:0 0 2px;font-size:11px;font-weight:700;color:#94A3B8;text-transform:uppercase;letter-spacing:0.5px">Your Items</p>
@@ -414,10 +370,12 @@ def send_order_delivered_email(name: str, email: str, order_code: str, total: st
       </div>
 
       <p style="margin:0 0 20px;font-size:15px;color:#475569;line-height:1.7">Enjoyed your experience? Please take a moment to rate your order — it helps us serve you better.</p>
-      <a href="{settings.FRONTEND_URL}/rate/{order_code}" style="display:inline-block;padding:14px 32px;background:#F59E0B !important;background-color:#F59E0B !important;color:#ffffff !important;border:1px solid #F59E0B;border-radius:8px;font-weight:700;font-size:15px;text-decoration:none !important;line-height:1.4;vertical-align:middle">Rate Your Order</a>
+      <div style="text-align:center">
+        <a href="{settings.FRONTEND_URL}/rate/{order_code}" style="display:inline-block;padding:14px 32px;background:#071A2B !important;background-color:#071A2B !important;color:#ffffff !important;border:1px solid #071A2B;border-radius:0;font-weight:700;font-size:15px;text-decoration:none !important;line-height:1.4;vertical-align:middle">Rate Your Order</a>
+      </div>
       <p style="margin:28px 0 0;font-size:13px;color:#94A3B8;line-height:1.6">— The Majo Gadgets Team</p>
     '''
-    _send({'from': FROM, 'to': email, 'subject': f'Order Delivered — #{order_code}', 'html': _wrap(body)})
+    _send({'from': FROM, 'to': email, 'subject': f'Order Delivered — #{order_code}', 'html': _wrap(body, hero=_status_hero('delivered'))})
 
 
 def send_product_rating_email(name: str, email: str, order_code: str, items: list):
@@ -437,26 +395,25 @@ def send_product_rating_email(name: str, email: str, order_code: str, items: lis
           <td style="padding:12px 0;border-bottom:1px solid #F1F5F9;vertical-align:middle;width:68px">{img_html}</td>
           <td style="padding:12px 12px;border-bottom:1px solid #F1F5F9;vertical-align:middle">
             <p style="margin:0 0 6px;font-size:13px;font-weight:600;color:#0F172A">{item["name"]}</p>
-            <a href="{rate_url}" style="display:inline-block;padding:6px 16px;background:#F59E0B !important;background-color:#F59E0B !important;color:#ffffff !important;border-radius:6px;font-weight:700;font-size:12px;text-decoration:none !important">Rate Product ★</a>
+            <div style="text-align:center"><a href="{rate_url}" style="display:inline-block;padding:6px 16px;background:#071A2B !important;background-color:#071A2B !important;color:#ffffff !important;border-radius:0;font-weight:700;font-size:12px;text-decoration:none !important">Rate Product</a></div>
           </td>
         </tr>'''
 
     body = f'''
       <div style="text-align:center;margin-bottom:24px">
-        {_circle_icon(ICO_STAR, '#FEF3C7', '#F59E0B')}
         <h2 style="margin:0 0 6px;font-size:22px;color:#0F172A">How were your products?</h2>
         <p style="margin:0;font-size:14px;color:#64748B">Hi <strong>{name}</strong>, your order <strong>#{order_code}</strong> has been delivered!</p>
       </div>
       <p style="margin:0 0 20px;font-size:15px;color:#475569;line-height:1.7">
         We'd love to know what you think about the products you received. Your review helps other customers make better choices.
       </p>
-      <div style="background:#ffffff;border:1px solid #E2E8F0;border-radius:10px;padding:16px 20px;margin-bottom:28px">
+      <div style="padding:16px 20px;margin-bottom:28px">
         <p style="margin:0 0 12px;font-size:11px;font-weight:700;color:#94A3B8;text-transform:uppercase;letter-spacing:0.5px">Your Items</p>
         <table width="100%" cellpadding="0" cellspacing="0">
           {item_blocks}
         </table>
       </div>
-      <p style="margin:0;font-size:13px;color:#94A3B8;line-height:1.6">Thank you for shopping with Majo Gadgets! ❤️</p>
+      <p style="margin:0;font-size:13px;color:#94A3B8;line-height:1.6">Thank you for shopping with Majo Gadgets!</p>
     '''
     _send({'from': FROM, 'to': email, 'subject': f'Rate your products from order #{order_code}', 'html': _wrap(body)})
 
@@ -464,13 +421,12 @@ def send_product_rating_email(name: str, email: str, order_code: str, items: lis
 def send_order_rating_email(name: str, email: str, order_code: str, rating_url: str):
     body = f'''
       <div style="text-align:center;margin-bottom:24px">
-        {_circle_icon(ICO_STAR, '#FEF3C7', '#F59E0B')}
         <h2 style="margin:0 0 6px;font-size:22px;color:#0F172A">Rate Your Experience</h2>
         <p style="margin:0;font-size:14px;color:#64748B">Hi <strong>{name}</strong>,</p>
       </div>
 
       <p style="margin:0 0 16px;font-size:15px;color:#475569;line-height:1.7">
-        We’d love to hear about your experience with Majo Gadgets! ⭐
+        We’d love to hear about your experience with Majo Gadgets.
       </p>
       <p style="margin:0 0 16px;font-size:15px;color:#475569;line-height:1.7">
         Your order <strong>#{order_code}</strong> has been delivered, and we’d appreciate it if you could take a moment to rate the <strong>service and delivery experience</strong>.
@@ -480,12 +436,12 @@ def send_order_rating_email(name: str, email: str, order_code: str, rating_url: 
       </p>
 
       <div style="text-align:center;margin-bottom:28px">
-        <a href="{rating_url}" style="display:inline-block;padding:14px 40px;background:#F59E0B !important;background-color:#F59E0B !important;color:#ffffff !important;border:1px solid #F59E0B;border-radius:8px;font-weight:700;font-size:15px;text-decoration:none !important">
+        <a href="{rating_url}" style="display:inline-block;padding:14px 40px;background:#071A2B !important;background-color:#071A2B !important;color:#ffffff !important;border:1px solid #071A2B;border-radius:0;font-weight:700;font-size:15px;text-decoration:none !important">
           Rate your experience
         </a>
       </div>
 
-      <p style="margin:0 0 12px;font-size:15px;color:#475569;line-height:1.7">Thank you for shopping with Majo Gadgets! ❤️</p>
+      <p style="margin:0 0 12px;font-size:15px;color:#475569;line-height:1.7">Thank you for shopping with Majo Gadgets!</p>
       <p style="margin:0;font-size:13px;color:#94A3B8;line-height:1.6">— The Majo Gadgets Team</p>
     '''
     _send({'from': FROM, 'to': email, 'subject': f'Rate Your Experience — #{order_code}', 'html': _wrap(body)})
@@ -494,18 +450,19 @@ def send_order_rating_email(name: str, email: str, order_code: str, rating_url: 
 def send_order_cancelled_email(name: str, email: str, order_code: str, reason: str):
     body = f'''
       <div style="text-align:center;margin-bottom:24px">
-        {_circle_icon(ICO_X_CIRCLE, '#FEF2F2', '#DC2626')}
         <h2 style="margin:0 0 6px;font-size:22px;color:#0F172A">Order Cancelled</h2>
         <p style="margin:0;font-size:14px;color:#64748B">Hi <strong>{name}</strong>, your order <strong>#{order_code}</strong> has been cancelled.</p>
       </div>
 
-      <div style="background:#ffffff;border:1px solid #E2E8F0;border-radius:10px;padding:16px 20px;margin-bottom:24px">
+      <div style="padding:16px 20px;margin-bottom:24px">
         <p style="margin:0 0 4px;font-size:11px;font-weight:700;color:#94A3B8;text-transform:uppercase;letter-spacing:0.5px">Cancellation Reason</p>
         <p style="margin:0;font-size:14px;color:#334155;line-height:1.6">{reason}</p>
       </div>
 
       <p style="margin:0 0 24px;font-size:15px;color:#475569;line-height:1.7">If you believe this was a mistake or need further assistance, please don't hesitate to contact us.</p>
-      <a href="{settings.FRONTEND_URL}" style="display:inline-block;padding:14px 32px;background:#F59E0B !important;background-color:#F59E0B !important;color:#ffffff !important;border:1px solid #F59E0B;border-radius:8px;font-weight:700;font-size:15px;text-decoration:none !important;line-height:1.4;vertical-align:middle">Continue Shopping &rarr;</a>
+      <div style="text-align:center">
+        <a href="{settings.FRONTEND_URL}" style="display:inline-block;padding:14px 32px;background:#071A2B !important;background-color:#071A2B !important;color:#ffffff !important;border:1px solid #071A2B;border-radius:0;font-weight:700;font-size:15px;text-decoration:none !important;line-height:1.4;vertical-align:middle">Continue Shopping &rarr;</a>
+      </div>
       <p style="margin:28px 0 0;font-size:13px;color:#94A3B8;line-height:1.6">We hope to serve you again soon. Thank you for choosing Majo Gadgets.</p>
     '''
     _send({'from': FROM, 'to': email, 'subject': f'Order Cancelled — #{order_code}', 'html': _wrap(body)})
@@ -514,21 +471,20 @@ def send_order_cancelled_email(name: str, email: str, order_code: str, reason: s
 def send_password_reset_email(name: str, email: str, reset_url: str):
     body = f'''
       <div style="text-align:center;margin-bottom:28px">
-        {_circle_icon(ICO_LOCK, '#DCFCE7', '#16A34A')}
         <h2 style="margin:0 0 8px;font-size:22px;color:#0F172A">Password Reset Request</h2>
         <p style="margin:0;font-size:14px;color:#64748B">We received a request to reset your password</p>
       </div>
       <p style="margin:0 0 16px;font-size:15px;color:#475569;line-height:1.7">
         Hi <strong>{name}</strong>, no worries — it happens to the best of us! Click the button below to create a new password for your Majo Gadgets account.
       </p>
-      <div style="background:#ffffff;border:1px solid #E2E8F0;border-radius:10px;padding:20px;margin-bottom:28px">
+      <div style="padding:20px;margin-bottom:28px">
         <p style="margin:0 0 10px;font-size:12px;font-weight:700;color:#94A3B8;text-transform:uppercase;letter-spacing:0.5px">Security Notice</p>
         {_info_row(ICO_CLOCK, 'This link expires in <strong>1 hour</strong>', '#475569')}
         {_info_row(ICO_LOCK,  'For your security, this link can only be used once', '#475569')}
         {_info_row(ICO_MAIL,  'Only you should have access to this email', '#475569')}
       </div>
       <div style="text-align:center;margin-bottom:28px">
-        <a href="{reset_url}" style="display:inline-block;padding:14px 40px;background:#F59E0B !important;background-color:#F59E0B !important;color:#ffffff !important;border:1px solid #F59E0B;border-radius:8px;font-weight:700;font-size:15px;text-decoration:none !important">
+        <a href="{reset_url}" style="display:inline-block;padding:14px 40px;background:#071A2B !important;background-color:#071A2B !important;color:#ffffff !important;border:1px solid #071A2B;border-radius:0;font-weight:700;font-size:15px;text-decoration:none !important">
           Reset My Password &rarr;
         </a>
       </div>
@@ -542,14 +498,13 @@ def send_password_reset_email(name: str, email: str, reset_url: str):
 def send_password_changed_email(name: str, email: str):
     body = f'''
       <div style="text-align:center;margin-bottom:28px">
-        {_circle_icon(ICO_LOCK, '#ECFDF5', '#059669')}
         <h2 style="margin:0 0 8px;font-size:22px;color:#0F172A">Password Changed</h2>
         <p style="margin:0;font-size:14px;color:#64748B">Your account password was successfully updated</p>
       </div>
       <p style="margin:0 0 16px;font-size:15px;color:#475569;line-height:1.7">
         Hi <strong>{name}</strong>, this is a confirmation that the password for your Majo Gadgets account has just been changed.
       </p>
-      <div style="background:#ffffff;border:1px solid #E2E8F0;border-radius:10px;padding:20px;margin-bottom:28px">
+      <div style="padding:20px;margin-bottom:28px">
         <p style="margin:0 0 10px;font-size:12px;font-weight:700;color:#94A3B8;text-transform:uppercase;letter-spacing:0.5px">Security Notice</p>
         {_info_row(ICO_CHECK, 'Your password was changed successfully', '#475569')}
         {_info_row(ICO_LOCK,  'If you made this change, no further action is needed', '#475569')}
@@ -564,15 +519,13 @@ def send_payment_successful_email(name: str, email: str, order_code: str, total:
     method_line = f'<p style="margin:0 0 12px;font-size:13px;color:#334155"><strong>Payment method:</strong> {payment_method}</p>' if payment_method else ''
     body = f'''
       <div style="text-align:center;margin-bottom:24px">
-        {_circle_icon(ICO_CHECK, '#DCFCE7', '#16A34A')}
-        <h2 style="margin:0 0 6px;font-size:22px;color:#0F172A">Payment Received! 🎉</h2>
+        <h2 style="margin:0 0 6px;font-size:22px;color:#0F172A">Payment Received!</h2>
         <p style="margin:0;font-size:14px;color:#64748B">Hi <strong>{name}</strong>, your payment was successful.</p>
       </div>
       <p style="margin:0 0 16px;font-size:15px;color:#475569;line-height:1.7">
         We've received your payment for order <strong>#{order_code}</strong>. Your order is now confirmed and being prepared.
       </p>
-      {_progress_bar('processing')}
-      <div style="background:#ffffff;border:1px solid #E2E8F0;border-radius:10px;padding:16px 20px;margin-bottom:24px">
+      <div style="padding:16px 20px;margin-bottom:24px">
         <p style="margin:0 0 2px;font-size:11px;font-weight:700;color:#94A3B8;text-transform:uppercase;letter-spacing:0.5px">Order Code</p>
         <p style="margin:0 0 12px;font-size:22px;font-weight:800;color:#0F172A;letter-spacing:1.5px">{order_code}</p>
         {method_line}
@@ -586,22 +539,23 @@ def send_payment_successful_email(name: str, email: str, order_code: str, total:
           </tr>
         </table>
       </div>
-      <a href="{settings.FRONTEND_URL}/orders/{order_code}" style="display:inline-block;padding:14px 32px;background:#1E3A8A !important;background-color:#1E3A8A !important;color:#ffffff !important;border:1px solid #1E3A8A;border-radius:8px;font-weight:700;font-size:15px;text-decoration:none !important">
-        Track Your Order &rarr;
-      </a>
-      <p style="margin:28px 0 0;font-size:13px;color:#94A3B8">Thank you for shopping with Majo Gadgets! ❤️</p>
+      <div style="text-align:center">
+        <a href="{settings.FRONTEND_URL}/orders/{order_code}" style="display:inline-block;padding:14px 32px;background:#071A2B !important;background-color:#071A2B !important;color:#ffffff !important;border:1px solid #071A2B;border-radius:0;font-weight:700;font-size:15px;text-decoration:none !important">
+          Track Your Order &rarr;
+        </a>
+      </div>
+      <p style="margin:28px 0 0;font-size:13px;color:#94A3B8">Thank you for shopping with Majo Gadgets!</p>
     '''
-    _send({'from': FROM, 'to': email, 'subject': f'Payment Confirmed — Order #{order_code}', 'html': _wrap(body)})
+    _send({'from': FROM, 'to': email, 'subject': f'Payment Confirmed — Order #{order_code}', 'html': _wrap(body, hero=_status_hero('processing'))})
 
 
 def send_payment_failed_email(name: str, email: str, order_code: str, total: str, reason: str = 'failed'):
     body = f'''
       <div style="text-align:center;margin-bottom:24px">
-        {_circle_icon(ICO_X_CIRCLE, '#FEF2F2', '#DC2626')}
         <h2 style="margin:0 0 6px;font-size:22px;color:#0F172A">Payment Unsuccessful</h2>
         <p style="margin:0;font-size:14px;color:#64748B">Hi <strong>{name}</strong>, your payment for order <strong>#{order_code}</strong> did not go through.</p>
       </div>
-      <div style="background:#FEF2F2;border:1px solid #FECACA;border-radius:10px;padding:16px 20px;margin-bottom:24px">
+      <div style="padding:16px 20px;margin-bottom:24px">
         <p style="margin:0 0 4px;font-size:11px;font-weight:700;color:#94A3B8;text-transform:uppercase;letter-spacing:0.5px">Reason</p>
         <p style="margin:0;font-size:14px;color:#DC2626;font-weight:600">Payment {reason}</p>
       </div>
@@ -611,19 +565,59 @@ def send_payment_failed_email(name: str, email: str, order_code: str, total: str
       <p style="margin:0 0 24px;font-size:15px;color:#475569;line-height:1.7">
         You can place a new order and try again. If you keep experiencing issues, please contact us.
       </p>
-      <a href="{settings.FRONTEND_URL}/shop" style="display:inline-block;padding:14px 32px;background:#F59E0B !important;background-color:#F59E0B !important;color:#ffffff !important;border:1px solid #F59E0B;border-radius:8px;font-weight:700;font-size:15px;text-decoration:none !important">
-        Shop Again &rarr;
-      </a>
+      <div style="text-align:center">
+        <a href="{settings.FRONTEND_URL}/shop" style="display:inline-block;padding:14px 32px;background:#071A2B !important;background-color:#071A2B !important;color:#ffffff !important;border:1px solid #071A2B;border-radius:0;font-weight:700;font-size:15px;text-decoration:none !important">
+          Shop Again &rarr;
+        </a>
+      </div>
       <p style="margin:28px 0 0;font-size:13px;color:#94A3B8">Need help? Reply to this email and we'll sort it out.</p>
     '''
     _send({'from': FROM, 'to': email, 'subject': f'Payment Failed — Order #{order_code}', 'html': _wrap(body)})
+
+
+def send_return_approved_email(email: str, order_code: str):
+    safe_order_code = escape(order_code)
+    body = f'''
+      <div style="text-align:center;margin-bottom:24px">
+        <h2 style="margin:0 0 6px;font-size:22px;color:#0F172A">Your Return Request Has Been Approved!</h2>
+      </div>
+      <p style="margin:0 0 16px;font-size:15px;color:#475569;line-height:1.7">
+        Hi there!
+      </p>
+      <p style="margin:0 0 16px;font-size:13px;color:#64748B;line-height:1.7">
+        Good news! Your return request for order <strong>#{safe_order_code}</strong> has been reviewed and approved. We’ll guide you through the next steps to ensure your return process is as smooth and convenient as possible.
+      </p>
+      <p style="margin:0 0 16px;font-size:13px;color:#64748B;line-height:1.7">Thank you for your patience and for giving us the opportunity to make things right. We truly appreciate your trust in Majo Gadgets!</p>
+      <p style="margin:24px 0 0;font-size:14px;color:#334155;font-weight:700">Thank you for choosing Majo Gadgets — your next great upgrade awaits!</p>
+    '''
+    _send({'from': FROM, 'to': email, 'subject': f'Return Request Approved — Order #{safe_order_code}', 'html': _wrap(body)})
+
+
+def send_refund_processed_email(email: str, order_code: str):
+    safe_order_code = escape(order_code)
+    body = f'''
+      <div style="text-align:center;margin-bottom:24px">
+        <h2 style="margin:0 0 6px;font-size:22px;color:#0F172A">Your Refund Has Been Successfully Processed!</h2>
+      </div>
+      <p style="margin:0 0 16px;font-size:15px;color:#475569;line-height:1.7">Hi there!</p>
+      <p style="margin:0 0 16px;font-size:15px;color:#475569;line-height:1.7">Good news! Your refund for order <strong>#{safe_order_code}</strong> has been processed and will be sent back through the same payment method you used when placing your order.</p>
+      <p style="margin:20px 0 8px;font-size:15px;color:#334155;font-weight:700">When will you receive your money?</p>
+      <ul style="margin:0 0 16px;padding-left:22px;font-size:14px;color:#475569;line-height:1.8">
+        <li><strong>Mobile Money:</strong> Please allow 1–3 business days for the refund to reflect in your account.</li>
+        <li><strong>Card Payments:</strong> Please allow 4–7 business days for the refund to reflect in your account.</li>
+      </ul>
+      <p style="margin:0 0 16px;font-size:13px;color:#64748B;line-height:1.7">Please note that the actual time may depend on your payment provider. Weekends and public holidays are not counted as business days.</p>
+      <p style="margin:0 0 16px;font-size:13px;color:#64748B;line-height:1.7">Thank you for your patience and understanding. We’re sorry things didn’t work out as expected, and we appreciate the opportunity to serve you.</p>
+      <p style="margin:0 0 16px;font-size:13px;color:#64748B;line-height:1.7">We hope to welcome you back to Majo Gadgets soon for an even better shopping experience!</p>
+      <p style="margin:24px 0 0;font-size:14px;color:#334155;font-weight:700">Majo Gadgets — your next great upgrade awaits!</p>
+    '''
+    _send({'from': FROM, 'to': email, 'subject': f'Refund Processed — Order #{safe_order_code}', 'html': _wrap(body)})
 
 
 def send_trader_approved_email(name: str, email: str, business_name: str, trader_uuid: str):
     portal_url = f'{settings.FRONTEND_URL}/trader/{trader_uuid}'
     body = f'''
       <div style="text-align:center;margin-bottom:24px">
-        {_circle_icon(ICO_CHECK, '#DCFCE7', '#16A34A')}
         <h2 style="margin:0 0 6px;font-size:22px;color:#0F172A">Congratulations, {name}!</h2>
         <p style="margin:0;font-size:14px;color:#64748B">Your trader application has been approved</p>
       </div>
@@ -631,14 +625,16 @@ def send_trader_approved_email(name: str, email: str, business_name: str, trader
         We're excited to welcome <strong>{business_name}</strong> to the Majo Gadgets platform!
         Your application has been reviewed and approved by our team.
       </p>
-      <div style="background:#ffffff;border:1px solid #E2E8F0;border-radius:10px;padding:16px 20px;margin-bottom:28px">
+      <div style="padding:16px 20px;margin-bottom:28px">
         {_info_row(ICO_CHECK,   'List and sell your products on Majo Gadgets', '#334155')}
         {_info_row(ICO_SHOPPING,'Track your sales and revenue in real time', '#334155')}
         {_info_row(ICO_SETTINGS,'Manage your trader account from your portal', '#334155')}
       </div>
-      <a href="{portal_url}" style="display:inline-block;padding:14px 32px;background:#22C55E !important;background-color:#22C55E !important;color:#ffffff !important;border:1px solid #22C55E;border-radius:8px;font-weight:700;font-size:15px;text-decoration:none !important">
-        Open My Trader Portal &rarr;
-      </a>
+      <div style="text-align:center">
+        <a href="{portal_url}" style="display:inline-block;padding:14px 32px;background:#071A2B !important;background-color:#071A2B !important;color:#ffffff !important;border:1px solid #071A2B;border-radius:0;font-weight:700;font-size:15px;text-decoration:none !important">
+          Open My Trader Portal &rarr;
+        </a>
+      </div>
       <p style="margin:28px 0 0;font-size:13px;color:#94A3B8">If you have any questions, just reply to this email — we're always happy to help.</p>
     '''
     _send({'from': FROM, 'to': email, 'subject': f'Your Trader Application is Approved — {business_name}', 'html': _wrap(body)})

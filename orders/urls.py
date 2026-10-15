@@ -5,6 +5,8 @@ from .views import (
     AdminOrderListView, AdminOrderDetailView, AdminOrderConfirmView, AdminOrderCancelView,
     AdminOrderShipView, AdminOrderReadyForPickupView, AdminOrderDeliverView,
     InitiatePaymentView, PesapalIPNView, AdminPaymentsView,
+    AdminReturnRequestListView, AdminReturnRequestApproveView, AdminReturnRequestRejectView,
+    AdminReturnRequestRefundedView,
 )
 from .data_views import (
     ExportProductsView, ExportOrdersView, ExportUsersView,
@@ -26,7 +28,11 @@ urlpatterns = [
     path('', OrderListCreateView.as_view(), name='order-list'),
     path('returns/', ReturnRequestListView.as_view(), name='return-list'),
     path('admin/', AdminOrderListView.as_view(), name='admin-order-list'),
+    path('admin/returns/', AdminReturnRequestListView.as_view(), name='admin-return-list'),
     path('admin/payments/', AdminPaymentsView.as_view(), name='admin-payments'),
+    path('admin/returns/<int:pk>/approve/', AdminReturnRequestApproveView.as_view(), name='admin-return-approve'),
+    path('admin/returns/<int:pk>/reject/', AdminReturnRequestRejectView.as_view(), name='admin-return-reject'),
+    path('admin/returns/<int:pk>/refunded/', AdminReturnRequestRefundedView.as_view(), name='admin-return-refunded'),
     path('admin/<str:code>/', AdminOrderDetailView.as_view(), name='admin-order-detail'),
     path('admin/<str:code>/confirm/', AdminOrderConfirmView.as_view(), name='admin-order-confirm'),
     path('admin/<str:code>/cancel/', AdminOrderCancelView.as_view(), name='admin-order-cancel'),

@@ -98,5 +98,30 @@ class ReturnRequestSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = ReturnRequest
-        fields = ('id', 'order_code', 'reason', 'status', 'admin_note', 'created_at', 'updated_at')
-        read_only_fields = ('id', 'status', 'admin_note', 'created_at', 'updated_at')
+        fields = ('id', 'order_code', 'reason', 'status', 'admin_note', 'refund_amount', 'refund_reference', 'created_at', 'updated_at')
+        read_only_fields = ('id', 'status', 'admin_note', 'refund_amount', 'refund_reference', 'created_at', 'updated_at')
+
+
+class AdminReturnRequestSerializer(ReturnRequestSerializer):
+    customer_name = serializers.CharField(source='order.user.name', read_only=True)
+    customer_email = serializers.EmailField(source='order.user.email', read_only=True)
+    order_total = serializers.DecimalField(source='order.total', max_digits=10, decimal_places=2, read_only=True)
+    payment_status = serializers.SerializerMethodField()
+    payment_method = serializers.SerializerMethodField()
+
+    class Meta(ReturnRequestSerializer.Meta):
+        fields = ReturnRequestSerializer.Meta.fields + (
+            'customer_name', 'customer_email', 'order_total', 'payment_status', 'payment_method',
+        )
+
+    def get_payment_status(self, obj):
+        try:
+            return obj.order.payment.status
+        except Payment.DoesNotExist:
+            return None
+
+    def get_payment_method(self, obj):
+        try:
+            return obj.order.payment.payment_method
+        except Payment.DoesNotExist:
+            return ''

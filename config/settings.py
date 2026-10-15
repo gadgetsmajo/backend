@@ -170,6 +170,7 @@ TEXTBEE_DEVICE_ID = config('TEXTBEE_DEVICE_ID', default='')
 PESAPAL_CONSUMER_KEY = config('PESAPAL_CONSUMER_KEY', default='')
 PESAPAL_CONSUMER_SECRET = config('PESAPAL_CONSUMER_SECRET', default='')
 PESAPAL_BASE_URL = config('PESAPAL_BASE_URL', default='https://cybqa.pesapal.com/pesapalv3')  # sandbox default
+PESAPAL_REFUND_USERNAME = config('PESAPAL_REFUND_USERNAME', default='')
 PESAPAL_IPN_URL = config('PESAPAL_IPN_URL', default='')
 PESAPAL_CALLBACK_URL = config('PESAPAL_CALLBACK_URL', default='')
 
