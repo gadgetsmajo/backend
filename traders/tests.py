@@ -7,7 +7,7 @@ from rest_framework.test import APIClient
 
 from orders.models import Order, OrderItem
 from products.models import Category, Product, ProductReview
-from traders.models import TraderApplication, TraderFollower, TraderOrderItem
+from traders.models import TraderApplication, TraderFollower, TraderInventoryItem, TraderOrderItem, TraderProduct
 from users.models import User
 
 
@@ -121,3 +121,41 @@ class PublicTraderProfileTests(TestCase):
 
 		self.assertEqual(response.status_code, 200)
 		self.assertIsNone(response.data)
+
+
+class TraderInventoryStockSyncTests(TestCase):
+	def setUp(self):
+		self.user = User.objects.create_user(email='inventory-seller@example.com', name='Inventory Seller', password='Password123!')
+		self.trader = TraderApplication.objects.create(
+			full_name='Inventory Seller',
+			email=self.user.email,
+			phone='0700000000',
+			business_name='Inventory Test Store',
+			business_type='sole_proprietor',
+			location='Kampala',
+			product_categories='Electronics',
+			status='approved',
+			user=self.user,
+		)
+		self.product = TraderProduct.objects.create(
+			trader=self.trader,
+			name='Test Inventory Product',
+			price=25000,
+			stock=0,
+		)
+		self.client = APIClient()
+		self.client.force_authenticate(user=self.user)
+
+	def test_adding_inventory_quantity_updates_product_stock(self):
+		response = self.client.post(
+			reverse('trader-inventory', args=[self.trader.uuid]),
+			{'product': self.product.id, 'quantity': 12, 'cost_price': 15000},
+			format='json',
+		)
+
+		self.assertEqual(response.status_code, 201)
+		self.product.refresh_from_db()
+		inventory_item = TraderInventoryItem.objects.get(trader=self.trader, product=self.product)
+		self.assertEqual(inventory_item.quantity, 12)
+		self.assertEqual(self.product.stock, 12)
+		self.assertEqual(response.data['product_stock'], 12)

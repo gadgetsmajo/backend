@@ -527,6 +527,9 @@ class TraderInventoryListView(APIView):
         )
         if not created:
             return Response({'detail': 'Product already in inventory.'}, status=status.HTTP_400_BAD_REQUEST)
+        product.stock = item.quantity
+        product.save(update_fields=['stock'])
+        _sync_to_product(product)
         return Response(TraderInventoryItemSerializer(item).data, status=status.HTTP_201_CREATED)
 
 
@@ -587,6 +590,7 @@ class TraderStockMovementView(APIView):
         item.save(update_fields=['quantity', 'updated_at'])
         item.product.stock = max(0, item.product.stock + signed_qty)
         item.product.save(update_fields=['stock'])
+        _sync_to_product(item.product)
         return Response(TraderInventoryItemSerializer(item).data)
 
 
