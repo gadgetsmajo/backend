@@ -64,6 +64,28 @@ class PublicTraderProfileTests(TestCase):
 		self.assertEqual(response.status_code, 200)
 		self.assertEqual(response.data['seller_uuid'], str(self.trader.uuid))
 
+	def test_product_list_filter_returns_only_products_from_requested_seller(self):
+		other_trader = TraderApplication.objects.create(
+			full_name='Other Owner',
+			email='other-seller@example.com',
+			phone='0700000001',
+			business_name='Other Store',
+			business_type='sole_proprietor',
+			location='Jinja',
+			product_categories='Electronics',
+			status='approved',
+		)
+		other_product = Product.objects.create(
+			name='Other Seller Phone', category=self.category, price=100000, stock=2, trader=other_trader,
+		)
+
+		response = self.client.get(reverse('product-list'), {'seller': str(self.trader.uuid)})
+
+		self.assertEqual(response.status_code, 200)
+		product_ids = [item['id'] for item in response.data['results']]
+		self.assertIn(self.product.id, product_ids)
+		self.assertNotIn(other_product.id, product_ids)
+
 	def test_following_is_authenticated_and_idempotent(self):
 		url = reverse('trader-public-profile', args=[self.trader.uuid])
 		preflight = self.client.options(url, HTTP_ORIGIN='https://www.majogadgets.com', HTTP_ACCESS_CONTROL_REQUEST_METHOD='POST')
