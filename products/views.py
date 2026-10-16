@@ -67,7 +67,7 @@ class ProductListView(generics.ListCreateAPIView):
     ordering_fields = ('price', 'rating', 'created_at')
 
     def get_queryset(self):
-        qs = Product.objects.all().select_related('category').prefetch_related('images').order_by('-created_at')
+        qs = Product.objects.all().select_related('category', 'trader', 'trader_product__trader').prefetch_related('images').order_by('-created_at')
         category = self.request.query_params.get('category')
         if category:
             qs = qs.filter(category__slug=category)
@@ -92,7 +92,7 @@ class ProductListView(generics.ListCreateAPIView):
 
 
 class ProductDetailView(generics.RetrieveUpdateDestroyAPIView):
-    queryset = Product.objects.all().select_related('category').prefetch_related('images')
+    queryset = Product.objects.all().select_related('category', 'trader', 'trader_product__trader').prefetch_related('images')
     serializer_class = ProductSerializer
     permission_classes = (IsAdminOrReadOnly,)
 
@@ -155,7 +155,7 @@ class ProductImageDeleteView(APIView):
 
 
 class ProductSlugDetailView(generics.RetrieveAPIView):
-    queryset = Product.objects.all().select_related('category')
+    queryset = Product.objects.all().select_related('category', 'trader', 'trader_product__trader')
     serializer_class = ProductSerializer
     permission_classes = (IsAdminOrReadOnly,)
     lookup_field = 'slug'

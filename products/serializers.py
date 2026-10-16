@@ -72,18 +72,25 @@ class ProductSerializer(serializers.ModelSerializer):
     is_featured = serializers.BooleanField(required=False)
     is_new_deal = serializers.BooleanField(required=False)
     reviews_count = serializers.SerializerMethodField()
+    seller_uuid = serializers.SerializerMethodField()
 
     class Meta:
         model = Product
         fields = ('id', 'uuid', 'name', 'slug', 'category', 'category_id',
                   'price', 'original_price', 'image_url', 'images',
                   'short_description', 'long_description', 'delivery_fee',
-                  'rating', 'stock', 'is_active', 'is_featured', 'is_new_deal',
+                  'rating', 'stock', 'is_active', 'is_featured', 'is_new_deal', 'seller_uuid',
                   'created_at', 'reviews_count')
         read_only_fields = ('id', 'uuid', 'slug', 'rating', 'created_at')
 
     def get_reviews_count(self, obj):
         return obj.reviews.filter(status='published').count()
+
+    def get_seller_uuid(self, obj):
+        trader = obj.trader or (obj.trader_product.trader if obj.trader_product_id else None)
+        if not trader or trader.status != 'approved' or not trader.is_visible or trader.is_closed:
+            return None
+        return str(trader.uuid)
 
     def get_image_url(self, obj):
         if obj.image:

@@ -74,6 +74,17 @@ class TraderApplication(models.Model):
         return f'{self.business_name} — {self.status}'
 
 
+class TraderFollower(models.Model):
+    trader = models.ForeignKey(TraderApplication, on_delete=models.CASCADE, related_name='follower_records')
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='followed_traders')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=('trader', 'user'), name='unique_trader_follower'),
+        ]
+
+
 class TraderProduct(models.Model):
     uuid        = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
     trader      = models.ForeignKey(TraderApplication, on_delete=models.CASCADE, related_name='products')
@@ -191,6 +202,7 @@ class TraderOrderItem(models.Model):
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
         null=True, blank=True, related_name='trader_order_status_changes'
     )
+    ready_at          = models.DateTimeField(null=True, blank=True)
     updated_at        = models.DateTimeField(auto_now=True)
 
     class Meta:

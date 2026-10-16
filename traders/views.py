@@ -1,8 +1,13 @@
+from datetime import timedelta
+
+from django.db.models import Avg, Count, F, Q
+from orders.models import OrderItem
+from products.models import Product, ProductReview
 from rest_framework import generics, permissions, status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from django.utils import timezone
-from .models import TraderApplication, TraderProduct, TraderSale, TraderExpense, TraderOrderItem, TraderInventoryItem, TraderStockMovement
+from .models import TraderApplication, TraderFollower, TraderProduct, TraderSale, TraderExpense, TraderOrderItem, TraderInventoryItem, TraderStockMovement
 from .serializers import (
     TraderApplicationSerializer, TraderApplicationAdminSerializer,
     TraderProductSerializer, TraderSaleSerializer, TraderExpenseSerializer,
@@ -84,6 +89,103 @@ class TraderMeView(APIView):
             'email': applicant.email,
             'full_name': applicant.full_name,
         })
+
+
+class PublicTraderProfileView(APIView):
+    def get_permissions(self):
+        if self.request.method in ('GET', 'OPTIONS'):
+            return [permissions.AllowAny()]
+        return [permissions.IsAuthenticated()]
+
+    def get_trader(self, trader_uuid):
+        return TraderApplication.objects.filter(
+            uuid=trader_uuid,
+            status='approved',
+            is_visible=True,
+            is_closed=False,
+        ).first()
+
+    def get(self, request, trader_uuid):
+        trader = self.get_trader(trader_uuid)
+        if not trader:
+            return Response({'detail': 'Seller not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        seller_products = Q(product__trader=trader) | Q(product__trader_product__trader=trader)
+        review_stats = ProductReview.objects.filter(
+            seller_products,
+            status='published',
+        ).aggregate(
+            customer_rating=Avg('overall_rating'),
+            quality_rating=Avg('product_quality_rating'),
+            review_count=Count('id'),
+            quality_review_count=Count('product_quality_rating'),
+        )
+
+        order_items = OrderItem.objects.filter(
+            Q(product__trader=trader) | Q(product__trader_product__trader=trader)
+        ).filter(order__status__in=('delivered', 'cancelled'))
+        total_order_items = order_items.count()
+        cancelled_items = order_items.filter(order__status='cancelled').count()
+        cancellation_rate = round(cancelled_items * 100 / total_order_items, 1) if total_order_items else None
+
+        shipping = TraderOrderItem.objects.filter(trader=trader, ready_at__isnull=False).aggregate(
+            total=Count('id'),
+            within_48_hours=Count(
+                'id',
+                filter=Q(ready_at__lte=F('order_item__order__created_at') + timedelta(hours=48)),
+            ),
+        )
+        shipping_speed_score = (
+            round(shipping['within_48_hours'] * 100 / shipping['total'], 1)
+            if shipping['total'] else None
+        )
+
+        customer_rating = float(review_stats['customer_rating']) if review_stats['customer_rating'] is not None else None
+        quality_rating = float(review_stats['quality_rating']) if review_stats['quality_rating'] is not None else None
+        score_components = [
+            rating * 20 for rating in (customer_rating, quality_rating) if rating is not None
+        ]
+        if shipping_speed_score is not None:
+            score_components.append(shipping_speed_score)
+        if cancellation_rate is not None:
+            score_components.append(100 - cancellation_rate)
+
+        is_following = request.user.is_authenticated and TraderFollower.objects.filter(
+            trader=trader, user=request.user
+        ).exists()
+        return Response({
+            'uuid': str(trader.uuid),
+            'business_name': trader.business_name,
+            'location': trader.location,
+            'district': trader.district,
+            'bio': trader.bio,
+            'is_verified': True,
+            'follower_count': trader.follower_records.count(),
+            'is_following': is_following,
+            'customer_rating': customer_rating,
+            'review_count': review_stats['review_count'],
+            'quality_rating': quality_rating,
+            'quality_review_count': review_stats['quality_review_count'],
+            'shipping_speed_score': shipping_speed_score,
+            'shipping_sample_count': shipping['total'],
+            'cancellation_rate': cancellation_rate,
+            'order_item_count': total_order_items,
+            'seller_score': round(sum(score_components) / len(score_components), 1) if score_components else None,
+        })
+
+    def post(self, request, trader_uuid):
+        trader = self.get_trader(trader_uuid)
+        if not trader:
+            return Response({'detail': 'Seller not found.'}, status=status.HTTP_404_NOT_FOUND)
+        _, created = TraderFollower.objects.get_or_create(trader=trader, user=request.user)
+        return Response({'following': True, 'follower_count': trader.follower_records.count()}, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
+    def delete(self, request, trader_uuid):
+        trader = self.get_trader(trader_uuid)
+        if not trader:
+            return Response({'detail': 'Seller not found.'}, status=status.HTTP_404_NOT_FOUND)
+        TraderFollower.objects.filter(trader=trader, user=request.user).delete()
+        return Response({'following': False, 'follower_count': trader.follower_records.count()})
 
 
 # ── Trader: dashboard stats ───────────────────────────────────────────────────
@@ -567,7 +669,9 @@ class TraderOrderListView(APIView):
         # Find all order items whose product belongs to this trader's store products
         from orders.models import OrderItem
         from products.models import Product
-        trader_product_ids = Product.objects.filter(trader=trader).values_list('id', flat=True)
+        trader_product_ids = Product.objects.filter(
+            Q(trader=trader) | Q(trader_product__trader=trader)
+        ).values_list('id', flat=True)
         order_items = OrderItem.objects.filter(
             product_id__in=trader_product_ids,
             order__status__in=['pending', 'processing', 'shipped', 'delivered'],
@@ -621,5 +725,7 @@ class TraderOrderItemUpdateView(APIView):
         item.status = new_status
         item.note = request.data.get('note', item.note)
         item.status_changed_by = request.user
-        item.save(update_fields=['status', 'note', 'status_changed_by', 'updated_at'])
+        if new_status == 'ready' and item.ready_at is None:
+            item.ready_at = timezone.now()
+        item.save(update_fields=['status', 'note', 'status_changed_by', 'ready_at', 'updated_at'])
         return Response(TraderOrderItemSerializer(item).data)

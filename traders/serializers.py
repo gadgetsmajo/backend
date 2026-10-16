@@ -115,6 +115,7 @@ class TraderOrderItemSerializer(serializers.ModelSerializer):
     price             = serializers.DecimalField(source='order_item.price', max_digits=10, decimal_places=2, read_only=True)
     order_item_id     = serializers.IntegerField(source='order_item.id', read_only=True)
     status_changed_by_name = serializers.CharField(source='status_changed_by.name', read_only=True, default=None)
+    ready_at          = serializers.DateTimeField(read_only=True)
 
     class Meta:
         model = TraderOrderItem
@@ -122,7 +123,7 @@ class TraderOrderItemSerializer(serializers.ModelSerializer):
             'id', 'order_item_id', 'order_code', 'order_id', 'order_status',
             'order_created_at', 'delivery_address',
             'product_name', 'product_image', 'quantity', 'price',
-            'status', 'note', 'status_changed_by_name', 'updated_at',
+            'status', 'note', 'status_changed_by_name', 'ready_at', 'updated_at',
         )
         read_only_fields = ('id', 'order_item_id', 'order_code', 'order_id', 'order_status',
                             'order_created_at', 'delivery_address',
