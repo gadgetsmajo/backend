@@ -5,7 +5,10 @@ from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
-from orders.models import Order, Payment, ReturnRequest
+from accounting.models import Refund as AccountingRefund
+from orders.models import Order, OrderItem, Payment, ReturnRequest
+from products.models import Product
+from users.models import Notification
 
 User = get_user_model()
 
@@ -202,8 +205,36 @@ class ReturnRequestAdminTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()['status'], 'refunded')
         mock_email.assert_called_once_with(self.user.email, self.order.code)
+        self.assertEqual(AccountingRefund.objects.filter(order=self.order, status='completed').count(), 1)
+
+        orders_response = self.client.get('/api/orders/admin/')
+        order_codes = [order['code'] for order in orders_response.json()['results']]
+        self.assertNotIn(self.order.code, order_codes)
+
+        dashboard_response = self.client.get('/api/accounting/dashboard/')
+        self.assertEqual(dashboard_response.status_code, 200)
+        self.assertEqual(dashboard_response.json()['total_refunds'], float(self.payment.amount))
+        self.assertEqual(dashboard_response.json()['net_profit'], 0)
 
         duplicate_response = self.client.post(f'/api/orders/admin/returns/{self.return_request.id}/refunded/')
 
         self.assertEqual(duplicate_response.status_code, 400)
         mock_email.assert_called_once()
+        self.assertEqual(AccountingRefund.objects.filter(order=self.order, status='completed').count(), 1)
+
+
+class ProductRatingNotificationTests(TestCase):
+    def test_delivered_order_prompts_product_review_not_service_rating(self):
+        user = User.objects.create_user(email='product-rater@example.com', name='Product Rater', password='Password123!')
+        product = Product.objects.create(name='Rating Phone', price=100000, stock=2)
+        order = Order.objects.create(user=user, status='delivered', total=100000)
+        OrderItem.objects.create(order=order, product=product, quantity=1, price=100000)
+
+        with patch('users.emails.send_product_rating_email') as email_sender:
+            from orders.tasks import send_product_rating_notifications
+            send_product_rating_notifications(order.id)
+
+        product_notification = Notification.objects.get(user=user, type='product_rating')
+        self.assertIn(f'|{product.slug}?order_code={order.code}', product_notification.body)
+        self.assertFalse(Notification.objects.filter(user=user, type='service_rating').exists())
+        email_sender.assert_called_once()

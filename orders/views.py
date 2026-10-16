@@ -6,6 +6,7 @@ from django.utils.decorators import method_decorator
 from django.views.decorators.cache import never_cache
 from django.core.cache import cache
 from django.db import transaction, models
+from accounting.models import Refund as AccountingRefund
 from .models import Order, ServiceRating, Payment, ReturnRequest
 from .serializers import OrderSerializer, ServiceRatingSerializer, PaymentSerializer, ReturnRequestSerializer, AdminReturnRequestSerializer
 from .tasks import send_product_rating_notifications
@@ -278,16 +279,32 @@ class AdminReturnRequestRefundedView(APIView):
 
     def post(self, request, pk):
         try:
-            return_request = ReturnRequest.objects.select_related('order__user').get(pk=pk)
+            with transaction.atomic():
+                return_request = ReturnRequest.objects.select_for_update().select_related(
+                    'order__user', 'order__payment'
+                ).get(pk=pk)
+                if return_request.status != 'approved':
+                    return Response({'detail': 'Only approved return requests can be marked as refunded.'}, status=status.HTTP_400_BAD_REQUEST)
+
+                refund_amount = return_request.refund_amount or return_request.order.total
+                try:
+                    refund_method = return_request.order.payment.payment_method
+                except Payment.DoesNotExist:
+                    refund_method = ''
+
+                AccountingRefund.objects.create(
+                    order=return_request.order,
+                    customer_name=return_request.order.user.name,
+                    return_reason=return_request.reason,
+                    refund_amount=refund_amount,
+                    refund_method=refund_method,
+                    status='completed',
+                )
+                return_request.status = 'refunded'
+                return_request.admin_note = 'Refund confirmed as processed to the original payment method.'
+                return_request.save(update_fields=['status', 'admin_note', 'updated_at'])
         except ReturnRequest.DoesNotExist:
             return Response({'detail': 'Return request not found.'}, status=status.HTTP_404_NOT_FOUND)
-
-        if return_request.status != 'approved':
-            return Response({'detail': 'Only approved return requests can be marked as refunded.'}, status=status.HTTP_400_BAD_REQUEST)
-
-        return_request.status = 'refunded'
-        return_request.admin_note = 'Refund confirmed as processed to the original payment method.'
-        return_request.save(update_fields=['status', 'admin_note', 'updated_at'])
         _notify(
             return_request.order.user,
             'order',
@@ -344,7 +361,9 @@ class AdminOrderListView(generics.ListAPIView):
     permission_classes = (permissions.IsAdminUser,)
 
     def get_queryset(self):
-        qs = Order.objects.prefetch_related('items__product').order_by('-created_at')
+        qs = Order.objects.prefetch_related('items__product').exclude(
+            return_request__status='refunded'
+        ).order_by('-created_at')
         status_filter = self.request.query_params.get('status')
         if status_filter:
             qs = qs.filter(status=status_filter)
@@ -485,7 +504,7 @@ class AdminOrderDeliverView(APIView):
         except Exception:
             logger.exception('Failed to send order delivered email for order %s', code)
         _notify(order.user, 'order', f'Order #{order.code} Delivered', 'Your order has been delivered! Enjoy your new gadget. ❤️')
-        # Schedule service + product rating emails and notifications 5 minutes after delivery.
+        # Schedule product review emails and notifications 5 minutes after delivery.
         # This must never break the API if Redis/Celery is temporarily unavailable.
         try:
             send_product_rating_notifications.apply_async((order.id,), countdown=300)

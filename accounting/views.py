@@ -67,10 +67,12 @@ class AccountingDashboardView(APIView):
 
         # Orders
         today_orders = Order.objects.filter(created_at__date=today).count()
-        today_refunds = Refund.objects.filter(created_at__date=today).aggregate(t=Sum('refund_amount'))['t'] or 0
+        completed_refunds = Refund.objects.filter(status='completed')
+        total_refunds = completed_refunds.aggregate(t=Sum('refund_amount'))['t'] or 0
+        today_refunds = completed_refunds.filter(created_at__date=today).aggregate(t=Sum('refund_amount'))['t'] or 0
 
         gross_profit = float(total_revenue) - float(cogs)
-        net_profit = gross_profit - float(total_expenses)
+        net_profit = gross_profit - float(total_expenses) - float(total_refunds)
         gross_margin = (gross_profit / float(total_revenue) * 100) if total_revenue else 0
         net_margin = (net_profit / float(total_revenue) * 100) if total_revenue else 0
 
@@ -100,6 +102,7 @@ class AccountingDashboardView(APIView):
             'today_expenses': float(today_expenses),
             'today_orders': today_orders,
             'today_refunds': float(today_refunds),
+            'total_refunds': float(total_refunds),
             'accounts': accounts,
             'monthly': [{'month': m['month'].strftime('%b %Y'), 'revenue': float(m['revenue']), 'count': m['count']} for m in monthly],
         })

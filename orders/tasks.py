@@ -13,10 +13,9 @@ def _product_image(product) -> str:
 
 @shared_task
 def send_product_rating_notifications(order_id: int):
-    from django.conf import settings
     from orders.models import Order
     from users.models import Notification
-    from users.emails import send_order_rating_email, send_product_rating_email
+    from users.emails import send_product_rating_email
 
     try:
         order = Order.objects.select_related('user').prefetch_related('items__product').get(id=order_id)
@@ -28,21 +27,6 @@ def send_product_rating_notifications(order_id: int):
 
     user = order.user
 
-    # ── Service rating ────────────────────────────────────────────────────────
-    Notification.objects.create(
-        user=user,
-        type='service_rating',
-        title=f'Rate Your Experience — #{order.code}',
-        body=f'How was your Majo Gadgets experience? Tap to rate your order.|{order.code}',
-    )
-    try:
-        send_order_rating_email(
-            user.name, user.email, order.code,
-            f'{settings.FRONTEND_URL}/rate/{order.code}',
-        )
-    except Exception:
-        logger.exception('Failed to send service rating email for order %s', order.code)
-
     # ── Product rating ────────────────────────────────────────────────────────
     product_items = []
     for item in order.items.all():
@@ -51,8 +35,8 @@ def send_product_rating_notifications(order_id: int):
         Notification.objects.create(
             user=user,
             type='product_rating',
-            title=f'Rate {item.product.name}',
-            body=f'You received {item.product.name}. How would you rate it?|{item.product.slug}',
+            title=f'Review {item.product.name}',
+            body=f'You received {item.product.name}. How would you rate it?|{item.product.slug}?order_code={order.code}',
         )
         product_items.append({
             'name': item.product.name,

@@ -303,11 +303,22 @@ class ProductReviewListCreateView(APIView):
 
         product = get_object_or_404(Product, slug=slug)
 
-        delivered_item = OrderItem.objects.filter(
+        delivered_items = OrderItem.objects.filter(
             product=product,
             order__user=request.user,
             order__status='delivered',
-        ).select_related('order').first()
+        ).select_related('order')
+
+        try:
+            order_id = int(request.data.get('order') or 0)
+            order_item_id = int(request.data.get('order_item') or 0)
+        except (TypeError, ValueError):
+            return Response({'detail': 'A valid delivered order item is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        delivered_item = delivered_items.filter(
+            order_id=order_id,
+            pk=order_item_id,
+        ).first() if order_id and order_item_id else None
 
         if not delivered_item:
             return Response(
@@ -315,10 +326,7 @@ class ProductReviewListCreateView(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        order_id = request.data.get('order') or delivered_item.order_id
-        order_item_id = request.data.get('order_item') or delivered_item.id
-
-        if ProductReview.objects.filter(product=product, user=request.user, order_id=order_id).exists():
+        if ProductReview.objects.filter(product=product, user=request.user, order_id=delivered_item.order_id).exists():
             return Response(
                 {'detail': 'You have already reviewed this product for this order.'},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -334,7 +342,7 @@ class ProductReviewListCreateView(APIView):
         serializer.is_valid(raise_exception=True)
         review = serializer.save(
             product=product, user=request.user, verified_purchase=True,
-            order_id=order_id, order_item_id=order_item_id,
+            order_id=delivered_item.order_id, order_item_id=delivered_item.id,
         )
 
         # Save uploaded images from request.FILES
@@ -368,11 +376,27 @@ class ProductReviewEligibilityView(APIView):
     def get(self, request, slug):
         product = get_object_or_404(Product, slug=slug)
 
-        delivered_item = OrderItem.objects.filter(
+        delivered_items = OrderItem.objects.filter(
             product=product,
             order__user=request.user,
             order__status='delivered',
-        ).select_related('order').first()
+        ).select_related('order')
+        order_code = request.query_params.get('order_code')
+        if order_code:
+            delivered_items = delivered_items.filter(order__code=order_code)
+            delivered_item = delivered_items.order_by('-order__created_at').first()
+        else:
+            all_delivered_items = delivered_items
+            reviewed_order_ids = ProductReview.objects.filter(
+                product=product,
+                user=request.user,
+                order__isnull=False,
+            ).values_list('order_id', flat=True)
+            delivered_item = delivered_items.exclude(order_id__in=reviewed_order_ids).order_by('-order__created_at').first()
+            if not delivered_item:
+                if not all_delivered_items.exists():
+                    return Response({'eligible': False, 'reason': 'no_delivered_order'})
+                return Response({'eligible': False, 'reason': 'already_reviewed'})
 
         if not delivered_item:
             return Response({'eligible': False, 'reason': 'no_delivered_order'})
