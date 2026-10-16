@@ -3,7 +3,8 @@ from html import escape
 from uuid import UUID
 
 from django.core.cache import cache
-from django.db.models import Avg, Count, F, Q
+from django.db.models import Avg, Count, F, IntegerField, Q, Sum, Value
+from django.db.models.functions import Coalesce
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from rest_framework import generics, filters, permissions, status
@@ -68,7 +69,7 @@ class ProductListView(generics.ListCreateAPIView):
     ordering_fields = ('price', 'rating', 'created_at')
 
     def get_queryset(self):
-        qs = Product.objects.all().select_related('category', 'trader', 'trader_product__trader').prefetch_related('images').order_by('-created_at')
+        qs = Product.objects.all().select_related('category', 'trader', 'trader_product__trader').prefetch_related('images')
         category = self.request.query_params.get('category')
         if category:
             qs = qs.filter(category__slug=category)
@@ -81,6 +82,16 @@ class ProductListView(generics.ListCreateAPIView):
             visible_seller = Q(trader__uuid=seller_uuid, trader__status='approved', trader__is_visible=True, trader__is_closed=False)
             visible_seller |= Q(trader_product__trader__uuid=seller_uuid, trader_product__trader__status='approved', trader_product__trader__is_visible=True, trader_product__trader__is_closed=False)
             qs = qs.filter(visible_seller)
+        if self.request.query_params.get('top_bought') == 'true':
+            qs = qs.annotate(
+                bought_quantity=Coalesce(
+                    Sum('orderitem__quantity', filter=Q(orderitem__order__status='delivered')),
+                    Value(0),
+                    output_field=IntegerField(),
+                )
+            ).filter(bought_quantity__gt=0).order_by('-bought_quantity', '-created_at')
+        else:
+            qs = qs.order_by('-created_at')
         return qs
 
     def list(self, request, *args, **kwargs):

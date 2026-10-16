@@ -42,6 +42,16 @@ class EmailStatusHeroTests(TestCase):
                 self.assertIsNone(emoji_pattern.search(payload['subject']))
                 self.assertIsNone(emoji_pattern.search(payload['html']))
 
+    def test_trader_approved_email_uses_bullets_instead_of_plus_signs(self):
+        with patch.object(emails, '_send') as send:
+            emails.send_trader_approved_email('Customer', 'customer@example.com', 'Majo Store', 'trader-1')
+            html = send.call_args.args[0]['html']
+
+        self.assertIn('<ul', html)
+        self.assertIn('<li', html)
+        self.assertIn('List and sell your products on Majo Gadgets', html)
+        self.assertNotIn('>+<', html)
+
     def test_status_hero_uses_matching_image_and_full_width_layout(self):
         html = emails._status_hero('shipped')
 

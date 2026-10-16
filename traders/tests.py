@@ -112,3 +112,12 @@ class PublicTraderProfileTests(TestCase):
 		response = self.client.get(reverse('trader-public-profile', args=[self.trader.uuid]))
 
 		self.assertEqual(response.status_code, 404)
+
+	def test_trader_me_returns_200_for_user_without_trader_application(self):
+		user = User.objects.create_user(email='noapp@example.com', name='No Trader', password='Password123!')
+		self.client.force_authenticate(user=user)
+
+		response = self.client.get(reverse('trader-me'))
+
+		self.assertEqual(response.status_code, 200)
+		self.assertIsNone(response.data)

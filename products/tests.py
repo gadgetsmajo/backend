@@ -53,6 +53,26 @@ class ProductRecommendationsAPITest(TestCase):
         self.assertTrue(len(response.data) >= 1)
         self.assertIn(self.purchased_product.id, [item['id'] for item in response.data])
 
+    def test_top_bought_products_rank_by_delivered_quantity_and_omit_unsold(self):
+        self.order.status = 'delivered'
+        self.order.save(update_fields=['status'])
+        OrderItem.objects.create(
+            order=self.order, product=self.purchased_product, quantity=2, price=self.purchased_product.price,
+        )
+        second_order = Order.objects.create(
+            user=self.user, status='delivered', subtotal=600000, total=600000,
+        )
+        OrderItem.objects.create(
+            order=second_order, product=self.related_product, quantity=1, price=self.related_product.price,
+        )
+
+        response = self.client.get(reverse('product-list'), {'top_bought': 'true'})
+
+        self.assertEqual(response.status_code, 200)
+        product_ids = [item['id'] for item in response.data['results']]
+        self.assertEqual(product_ids[:2], [self.purchased_product.id, self.related_product.id])
+        self.assertNotIn(self.other_product.id, product_ids)
+
 
 class ProductReviewEligibilityAPITest(TestCase):
     def setUp(self):

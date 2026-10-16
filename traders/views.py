@@ -79,7 +79,10 @@ class TraderMeView(APIView):
             # fallback: match by email for legacy applications
             applicant = TraderApplication.objects.filter(email=request.user.email).order_by('-created_at').first()
         if not applicant:
-            return Response({'detail': 'No trader application found.'}, status=status.HTTP_404_NOT_FOUND)
+            # Some admin/session checks poll this endpoint to decide whether the user
+            # has a trader account. Treat a missing application as a valid, empty state
+            # instead of an error so the UI can gracefully handle "not a trader".
+            return Response(None, status=status.HTTP_200_OK)
 
         return Response({
             'id': applicant.id,

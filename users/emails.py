@@ -140,6 +140,11 @@ def _info_row(icon_path: str, text: str, color: str = '#111111') -> str:
     </p>'''
 
 
+def _bullet_row(text: str, color: str = '#334155') -> str:
+    return f'''
+    <li style="margin:0 0 10px;font-size:14px;color:{color};line-height:1.6;list-style:disc;padding-left:4px">{text}</li>'''
+
+
 def send_welcome_email(name: str, email: str):
     hero = f'''
         <tr>
@@ -625,11 +630,11 @@ def send_trader_approved_email(name: str, email: str, business_name: str, trader
         We're excited to welcome <strong>{business_name}</strong> to the Majo Gadgets platform!
         Your application has been reviewed and approved by our team.
       </p>
-      <div style="padding:16px 20px;margin-bottom:28px">
-        {_info_row(ICO_CHECK,   'List and sell your products on Majo Gadgets', '#334155')}
-        {_info_row(ICO_SHOPPING,'Track your sales and revenue in real time', '#334155')}
-        {_info_row(ICO_SETTINGS,'Manage your trader account from your portal', '#334155')}
-      </div>
+      <ul style="margin:0 0 28px;padding-left:22px;list-style:disc">
+        {_bullet_row('List and sell your products on Majo Gadgets')}
+        {_bullet_row('Track your sales and revenue in real time')}
+        {_bullet_row('Manage your trader account from your portal')}
+      </ul>
       <div style="text-align:center">
         <a href="{portal_url}" style="display:inline-block;padding:14px 32px;background:#071A2B !important;background-color:#071A2B !important;color:#ffffff !important;border:1px solid #071A2B;border-radius:0;font-weight:700;font-size:15px;text-decoration:none !important">
           Open My Trader Portal &rarr;
