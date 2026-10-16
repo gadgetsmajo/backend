@@ -159,3 +159,17 @@ class TraderInventoryStockSyncTests(TestCase):
 		self.assertEqual(inventory_item.quantity, 12)
 		self.assertEqual(self.product.stock, 12)
 		self.assertEqual(response.data['product_stock'], 12)
+
+	def test_trader_products_expose_the_linked_public_product_id(self):
+		public_product = Product.objects.create(
+			name='Public Inventory Product',
+			price=25000,
+			stock=8,
+			trader=self.trader,
+			trader_product=self.product,
+		)
+
+		response = self.client.get(reverse('trader-products', args=[self.trader.uuid]))
+
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(response.data[0]['public_product_id'], public_product.id)

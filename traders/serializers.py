@@ -1,4 +1,5 @@
 from rest_framework import serializers
+from django.core.exceptions import ObjectDoesNotExist
 from .models import TraderApplication, TraderProduct, TraderSale, TraderExpense, TraderOrderItem, TraderInventoryItem, TraderStockMovement
 
 
@@ -39,6 +40,7 @@ class TraderApplicationAdminSerializer(serializers.ModelSerializer):
 
 class TraderProductSerializer(serializers.ModelSerializer):
     image_url = serializers.SerializerMethodField()
+    public_product_id = serializers.SerializerMethodField()
     category_id = serializers.IntegerField(source='category.id', read_only=True, allow_null=True, default=None)
     category_name = serializers.CharField(source='category.name', read_only=True, default=None)
 
@@ -47,7 +49,7 @@ class TraderProductSerializer(serializers.ModelSerializer):
         fields = (
             'id', 'uuid', 'name', 'short_description', 'long_description', 'description',
             'price', 'original_price', 'delivery_fee', 'stock',
-            'category_id', 'category_name',
+            'category_id', 'category_name', 'public_product_id',
             'image_url', 'is_active', 'is_featured', 'is_new_deal',
             'created_at', 'updated_at',
         )
@@ -57,6 +59,12 @@ class TraderProductSerializer(serializers.ModelSerializer):
         if obj.image:
             return obj.image.url
         return obj.image_url or None
+
+    def get_public_product_id(self, obj):
+        try:
+            return obj.public_product.pk
+        except ObjectDoesNotExist:
+            return None
 
 
 class TraderSaleSerializer(serializers.ModelSerializer):

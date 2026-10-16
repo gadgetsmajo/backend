@@ -296,13 +296,23 @@ class FlashSaleListCreateView(generics.ListCreateAPIView):
     def get_queryset(self):
         from django.utils import timezone
         qs = FlashSale.objects.select_related('product__category').prefetch_related('product__images')
+        if self.request.user.is_authenticated and not self.request.user.is_staff:
+            trader = getattr(self.request.user, 'trader_application', None)
+            if trader:
+                qs = qs.filter(Q(product__trader=trader) | Q(product__trader_product__trader=trader))
         if self.request.query_params.get('active') == '1':
             qs = qs.filter(is_active=True, ends_at__gt=timezone.now())
         return qs
 
     def list(self, request, *args, **kwargs):
         active = request.query_params.get('active')
-        cache_key = 'flashsales:active' if active == '1' else 'flashsales:all'
+        trader = None
+        if request.user.is_authenticated and not request.user.is_staff:
+            trader = getattr(request.user, 'trader_application', None)
+        if trader:
+            cache_key = f"flashsales:trader:{trader.pk}:{'active' if active == '1' else 'all'}"
+        else:
+            cache_key = 'flashsales:active' if active == '1' else 'flashsales:all'
         cached = cache.get(cache_key)
         if cached is not None:
             return Response(cached)

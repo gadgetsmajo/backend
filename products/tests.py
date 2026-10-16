@@ -4,7 +4,7 @@ from django.urls import reverse
 from rest_framework.test import APIClient
 
 from orders.models import Order, OrderItem
-from products.models import Category, Product, ProductReview
+from products.models import Category, FlashSale, Product, ProductReview
 from traders.models import TraderApplication
 
 User = get_user_model()
@@ -128,6 +128,50 @@ class FlashSalePermissionAPITest(TestCase):
 
         self.assertEqual(response.status_code, 403)
         self.assertIn('detail', response.data)
+
+    def test_trader_flash_sale_list_only_returns_their_sales_even_after_public_cache(self):
+        other_user = User.objects.create_user(email='other-trader@example.com', password='strong-pass-123', name='Other Trader')
+        other_trader = TraderApplication.objects.create(
+            full_name='Other Trader',
+            email=other_user.email,
+            phone='0700000001',
+            business_name='Other Trader Store',
+            business_type='sole_proprietor',
+            location='Jinja',
+            district='Eastern',
+            product_categories='Phones',
+            status='approved',
+            user=other_user,
+        )
+        other_product = Product.objects.create(
+            name='Other Flash Product',
+            category=self.category,
+            price=120000,
+            stock=6,
+            trader=other_trader,
+        )
+        own_sale = FlashSale.objects.create(
+            product=self.product,
+            flash_price=90000,
+            ends_at='2099-01-01T12:00:00Z',
+            stock_limit=5,
+        )
+        FlashSale.objects.create(
+            product=other_product,
+            flash_price=110000,
+            ends_at='2099-01-01T12:00:00Z',
+            stock_limit=3,
+        )
+
+        public_response = self.client.get(reverse('flash-sale-list'))
+        self.assertEqual(public_response.status_code, 200)
+
+        self.client.force_authenticate(user=self.trader_user)
+        trader_response = self.client.get(reverse('flash-sale-list'))
+
+        self.assertEqual(trader_response.status_code, 200)
+        sales = trader_response.data.get('results', trader_response.data) if isinstance(trader_response.data, dict) else trader_response.data
+        self.assertEqual([sale['id'] for sale in sales], [own_sale.id])
 
 
 class ProductReviewEligibilityAPITest(TestCase):
