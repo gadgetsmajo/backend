@@ -26,6 +26,47 @@ CATEGORY_CACHE_TTL = 60 * 30  # 30 minutes
 FLASH_SALE_CACHE_TTL = 60 * 5  # 5 minutes
 
 
+class IsTraderProductOwner(permissions.BasePermission):
+    """Only a trader owning the product may mutate its flash-sale record; staff cannot touch trader-owned products."""
+
+    def _get_product(self, request, view):
+        if hasattr(view, 'get_object'):
+            try:
+                obj = view.get_object()
+            except Exception:
+                obj = None
+            if obj is not None and hasattr(obj, 'product'):
+                return obj.product
+        product_id = request.data.get('product_id') or request.data.get('product')
+        if not product_id:
+            return None
+        try:
+            return Product.objects.select_related('trader', 'trader_product__trader').get(pk=product_id)
+        except Product.DoesNotExist:
+            return None
+
+    def has_permission(self, request, view):
+        if request.method in permissions.SAFE_METHODS:
+            return True
+        if not request.user or not request.user.is_authenticated:
+            return False
+
+        product = self._get_product(request, view)
+        if product is None:
+            return False
+
+        trader_app = getattr(request.user, 'trader_application', None)
+        if request.user.is_staff:
+            return product.trader_id is None and (product.trader_product_id is None or product.trader_product.trader_id is None)
+
+        if trader_app is None:
+            return False
+
+        if product.trader_id == trader_app.id:
+            return True
+        return bool(product.trader_product and product.trader_product.trader_id == trader_app.id)
+
+
 class CategoryListView(generics.ListCreateAPIView):
     queryset = Category.objects.all().order_by('name')
     serializer_class = CategorySerializer
@@ -250,7 +291,7 @@ class FlashSaleListCreateView(generics.ListCreateAPIView):
     def get_permissions(self):
         if self.request.method == 'GET':
             return [permissions.AllowAny()]
-        return [permissions.IsAdminUser()]
+        return [IsTraderProductOwner()]
 
     def get_queryset(self):
         from django.utils import timezone
@@ -277,7 +318,11 @@ class FlashSaleListCreateView(generics.ListCreateAPIView):
 class FlashSaleDetailView(generics.RetrieveUpdateDestroyAPIView):
     queryset = FlashSale.objects.select_related('product__category').prefetch_related('product__images')
     serializer_class = FlashSaleSerializer
-    permission_classes = (permissions.IsAdminUser,)
+
+    def get_permissions(self):
+        if self.request.method == 'GET':
+            return [permissions.AllowAny()]
+        return [IsTraderProductOwner()]
 
     def perform_update(self, serializer):
         serializer.save()

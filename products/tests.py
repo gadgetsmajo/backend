@@ -5,6 +5,7 @@ from rest_framework.test import APIClient
 
 from orders.models import Order, OrderItem
 from products.models import Category, Product, ProductReview
+from traders.models import TraderApplication
 
 User = get_user_model()
 
@@ -72,6 +73,61 @@ class ProductRecommendationsAPITest(TestCase):
         product_ids = [item['id'] for item in response.data['results']]
         self.assertEqual(product_ids[:2], [self.purchased_product.id, self.related_product.id])
         self.assertNotIn(self.other_product.id, product_ids)
+
+
+class FlashSalePermissionAPITest(TestCase):
+    def setUp(self):
+        self.category = Category.objects.create(name='Phones', slug='phones')
+        self.trader_user = User.objects.create_user(email='trader@example.com', password='strong-pass-123', name='Trader')
+        self.trader = TraderApplication.objects.create(
+            full_name='Trader User',
+            email='trader@example.com',
+            phone='0700000000',
+            business_name='Trader Store',
+            business_type='sole_proprietor',
+            location='Kampala',
+            district='Central',
+            product_categories='Phones',
+            status='approved',
+            user=self.trader_user,
+        )
+        self.product = Product.objects.create(
+            name='Flash Product',
+            category=self.category,
+            price=100000,
+            original_price=120000,
+            stock=10,
+            trader=self.trader,
+            is_active=True,
+        )
+        self.admin = User.objects.create_user(email='admin@example.com', password='strong-pass-123', name='Admin', is_staff=True)
+        self.client = APIClient()
+
+    def test_trader_can_create_flash_sale_for_own_product(self):
+        self.client.force_authenticate(user=self.trader_user)
+        response = self.client.post(reverse('flash-sale-list'), {
+            'product_id': self.product.id,
+            'flash_price': '90000',
+            'ends_at': '2099-01-01T12:00:00Z',
+            'stock_limit': 5,
+            'is_active': True,
+        }, format='json')
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data['product']['id'], self.product.id)
+
+    def test_superadmin_cannot_create_flash_sale_for_trader_product(self):
+        self.client.force_authenticate(user=self.admin)
+        response = self.client.post(reverse('flash-sale-list'), {
+            'product_id': self.product.id,
+            'flash_price': '90000',
+            'ends_at': '2099-01-01T12:00:00Z',
+            'stock_limit': 5,
+            'is_active': True,
+        }, format='json')
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn('detail', response.data)
 
 
 class ProductReviewEligibilityAPITest(TestCase):
