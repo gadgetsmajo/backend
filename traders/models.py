@@ -61,6 +61,14 @@ class TraderApplication(models.Model):
     documents_verified = models.BooleanField(default=False)
     agreement_reference = models.CharField(max_length=40, blank=True)
     agreement_issued_at = models.DateTimeField(null=True, blank=True)
+    agreement_version = models.CharField(max_length=20, default='1.0')
+    agreement_required = models.BooleanField(default=False)
+    agreement_signed_name = models.CharField(max_length=150, blank=True)
+    agreement_signature_image = cloudinary.models.CloudinaryField(
+        'image', type='authenticated', folder='trader_applications/agreement_signatures', blank=True, null=True,
+    )
+    agreement_signed_at = models.DateTimeField(null=True, blank=True)
+    agreement_document_snapshot = models.JSONField(default=dict, blank=True)
 
     # Status
     status       = models.CharField(max_length=10, choices=STATUS, default='pending')

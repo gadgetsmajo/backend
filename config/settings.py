@@ -162,6 +162,9 @@ RESEND_API_KEY = config('RESEND_API_KEY', default='')
 FRONTEND_URL = config('FRONTEND_URL', default='https://www.majogadgets.com')
 ADMIN_EMAIL = config('ADMIN_EMAIL', default='admin@majogadgets.com')
 SUPPORT_EMAIL = config('SUPPORT_EMAIL', default='support@majogadgets.com')
+MAJO_LEGAL_OPERATOR_NAME = config('MAJO_LEGAL_OPERATOR_NAME', default='Walunsimbi John')
+MAJO_LEGAL_OPERATOR_TITLE = config('MAJO_LEGAL_OPERATOR_TITLE', default='CEO')
+MAJO_BUSINESS_ADDRESS = config('MAJO_BUSINESS_ADDRESS', default='')
 
 # TextBee SMS
 TEXTBEE_API_KEY = config('TEXTBEE_API_KEY', default='')

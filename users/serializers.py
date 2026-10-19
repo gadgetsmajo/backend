@@ -8,7 +8,7 @@ User = get_user_model()
 class NotificationSerializer(serializers.ModelSerializer):
     class Meta:
         model = Notification
-        fields = ('id', 'type', 'title', 'body', 'read', 'created_at')
+        fields = ('id', 'type', 'title', 'body', 'action_url', 'read', 'created_at')
         read_only_fields = ('id', 'type', 'title', 'body', 'created_at')
 
 

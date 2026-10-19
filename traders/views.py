@@ -1,9 +1,12 @@
 from datetime import timedelta
 from urllib.request import urlopen
+import json
 import mimetypes
 import os
 
 from cloudinary.utils import cloudinary_url
+from django.conf import settings
+from django.core.serializers.json import DjangoJSONEncoder
 from django.http import HttpResponse
 from django.db.models import Avg, Count, F, Q
 from orders.models import OrderItem
@@ -13,8 +16,10 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from django.utils import timezone
 from .models import TraderApplication, TraderFollower, TraderProduct, TraderSale, TraderExpense, TraderOrderItem, TraderInventoryItem, TraderStockMovement
+from .agreement import AGREEMENT_VERSION, build_agreement_document
 from .serializers import (
     TraderApplicationSerializer, TraderApplicationAdminSerializer,
+    TraderAgreementSignatureSerializer,
     TraderProductSerializer, TraderSaleSerializer, TraderExpenseSerializer,
     TraderOrderItemSerializer, TraderInventoryItemSerializer, TraderStockMovementSerializer,
 )
@@ -23,10 +28,9 @@ MAX_TRADER_DOCUMENT_SIZE = 10 * 1024 * 1024
 
 
 def _get_trader_by_uuid(uuid_str):
-    try:
-        return TraderApplication.objects.get(uuid=uuid_str, status='approved')
-    except TraderApplication.DoesNotExist:
-        return None
+    return TraderApplication.objects.filter(uuid=uuid_str, status='approved').filter(
+        Q(agreement_required=False) | Q(agreement_signed_at__isnull=False)
+    ).first()
 
 
 class IsTraderOwner(permissions.BasePermission):
@@ -98,7 +102,71 @@ class TraderMeView(APIView):
             'status': applicant.status,
             'email': applicant.email,
             'full_name': applicant.full_name,
+            'agreement_required': applicant.agreement_required,
+            'agreement_signed_at': applicant.agreement_signed_at,
         })
+
+
+class TraderAgreementView(APIView):
+    permission_classes = (permissions.IsAuthenticated,)
+
+    def get_application(self, request, trader_uuid):
+        return TraderApplication.objects.filter(
+            uuid=trader_uuid,
+            status='approved',
+            agreement_required=True,
+        ).filter(Q(user=request.user) | Q(email=request.user.email)).first()
+
+    def get(self, request, trader_uuid):
+        application = self.get_application(request, trader_uuid)
+        if not application:
+            return Response({'detail': 'Agreement not found.'}, status=status.HTTP_404_NOT_FOUND)
+        document = application.agreement_document_snapshot or build_agreement_document(application)
+        return Response(document)
+
+    def post(self, request, trader_uuid):
+        application = self.get_application(request, trader_uuid)
+        if not application:
+            return Response({'detail': 'Agreement not found.'}, status=status.HTTP_404_NOT_FOUND)
+        if application.agreement_signed_at:
+            return Response({'detail': 'This agreement has already been signed.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        document = build_agreement_document(application)
+        if not document['ready_to_sign']:
+            return Response(
+                {'detail': 'Majo Gadgets registered business address has not been configured.'},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        serializer = TraderAgreementSignatureSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        signed_name = ' '.join(serializer.validated_data['signed_name'].split())
+        if signed_name.casefold() != ' '.join(application.full_name.split()).casefold():
+            return Response(
+                {'signed_name': ['Enter the verified legal name shown on your application.']},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        application.agreement_signed_name = application.full_name
+        application.agreement_signature_image = serializer.validated_data.get('signature_image')
+        application.agreement_signed_at = timezone.now()
+        application.save(update_fields=(
+            'agreement_signed_name', 'agreement_signature_image', 'agreement_signed_at', 'updated_at',
+        ))
+        document = build_agreement_document(application)
+        application.agreement_document_snapshot = json.loads(json.dumps(document, cls=DjangoJSONEncoder))
+        application.save(update_fields=('agreement_document_snapshot', 'updated_at'))
+
+        if application.user:
+            from users.models import Notification
+            Notification.objects.create(
+                user=application.user,
+                type='system',
+                title='Trader agreement signed',
+                body='Your Majo Gadgets trader agreement is signed. Your trader account is now active.',
+                action_url=f'/agreement/{application.uuid}',
+            )
+        return Response(application.agreement_document_snapshot)
 
 
 class PublicTraderProfileView(APIView):
@@ -113,6 +181,8 @@ class PublicTraderProfileView(APIView):
             status='approved',
             is_visible=True,
             is_closed=False,
+        ).filter(
+            Q(agreement_required=False) | Q(agreement_signed_at__isnull=False),
         ).first()
 
     def get(self, request, trader_uuid):
@@ -498,6 +568,12 @@ class AdminTraderApproveView(APIView):
         if app.status == 'approved':
             return Response({'detail': 'Already approved.'}, status=status.HTTP_400_BAD_REQUEST)
 
+        if not settings.MAJO_BUSINESS_ADDRESS.strip():
+            return Response(
+                {'detail': 'Configure MAJO_BUSINESS_ADDRESS before approving trader applications.'},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
         if not app.national_id_document or not app.business_location_proof:
             return Response({'detail': 'Required identity and business location documents are missing.'}, status=status.HTTP_400_BAD_REQUEST)
         if not app.ura_certificate_document and not app.tin.strip():
@@ -512,12 +588,19 @@ class AdminTraderApproveView(APIView):
         app.reviewed_at = timezone.now()
         app.agreement_reference = app.agreement_reference or f'MG-TRADER-{app.pk:06d}'
         app.agreement_issued_at = app.agreement_issued_at or app.reviewed_at
+        app.agreement_version = AGREEMENT_VERSION
+        app.agreement_required = True
+        app.agreement_document_snapshot = {}
         app.save()
 
         # Email notification
         try:
-            from users.emails import send_trader_approved_email
-            send_trader_approved_email(app.full_name, app.email, app.business_name, str(app.uuid))
+            from users.emails import send_trader_agreement_email
+            send_trader_agreement_email(
+                app.full_name, app.email, app.business_name,
+                f'{settings.FRONTEND_URL}/agreement/{app.uuid}',
+                app.agreement_reference, app.agreement_version,
+            )
         except Exception:
             pass
 
@@ -528,8 +611,9 @@ class AdminTraderApproveView(APIView):
                 Notification.objects.create(
                     user=app.user,
                     type='system',
-                    title='Your trader application is approved! 🎉',
-                    body=f'Congratulations! {app.business_name} has been approved. Open your trader portal to start selling.',
+                    title='Your trader agreement is ready',
+                    body=f'Your application for {app.business_name} was approved. Review and sign the agreement to activate your trader account.',
+                    action_url=f'/agreement/{app.uuid}',
                 )
             except Exception:
                 pass

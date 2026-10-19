@@ -644,3 +644,19 @@ def send_trader_approved_email(name: str, email: str, business_name: str, trader
       <p style="margin:28px 0 0;font-size:13px;color:#94A3B8">If you have any questions, just reply to this email — we're always happy to help.</p>
     '''
     _send({'from': FROM, 'to': email, 'subject': f'Your Trader Application is Approved — {business_name}', 'html': _wrap(body)})
+
+
+def send_trader_agreement_email(name: str, email: str, business_name: str, agreement_url: str, reference: str, version: str):
+    body = f'''
+      <div style="text-align:center;margin-bottom:24px">
+        <h2 style="margin:0 0 6px;font-size:22px;color:#111111">Your trader agreement is ready</h2>
+        <p style="margin:0;font-size:14px;color:#333333">Hello {escape(name)}, your application for {escape(business_name)} has been approved.</p>
+      </div>
+      <p style="font-size:14px;line-height:1.7;color:#334155">Review the agreement, confirm your legal name, and sign electronically to activate selling. You may sign by typing your verified name, with an optional signature image.</p>
+      <p style="font-size:13px;color:#334155"><strong>Reference:</strong> {escape(reference)}<br><strong>Version:</strong> {escape(version)}</p>
+      <div style="text-align:center;margin:24px 0">
+        <a href="{escape(agreement_url, quote=True)}" style="display:inline-block;padding:14px 32px;background:#071A2B !important;color:#ffffff !important;font-weight:700;text-decoration:none !important">Review and sign agreement</a>
+      </div>
+      <p style="font-size:12px;line-height:1.6;color:#64748B">Your National ID copy is retained for private verification and is not included in the agreement.</p>
+    '''
+    _send({'from': FROM, 'to': email, 'subject': f'Trader Agreement Ready — {reference}', 'html': _wrap(body)})

@@ -86,6 +86,7 @@ class TraderApplicationAdminSerializer(serializers.ModelSerializer):
     has_national_id_document = serializers.SerializerMethodField()
     has_ura_certificate_document = serializers.SerializerMethodField()
     has_business_location_proof = serializers.SerializerMethodField()
+    has_agreement_signature_image = serializers.SerializerMethodField()
 
     class Meta:
         model = TraderApplication
@@ -95,7 +96,8 @@ class TraderApplicationAdminSerializer(serializers.ModelSerializer):
             'location', 'has_business_location_proof', 'district', 'website', 'product_categories',
             'monthly_volume', 'experience', 'logo', 'logo_url', 'bio', 'is_visible', 'is_closed',
             'agreed_to_terms', 'terms_accepted_at', 'documents_verified', 'agreement_reference',
-            'agreement_issued_at', 'status', 'admin_note', 'reviewed_by', 'reviewed_by_name',
+            'agreement_issued_at', 'agreement_version', 'agreement_required', 'agreement_signed_name',
+            'agreement_signed_at', 'has_agreement_signature_image', 'status', 'admin_note', 'reviewed_by', 'reviewed_by_name',
             'reviewed_at', 'user', 'user_email', 'created_at', 'updated_at',
         )
 
@@ -108,10 +110,29 @@ class TraderApplicationAdminSerializer(serializers.ModelSerializer):
     def get_has_business_location_proof(self, obj):
         return bool(obj.business_location_proof)
 
+    def get_has_agreement_signature_image(self, obj):
+        return bool(obj.agreement_signature_image)
+
     def get_logo_url(self, obj):
         if obj.logo:
             return obj.logo.url
         return None
+
+
+class TraderAgreementSignatureSerializer(serializers.Serializer):
+    accepted = serializers.BooleanField(required=True)
+    signed_name = serializers.CharField(max_length=150, trim_whitespace=True)
+    signature_image = serializers.ImageField(required=False, allow_null=True)
+
+    def validate_accepted(self, value):
+        if not value:
+            raise serializers.ValidationError('Accept the agreement before signing.')
+        return value
+
+    def validate_signature_image(self, value):
+        if value and value.size > 5 * 1024 * 1024:
+            raise serializers.ValidationError('Signature image must be 5 MB or smaller.')
+        return value
 
 
 class TraderProductSerializer(serializers.ModelSerializer):

@@ -4,7 +4,7 @@ from unittest.mock import patch
 from cloudinary import CloudinaryResource
 from django.core.files.uploadedfile import SimpleUploadedFile
 from cloudinary import CloudinaryResource
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework.test import APIClient
@@ -195,6 +195,7 @@ class TraderApplicationTermsTests(TestCase):
 		self.assertIn('national_id', response.data)
 
 
+@override_settings(MAJO_BUSINESS_ADDRESS='Majo Gadgets, Kampala, Uganda')
 class TraderApplicationApprovalTests(TestCase):
 	def setUp(self):
 		self.admin = User.objects.create_user(email='reviewer@example.com', name='Reviewer', password='Password123!', is_staff=True)
@@ -210,7 +211,7 @@ class TraderApplicationApprovalTests(TestCase):
 			product_categories='Electronics', agreed_to_terms=True,
 		)
 
-	@patch('users.emails.send_trader_approved_email')
+	@patch('users.emails.send_trader_agreement_email')
 	def test_approval_requires_admin_document_verification_and_issues_agreement(self, _send_email):
 		url = reverse('admin-trader-approve', args=[self.application.id])
 		blocked = self.client.post(url, {}, format='json')
@@ -221,6 +222,31 @@ class TraderApplicationApprovalTests(TestCase):
 		self.assertTrue(approved.data['documents_verified'])
 		self.assertTrue(approved.data['agreement_reference'])
 		self.assertIsNotNone(approved.data['agreement_issued_at'])
+		self.assertTrue(approved.data['agreement_required'])
+		self.assertEqual(approved.data['agreement_version'], '1.0')
+
+	@patch('users.emails.send_trader_agreement_email')
+	def test_unsigned_trader_cannot_access_portal_and_can_sign_by_name(self, _send_email):
+		applicant = User.objects.create_user(email=self.application.email, name='Applicant', password='Password123!')
+		self.application.user = applicant
+		self.application.save(update_fields=['user'])
+		self.client.post(reverse('admin-trader-approve', args=[self.application.id]), {'documents_verified': True}, format='json')
+
+		agreement_url = reverse('trader-agreement', args=[self.application.uuid])
+		self.client.force_authenticate(user=applicant)
+		self.assertEqual(self.client.get(reverse('trader-profile', args=[self.application.uuid])).status_code, 404)
+		self.assertEqual(self.client.get(agreement_url).status_code, 200)
+
+		invalid_name = self.client.post(agreement_url, {'accepted': True, 'signed_name': 'Someone Else'}, format='json')
+		self.assertEqual(invalid_name.status_code, 400)
+
+		signed = self.client.post(agreement_url, {'accepted': True, 'signed_name': 'Applicant'}, format='json')
+		self.assertEqual(signed.status_code, 200)
+		self.assertFalse(signed.data['id_document_included'])
+		self.assertEqual(signed.data['trader']['national_id'], 'CM1234567890AB')
+		self.assertIsNotNone(signed.data['effective_at'])
+		self.assertEqual(self.client.get(reverse('trader-profile', args=[self.application.uuid])).status_code, 200)
+		self.assertEqual(self.client.post(agreement_url, {'accepted': True, 'signed_name': 'Applicant'}, format='json').status_code, 400)
 
 
 class TraderInventoryStockSyncTests(TestCase):
