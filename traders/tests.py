@@ -123,6 +123,39 @@ class PublicTraderProfileTests(TestCase):
 		self.assertIsNone(response.data)
 
 
+class TraderApplicationTermsTests(TestCase):
+	def setUp(self):
+		self.user = User.objects.create_user(email='applicant@example.com', name='Applicant', password='Password123!')
+		self.client = APIClient()
+		self.client.force_authenticate(user=self.user)
+		self.payload = {
+			'full_name': 'Applicant',
+			'email': self.user.email,
+			'phone': '0700000000',
+			'national_id': 'ID-123',
+			'business_name': 'Applicant Gadgets',
+			'business_type': 'sole_proprietor',
+			'location': 'Kampala',
+			'product_categories': 'Electronics',
+		}
+
+	def test_application_rejects_missing_terms_acceptance(self):
+		response = self.client.post('/api/traders/apply/', self.payload, format='json')
+
+		self.assertEqual(response.status_code, 400)
+		self.assertIn('agreed_to_terms', response.data)
+
+	def test_application_accepts_explicit_terms_agreement(self):
+		response = self.client.post(
+			'/api/traders/apply/',
+			{**self.payload, 'agreed_to_terms': True},
+			format='json',
+		)
+
+		self.assertEqual(response.status_code, 201)
+		self.assertTrue(response.data['agreed_to_terms'])
+
+
 class TraderInventoryStockSyncTests(TestCase):
 	def setUp(self):
 		self.user = User.objects.create_user(email='inventory-seller@example.com', name='Inventory Seller', password='Password123!')

@@ -4,6 +4,7 @@ from .models import TraderApplication, TraderProduct, TraderSale, TraderExpense,
 
 
 class TraderApplicationSerializer(serializers.ModelSerializer):
+    agreed_to_terms = serializers.BooleanField(required=True)
     reviewed_by_name = serializers.CharField(source='reviewed_by.name', read_only=True, default=None)
 
     class Meta:
@@ -20,6 +21,11 @@ class TraderApplicationSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError('An active application with this email already exists.')
         # Delete old rejected record so new one can be created cleanly
         qs.filter(status='rejected').delete()
+        return value
+
+    def validate_agreed_to_terms(self, value):
+        if not value:
+            raise serializers.ValidationError('You must read and accept the trader rules and terms before applying.')
         return value
 
 
