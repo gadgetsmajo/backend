@@ -30,6 +30,8 @@ class SupportConversation(models.Model):
     user = models.OneToOneField('User', on_delete=models.CASCADE, related_name='support_conversation')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    customer_typing_at = models.DateTimeField(null=True, blank=True)
+    staff_typing_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ['-updated_at']

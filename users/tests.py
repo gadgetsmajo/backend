@@ -175,6 +175,25 @@ class SupportChatApiTests(TestCase):
         response = self.client.get('/api/auth/admin/support/conversations/')
         self.assertEqual(response.status_code, 403)
 
+    def test_typing_status_is_visible_to_the_other_participant(self):
+        self.client.force_authenticate(user=self.customer)
+        sent = self.client.post('/api/auth/support/chat/', {'body': 'Can someone help?'}, format='json')
+        conversation_id = sent.data['conversation_id']
+        self.client.patch('/api/auth/support/chat/', {'is_typing': True}, format='json')
+
+        self.client.force_authenticate(user=self.staff)
+        staff_view = self.client.get(f'/api/auth/admin/support/conversations/{conversation_id}/')
+        self.assertTrue(staff_view.data['customer_typing'])
+        self.client.patch(
+            f'/api/auth/admin/support/conversations/{conversation_id}/',
+            {'is_typing': True},
+            format='json',
+        )
+
+        self.client.force_authenticate(user=self.customer)
+        customer_view = self.client.get('/api/auth/support/chat/')
+        self.assertTrue(customer_view.data['staff_typing'])
+
 
 class GoogleLoginAvatarTests(TestCase):
     @patch('cloudinary.uploader.upload')

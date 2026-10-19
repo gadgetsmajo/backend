@@ -1,5 +1,6 @@
 import logging
 import secrets
+from datetime import timedelta
 from urllib.parse import urlparse
 from rest_framework import generics, permissions, status
 from rest_framework.response import Response
@@ -9,6 +10,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from django.contrib.auth import get_user_model, authenticate
 from django.core.cache import cache
 from django.conf import settings
+from django.utils import timezone
 from .serializers import RegisterSerializer, UserSerializer, UpdateProfileSerializer, CartItemSerializer, WishlistItemSerializer, NotificationSerializer
 from .models import CartItem, WishlistItem, Notification, UserBehaviour, SupportConversation, SupportMessage
 from .emails import send_welcome_email, send_password_reset_email, send_password_changed_email
@@ -114,6 +116,10 @@ def _support_message_data(message):
     }
 
 
+def _is_typing(timestamp):
+    return bool(timestamp and timestamp >= timezone.now() - timedelta(seconds=8))
+
+
 class IsSupportStaff(permissions.BasePermission):
     def has_permission(self, request, view):
         user = request.user
@@ -129,7 +135,7 @@ class SupportChatView(APIView):
     def get(self, request):
         conversation = SupportConversation.objects.filter(user=request.user).first()
         if not conversation:
-            return Response({'conversation_id': None, 'messages': [], 'unread_count': 0})
+            return Response({'conversation_id': None, 'messages': [], 'unread_count': 0, 'staff_typing': False})
 
         if request.query_params.get('mark_read') == 'true':
             conversation.messages.filter(sender__is_staff=True, is_read=False).update(is_read=True)
@@ -140,7 +146,18 @@ class SupportChatView(APIView):
             'conversation_id': conversation.id,
             'messages': [_support_message_data(message) for message in messages],
             'unread_count': unread_count,
+            'staff_typing': _is_typing(conversation.staff_typing_at),
         })
+
+    def patch(self, request):
+        is_typing = request.data.get('is_typing')
+        if not isinstance(is_typing, bool):
+            return Response({'is_typing': 'This field must be a boolean.'}, status=status.HTTP_400_BAD_REQUEST)
+        conversation = SupportConversation.objects.filter(user=request.user).first()
+        if conversation:
+            conversation.customer_typing_at = timezone.now() if is_typing else None
+            conversation.save(update_fields=['customer_typing_at'])
+        return Response({'is_typing': is_typing})
 
     def post(self, request):
         body = request.data.get('body', '')
@@ -151,7 +168,8 @@ class SupportChatView(APIView):
 
         conversation, _ = SupportConversation.objects.get_or_create(user=request.user)
         message = SupportMessage.objects.create(conversation=conversation, sender=request.user, body=body.strip())
-        conversation.save(update_fields=['updated_at'])
+        conversation.customer_typing_at = None
+        conversation.save(update_fields=['updated_at', 'customer_typing_at'])
         return Response(_support_message_data(message), status=status.HTTP_201_CREATED)
 
 
@@ -195,8 +213,20 @@ class AdminSupportConversationView(APIView):
             'user_id': conversation.user_id,
             'user_name': conversation.user.name,
             'user_email': conversation.user.email,
+            'customer_typing': _is_typing(conversation.customer_typing_at),
             'messages': [_support_message_data(message) for message in messages],
         })
+
+    def patch(self, request, pk):
+        conversation = self.get_conversation(pk)
+        if not conversation:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+        is_typing = request.data.get('is_typing')
+        if not isinstance(is_typing, bool):
+            return Response({'is_typing': 'This field must be a boolean.'}, status=status.HTTP_400_BAD_REQUEST)
+        conversation.staff_typing_at = timezone.now() if is_typing else None
+        conversation.save(update_fields=['staff_typing_at'])
+        return Response({'is_typing': is_typing})
 
     def post(self, request, pk):
         conversation = self.get_conversation(pk)
@@ -209,7 +239,8 @@ class AdminSupportConversationView(APIView):
             return Response({'body': 'Messages cannot exceed 2000 characters.'}, status=status.HTTP_400_BAD_REQUEST)
 
         message = SupportMessage.objects.create(conversation=conversation, sender=request.user, body=body.strip())
-        conversation.save(update_fields=['updated_at'])
+        conversation.staff_typing_at = None
+        conversation.save(update_fields=['updated_at', 'staff_typing_at'])
         return Response(_support_message_data(message), status=status.HTTP_201_CREATED)
 
 
