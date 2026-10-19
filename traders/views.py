@@ -1,10 +1,11 @@
 from datetime import timedelta
 from urllib.request import urlopen
 import json
+import logging
 import mimetypes
 import os
 
-from cloudinary.utils import cloudinary_url
+from cloudinary.utils import private_download_url
 from django.conf import settings
 from django.core.serializers.json import DjangoJSONEncoder
 from django.http import HttpResponse
@@ -25,6 +26,7 @@ from .serializers import (
 )
 
 MAX_TRADER_DOCUMENT_SIZE = 10 * 1024 * 1024
+logger = logging.getLogger(__name__)
 
 
 def _get_trader_by_uuid(uuid_str):
@@ -526,21 +528,20 @@ class AdminTraderDocumentView(APIView):
             return Response({'detail': 'Document not found.'}, status=status.HTTP_404_NOT_FOUND)
 
         try:
-            document_url = cloudinary_url(
+            document_url = private_download_url(
                 document.public_id,
+                document.format,
                 resource_type='raw',
                 type='authenticated',
-                version=document.version,
-                format=document.format,
-                secure=True,
-                sign_url=True,
-            )[0]
+                expires_at=int(timezone.now().timestamp()) + 60,
+            )
             with urlopen(document_url, timeout=20) as upstream:
                 content = upstream.read(MAX_TRADER_DOCUMENT_SIZE + 1)
                 if len(content) > MAX_TRADER_DOCUMENT_SIZE:
                     return Response({'detail': 'Document exceeds the permitted size.'}, status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
                 content_type = upstream.headers.get('Content-Type') or mimetypes.guess_type(document.format or '')[0] or 'application/octet-stream'
         except Exception:
+            logger.exception('Unable to retrieve trader application document for application %s (%s)', pk, document_type)
             return Response({'detail': 'Could not retrieve the document from secure storage.'}, status=status.HTTP_502_BAD_GATEWAY)
 
         filename = os.path.basename(document.public_id or f'{document_type}.{document.format or "pdf"}')

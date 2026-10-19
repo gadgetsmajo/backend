@@ -1,5 +1,5 @@
 from datetime import timedelta
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from cloudinary import CloudinaryResource
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -247,6 +247,35 @@ class TraderApplicationApprovalTests(TestCase):
 		self.assertIsNotNone(signed.data['effective_at'])
 		self.assertEqual(self.client.get(reverse('trader-profile', args=[self.application.uuid])).status_code, 200)
 		self.assertEqual(self.client.post(agreement_url, {'accepted': True, 'signed_name': 'Applicant'}, format='json').status_code, 400)
+
+	def test_admin_document_preview_downloads_authenticated_raw_file(self):
+		url = reverse('admin-trader-document', args=[self.application.id, 'national-id'])
+		upstream_response = MagicMock()
+		upstream_response.read.return_value = b'%PDF-id-copy'
+		upstream_response.headers.get.return_value = 'application/pdf'
+		with patch('traders.views.private_download_url', return_value='https://cloudinary.test/private-download') as download_url:
+			with patch('traders.views.urlopen') as open_url:
+				open_url.return_value.__enter__.return_value = upstream_response
+				response = self.client.get(url)
+
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(response.content, b'%PDF-id-copy')
+		self.assertEqual(response['Content-Type'], 'application/pdf')
+		self.assertEqual(response['Cache-Control'], 'private, no-store')
+		download_url.assert_called_once()
+		self.assertEqual(download_url.call_args.args, ('id-copy', 'pdf'))
+		self.assertEqual(download_url.call_args.kwargs['resource_type'], 'raw')
+		self.assertEqual(download_url.call_args.kwargs['type'], 'authenticated')
+		open_url.assert_called_once_with('https://cloudinary.test/private-download', timeout=20)
+
+	def test_admin_document_preview_sanitizes_storage_errors(self):
+		url = reverse('admin-trader-document', args=[self.application.id, 'national-id'])
+		with patch('traders.views.private_download_url', side_effect=OSError('Cloudinary unavailable')):
+			with self.assertLogs('traders.views', level='ERROR'):
+				response = self.client.get(url)
+
+		self.assertEqual(response.status_code, 502)
+		self.assertEqual(response.data['detail'], 'Could not retrieve the document from secure storage.')
 
 
 class TraderInventoryStockSyncTests(TestCase):
