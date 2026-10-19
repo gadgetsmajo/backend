@@ -124,6 +124,58 @@ class ProfilePasswordFlowTests(TestCase):
         self.assertTrue(self.user.check_password('old-password-123'))
 
 
+class SupportChatApiTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.customer = User.objects.create_user(
+            email='customer@example.com', name='Customer', password='password-123',
+        )
+        self.staff = User.objects.create_user(
+            email='staff@example.com', name='Support Agent', password='password-123', is_staff=True,
+        )
+
+    def test_customer_can_send_message_and_staff_can_reply(self):
+        self.client.force_authenticate(user=self.customer)
+        sent = self.client.post('/api/auth/support/chat/', {'body': 'I need help with my order.'}, format='json')
+        self.assertEqual(sent.status_code, 201)
+        conversation_id = sent.data['conversation_id']
+
+        self.client.force_authenticate(user=self.staff)
+        inbox = self.client.get('/api/auth/admin/support/conversations/')
+        self.assertEqual(inbox.status_code, 200)
+        self.assertEqual(inbox.data[0]['unread_count'], 1)
+        reply = self.client.post(
+            f'/api/auth/admin/support/conversations/{conversation_id}/',
+            {'body': 'We are checking this for you.'},
+            format='json',
+        )
+        self.assertEqual(reply.status_code, 201)
+
+        self.client.force_authenticate(user=self.customer)
+        chat = self.client.get('/api/auth/support/chat/?mark_read=true')
+        self.assertEqual(chat.status_code, 200)
+        self.assertEqual(len(chat.data['messages']), 2)
+        self.assertEqual(chat.data['unread_count'], 0)
+
+    def test_chat_requires_authentication_and_staff_routes_require_staff(self):
+        self.assertEqual(self.client.get('/api/auth/support/chat/').status_code, 401)
+
+        self.client.force_authenticate(user=self.customer)
+        self.assertEqual(self.client.get('/api/auth/admin/support/conversations/').status_code, 403)
+
+    def test_customer_message_rejects_blank_content(self):
+        self.client.force_authenticate(user=self.customer)
+        response = self.client.post('/api/auth/support/chat/', {'body': '  '}, format='json')
+        self.assertEqual(response.status_code, 400)
+
+    def test_staff_without_support_assignment_cannot_open_inbox(self):
+        self.staff.assigned_pages = ['Orders']
+        self.staff.save(update_fields=['assigned_pages'])
+        self.client.force_authenticate(user=self.staff)
+        response = self.client.get('/api/auth/admin/support/conversations/')
+        self.assertEqual(response.status_code, 403)
+
+
 class GoogleLoginAvatarTests(TestCase):
     @patch('cloudinary.uploader.upload')
     @patch('urllib.request.urlopen')

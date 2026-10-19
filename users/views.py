@@ -10,7 +10,7 @@ from django.contrib.auth import get_user_model, authenticate
 from django.core.cache import cache
 from django.conf import settings
 from .serializers import RegisterSerializer, UserSerializer, UpdateProfileSerializer, CartItemSerializer, WishlistItemSerializer, NotificationSerializer
-from .models import CartItem, WishlistItem, Notification, UserBehaviour
+from .models import CartItem, WishlistItem, Notification, UserBehaviour, SupportConversation, SupportMessage
 from .emails import send_welcome_email, send_password_reset_email, send_password_changed_email
 from .sms import send_welcome_sms
 
@@ -99,6 +99,118 @@ class AdminUserDetailView(APIView):
             return Response(status=status.HTTP_404_NOT_FOUND)
         user.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+def _support_message_data(message):
+    return {
+        'id': message.id,
+        'conversation_id': message.conversation_id,
+        'sender_id': message.sender_id,
+        'sender_name': message.sender.name,
+        'is_staff': message.sender.is_staff,
+        'body': message.body,
+        'is_read': message.is_read,
+        'created_at': message.created_at,
+    }
+
+
+class IsSupportStaff(permissions.BasePermission):
+    def has_permission(self, request, view):
+        user = request.user
+        return bool(
+            user and user.is_authenticated and user.is_staff
+            and (user.is_superuser or not user.assigned_pages or 'Support' in user.assigned_pages)
+        )
+
+
+class SupportChatView(APIView):
+    permission_classes = (permissions.IsAuthenticated,)
+
+    def get(self, request):
+        conversation = SupportConversation.objects.filter(user=request.user).first()
+        if not conversation:
+            return Response({'conversation_id': None, 'messages': [], 'unread_count': 0})
+
+        if request.query_params.get('mark_read') == 'true':
+            conversation.messages.filter(sender__is_staff=True, is_read=False).update(is_read=True)
+
+        messages = conversation.messages.select_related('sender').all()
+        unread_count = conversation.messages.filter(sender__is_staff=True, is_read=False).count()
+        return Response({
+            'conversation_id': conversation.id,
+            'messages': [_support_message_data(message) for message in messages],
+            'unread_count': unread_count,
+        })
+
+    def post(self, request):
+        body = request.data.get('body', '')
+        if not isinstance(body, str) or not body.strip():
+            return Response({'body': 'Enter a message.'}, status=status.HTTP_400_BAD_REQUEST)
+        if len(body.strip()) > 2000:
+            return Response({'body': 'Messages cannot exceed 2000 characters.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        conversation, _ = SupportConversation.objects.get_or_create(user=request.user)
+        message = SupportMessage.objects.create(conversation=conversation, sender=request.user, body=body.strip())
+        conversation.save(update_fields=['updated_at'])
+        return Response(_support_message_data(message), status=status.HTTP_201_CREATED)
+
+
+class AdminSupportConversationListView(APIView):
+    permission_classes = (IsSupportStaff,)
+
+    def get(self, request):
+        conversations = SupportConversation.objects.select_related('user').prefetch_related('messages__sender')
+        results = []
+        for conversation in conversations:
+            latest = conversation.messages.order_by('-created_at').first()
+            results.append({
+                'id': conversation.id,
+                'user_id': conversation.user_id,
+                'user_name': conversation.user.name,
+                'user_email': conversation.user.email,
+                'updated_at': conversation.updated_at,
+                'unread_count': conversation.messages.filter(sender__is_staff=False, is_read=False).count(),
+                'last_message': _support_message_data(latest) if latest else None,
+            })
+        return Response(results)
+
+
+class AdminSupportConversationView(APIView):
+    permission_classes = (IsSupportStaff,)
+
+    def get_conversation(self, pk):
+        try:
+            return SupportConversation.objects.select_related('user').get(pk=pk)
+        except SupportConversation.DoesNotExist:
+            return None
+
+    def get(self, request, pk):
+        conversation = self.get_conversation(pk)
+        if not conversation:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+        conversation.messages.filter(sender__is_staff=False, is_read=False).update(is_read=True)
+        messages = conversation.messages.select_related('sender').all()
+        return Response({
+            'id': conversation.id,
+            'user_id': conversation.user_id,
+            'user_name': conversation.user.name,
+            'user_email': conversation.user.email,
+            'messages': [_support_message_data(message) for message in messages],
+        })
+
+    def post(self, request, pk):
+        conversation = self.get_conversation(pk)
+        if not conversation:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+        body = request.data.get('body', '')
+        if not isinstance(body, str) or not body.strip():
+            return Response({'body': 'Enter a reply.'}, status=status.HTTP_400_BAD_REQUEST)
+        if len(body.strip()) > 2000:
+            return Response({'body': 'Messages cannot exceed 2000 characters.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        message = SupportMessage.objects.create(conversation=conversation, sender=request.user, body=body.strip())
+        conversation.save(update_fields=['updated_at'])
+        return Response(_support_message_data(message), status=status.HTTP_201_CREATED)
 
 
 class RegisterView(generics.CreateAPIView):

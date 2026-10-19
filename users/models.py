@@ -26,6 +26,32 @@ class Notification(models.Model):
         return f'{self.user.email} — {self.title}'
 
 
+class SupportConversation(models.Model):
+    user = models.OneToOneField('User', on_delete=models.CASCADE, related_name='support_conversation')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-updated_at']
+
+    def __str__(self):
+        return f'Support conversation with {self.user.email}'
+
+
+class SupportMessage(models.Model):
+    conversation = models.ForeignKey(SupportConversation, on_delete=models.CASCADE, related_name='messages')
+    sender = models.ForeignKey('User', on_delete=models.CASCADE, related_name='support_messages')
+    body = models.CharField(max_length=2000)
+    is_read = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['created_at']
+
+    def __str__(self):
+        return f'Message in support conversation {self.conversation_id}'
+
+
 class UserManager(BaseUserManager):
     def create_user(self, email, password=None, **extra_fields):
         if not email:

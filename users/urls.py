@@ -9,6 +9,7 @@ from .views import (
     NotificationsView, NotificationDetailView, NotificationMarkAllReadView,
     GoogleLoginView, CompleteGoogleProfileView,
     BehaviourTrackView, RecommendedProductsView,
+    SupportChatView, AdminSupportConversationListView, AdminSupportConversationView,
 )
 
 urlpatterns = [
@@ -31,4 +32,7 @@ urlpatterns = [
     path('notifications/<int:pk>/', NotificationDetailView.as_view(), name='notification-detail'),
     path('behaviour/', BehaviourTrackView.as_view(), name='behaviour-track'),
     path('recommended/', RecommendedProductsView.as_view(), name='recommended-products'),
+    path('support/chat/', SupportChatView.as_view(), name='support-chat'),
+    path('admin/support/conversations/', AdminSupportConversationListView.as_view(), name='admin-support-conversations'),
+    path('admin/support/conversations/<int:pk>/', AdminSupportConversationView.as_view(), name='admin-support-conversation'),
 ]
