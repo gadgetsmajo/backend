@@ -80,6 +80,21 @@ class EmailStatusHeroTests(TestCase):
                 self.assertNotIn('🚚', html)
                 self.assertNotIn('Order Progress', html)
 
+    def test_admin_new_order_email_uses_admin_alias_for_recipient_and_reply(self):
+        with patch.object(emails, '_send') as send:
+            emails.send_admin_new_order_email('ORD-1', 'Customer', 'customer@example.com', '1000', [], 'Kampala')
+
+        payload = send.call_args.args[0]
+        self.assertEqual(payload['to'], emails.settings.ADMIN_EMAIL)
+        self.assertEqual(payload['reply_to'], emails.settings.ADMIN_EMAIL)
+
+    def test_customer_transactional_email_replies_to_support_alias(self):
+        with patch.object(emails.resend.Emails, 'send') as send:
+            emails._send({'from': emails.FROM, 'to': 'customer@example.com', 'subject': 'Test', 'html': 'Test'})
+
+        payload = send.call_args.args[0]
+        self.assertEqual(payload['reply_to'], emails.settings.SUPPORT_EMAIL)
+
 
 class ProfilePasswordFlowTests(TestCase):
     def setUp(self):

@@ -160,7 +160,8 @@ GOOGLE_CLIENT_ID = config('GOOGLE_CLIENT_ID', default='')
 # Resend email
 RESEND_API_KEY = config('RESEND_API_KEY', default='')
 FRONTEND_URL = config('FRONTEND_URL', default='https://www.majogadgets.com')
-ADMIN_EMAIL = config('ADMIN_EMAIL', default='ayesigawinnie57@gmail.com')
+ADMIN_EMAIL = config('ADMIN_EMAIL', default='admin@majogadgets.com')
+SUPPORT_EMAIL = config('SUPPORT_EMAIL', default='support@majogadgets.com')
 
 # TextBee SMS
 TEXTBEE_API_KEY = config('TEXTBEE_API_KEY', default='')

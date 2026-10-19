@@ -6,9 +6,10 @@ from django.conf import settings
 
 def _send(payload: dict):
     resend.api_key = settings.RESEND_API_KEY
+    payload.setdefault('reply_to', settings.SUPPORT_EMAIL)
     resend.Emails.send(payload)
 
-FROM = 'Majo Gadgets <noreply@majogadgets.com>'
+FROM = 'Majo Gadgets <support@majogadgets.com>'
 LOGO = 'https://res.cloudinary.com/fhklnn0f/image/upload/v1789111152/Majo_Gadgets_logo_an2hbc.png'
 IMG_CART = 'https://res.cloudinary.com/fhklnn0f/image/upload/v1789551363/shopping_cart.png'
 IMG_WELCOME = 'https://res.cloudinary.com/fhklnn0f/image/upload/v1789298565/OG.png'
@@ -211,7 +212,7 @@ def send_admin_new_order_email(order_code: str, customer_name: str, customer_ema
       </div>
       <p style="margin:16px 0 0;font-size:13px;color:#333333">Or track it at: <a href="{settings.FRONTEND_URL}/orders/{order_code}" style="color:#1E3A8A !important">{settings.FRONTEND_URL}/orders/{order_code}</a></p>
     '''
-    _send({'from': FROM, 'to': settings.ADMIN_EMAIL, 'subject': f'New Order #{order_code} — UGX {total}', 'html': _wrap(body)})
+    _send({'from': FROM, 'to': settings.ADMIN_EMAIL, 'reply_to': settings.ADMIN_EMAIL, 'subject': f'New Order #{order_code} — UGX {total}', 'html': _wrap(body)})
 
 
 def send_order_placed_email(name: str, email: str, order_code: str, total: str, items: list, delivery_address: str):
