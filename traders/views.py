@@ -1,5 +1,10 @@
 from datetime import timedelta
+from urllib.request import urlopen
+import mimetypes
+import os
 
+from cloudinary.utils import cloudinary_url
+from django.http import HttpResponse
 from django.db.models import Avg, Count, F, Q
 from orders.models import OrderItem
 from products.models import Product, ProductReview
@@ -13,6 +18,8 @@ from .serializers import (
     TraderProductSerializer, TraderSaleSerializer, TraderExpenseSerializer,
     TraderOrderItemSerializer, TraderInventoryItemSerializer, TraderStockMovementSerializer,
 )
+
+MAX_TRADER_DOCUMENT_SIZE = 10 * 1024 * 1024
 
 
 def _get_trader_by_uuid(uuid_str):
@@ -52,7 +59,7 @@ class TraderApplicationCreateView(generics.CreateAPIView):
             )
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        serializer.save(user=request.user)
+        serializer.save(user=request.user, terms_accepted_at=timezone.now())
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 
@@ -427,6 +434,56 @@ class AdminTraderDetailView(generics.RetrieveAPIView):
     permission_classes = (permissions.IsAdminUser,)
 
 
+class AdminTraderDocumentView(APIView):
+    permission_classes = (permissions.IsAdminUser,)
+
+    DOCUMENT_FIELDS = {
+        'national-id': 'national_id_document',
+        'ura-certificate': 'ura_certificate_document',
+        'business-location': 'business_location_proof',
+    }
+
+    def get(self, request, pk, document_type):
+        field_name = self.DOCUMENT_FIELDS.get(document_type)
+        if not field_name:
+            return Response({'detail': 'Unknown document type.'}, status=status.HTTP_404_NOT_FOUND)
+        try:
+            application = TraderApplication.objects.get(pk=pk)
+        except TraderApplication.DoesNotExist:
+            return Response({'detail': 'Application not found.'}, status=status.HTTP_404_NOT_FOUND)
+        document = getattr(application, field_name)
+        if not document:
+            return Response({'detail': 'Document not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        try:
+            document_url = cloudinary_url(
+                document.public_id,
+                resource_type='raw',
+                type='authenticated',
+                version=document.version,
+                format=document.format,
+                secure=True,
+                sign_url=True,
+            )[0]
+            with urlopen(document_url, timeout=20) as upstream:
+                content = upstream.read(MAX_TRADER_DOCUMENT_SIZE + 1)
+                if len(content) > MAX_TRADER_DOCUMENT_SIZE:
+                    return Response({'detail': 'Document exceeds the permitted size.'}, status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
+                content_type = upstream.headers.get('Content-Type') or mimetypes.guess_type(document.format or '')[0] or 'application/octet-stream'
+        except Exception:
+            return Response({'detail': 'Could not retrieve the document from secure storage.'}, status=status.HTTP_502_BAD_GATEWAY)
+
+        filename = os.path.basename(document.public_id or f'{document_type}.{document.format or "pdf"}')
+        if document.format and not filename.lower().endswith(f'.{document.format.lower()}'):
+            filename = f'{filename}.{document.format}'
+        safe_filename = filename.replace('"', '').replace('\\', '')
+        response = HttpResponse(content, content_type=content_type)
+        response['Content-Disposition'] = f'inline; filename="{safe_filename}"'
+        response['Cache-Control'] = 'private, no-store'
+        response['X-Content-Type-Options'] = 'nosniff'
+        return response
+
+
 # ── Admin: approve ────────────────────────────────────────────────────────────
 
 class AdminTraderApproveView(APIView):
@@ -441,10 +498,20 @@ class AdminTraderApproveView(APIView):
         if app.status == 'approved':
             return Response({'detail': 'Already approved.'}, status=status.HTTP_400_BAD_REQUEST)
 
+        if not app.national_id_document or not app.business_location_proof:
+            return Response({'detail': 'Required identity and business location documents are missing.'}, status=status.HTTP_400_BAD_REQUEST)
+        if not app.ura_certificate_document and not app.tin.strip():
+            return Response({'detail': 'A URA certificate or TIN is required before approval.'}, status=status.HTTP_400_BAD_REQUEST)
+        if request.data.get('documents_verified') is not True:
+            return Response({'detail': 'Confirm that you reviewed the documents and verified the ID before approval.'}, status=status.HTTP_400_BAD_REQUEST)
+
         app.status = 'approved'
+        app.documents_verified = True
         app.admin_note = request.data.get('admin_note', '')
         app.reviewed_by = request.user
         app.reviewed_at = timezone.now()
+        app.agreement_reference = app.agreement_reference or f'MG-TRADER-{app.pk:06d}'
+        app.agreement_issued_at = app.agreement_issued_at or app.reviewed_at
         app.save()
 
         # Email notification

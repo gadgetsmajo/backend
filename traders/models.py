@@ -25,13 +25,22 @@ class TraderApplication(models.Model):
     email           = models.EmailField(unique=True)
     phone           = models.CharField(max_length=30)
     national_id     = models.CharField(max_length=50, blank=True)
+    national_id_document = cloudinary.models.CloudinaryField(
+        'file', type='authenticated', resource_type='raw', folder='trader_applications/national_ids', blank=True, null=True,
+    )
 
     # Business info
     business_name   = models.CharField(max_length=255)
     business_type   = models.CharField(max_length=20, choices=BUSINESS_TYPES)
     business_reg_no = models.CharField(max_length=100, blank=True)
     tin             = models.CharField(max_length=50, blank=True, verbose_name='TIN')
+    ura_certificate_document = cloudinary.models.CloudinaryField(
+        'file', type='authenticated', resource_type='raw', folder='trader_applications/ura_certificates', blank=True, null=True,
+    )
     location        = models.CharField(max_length=255)
+    business_location_proof = cloudinary.models.CloudinaryField(
+        'file', type='authenticated', resource_type='raw', folder='trader_applications/business_location', blank=True, null=True,
+    )
     district        = models.CharField(max_length=100, blank=True)
     website         = models.URLField(blank=True)
 
@@ -48,6 +57,10 @@ class TraderApplication(models.Model):
 
     # Agreement
     agreed_to_terms = models.BooleanField(default=False)
+    terms_accepted_at = models.DateTimeField(null=True, blank=True)
+    documents_verified = models.BooleanField(default=False)
+    agreement_reference = models.CharField(max_length=40, blank=True)
+    agreement_issued_at = models.DateTimeField(null=True, blank=True)
 
     # Status
     status       = models.CharField(max_length=10, choices=STATUS, default='pending')

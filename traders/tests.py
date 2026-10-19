@@ -1,5 +1,9 @@
 from datetime import timedelta
+from unittest.mock import patch
 
+from cloudinary import CloudinaryResource
+from django.core.files.uploadedfile import SimpleUploadedFile
+from cloudinary import CloudinaryResource
 from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
@@ -132,7 +136,7 @@ class TraderApplicationTermsTests(TestCase):
 			'full_name': 'Applicant',
 			'email': self.user.email,
 			'phone': '0700000000',
-			'national_id': 'ID-123',
+			'national_id': 'CM1234567890AB',
 			'business_name': 'Applicant Gadgets',
 			'business_type': 'sole_proprietor',
 			'location': 'Kampala',
@@ -145,15 +149,78 @@ class TraderApplicationTermsTests(TestCase):
 		self.assertEqual(response.status_code, 400)
 		self.assertIn('agreed_to_terms', response.data)
 
-	def test_application_accepts_explicit_terms_agreement(self):
+	@patch('cloudinary.models.uploader.upload_resource')
+	def test_application_accepts_explicit_terms_agreement_and_evidence(self, mock_upload):
+		mock_upload.return_value = CloudinaryResource(
+			public_id='trader_applications/test-document',
+			version='1',
+			format='pdf',
+			type='authenticated',
+			resource_type='raw',
+		)
+		payload = {
+			**self.payload,
+			'agreed_to_terms': True,
+			'national_id_document': SimpleUploadedFile('national-id.pdf', b'%PDF-id', content_type='application/pdf'),
+			'ura_certificate_document': SimpleUploadedFile('ura-certificate.pdf', b'%PDF-ura', content_type='application/pdf'),
+			'business_location_proof': SimpleUploadedFile('premises.pdf', b'%PDF-premises', content_type='application/pdf'),
+		}
 		response = self.client.post(
 			'/api/traders/apply/',
-			{**self.payload, 'agreed_to_terms': True},
-			format='json',
+			payload,
+			format='multipart',
 		)
 
 		self.assertEqual(response.status_code, 201)
 		self.assertTrue(response.data['agreed_to_terms'])
+
+	@patch('cloudinary.models.uploader.upload_resource')
+	def test_numeric_only_national_id_is_rejected(self, mock_upload):
+		mock_upload.return_value = CloudinaryResource(
+			public_id='trader_applications/test-document', version='1', format='pdf',
+			type='authenticated', resource_type='raw',
+		)
+		payload = {
+			**self.payload,
+			'national_id': '123456789012',
+			'agreed_to_terms': True,
+			'national_id_document': SimpleUploadedFile('national-id.pdf', b'%PDF-id', content_type='application/pdf'),
+			'business_location_proof': SimpleUploadedFile('premises.pdf', b'%PDF-premises', content_type='application/pdf'),
+			'tin': '1234567890',
+		}
+
+		response = self.client.post('/api/traders/apply/', payload, format='multipart')
+
+		self.assertEqual(response.status_code, 400)
+		self.assertIn('national_id', response.data)
+
+
+class TraderApplicationApprovalTests(TestCase):
+	def setUp(self):
+		self.admin = User.objects.create_user(email='reviewer@example.com', name='Reviewer', password='Password123!', is_staff=True)
+		self.client = APIClient()
+		self.client.force_authenticate(user=self.admin)
+		self.application = TraderApplication.objects.create(
+			full_name='Applicant', email='approved-applicant@example.com', phone='0700000000',
+			national_id='CM1234567890AB',
+			national_id_document=CloudinaryResource(public_id='id-copy', version='1', format='pdf', type='authenticated', resource_type='raw'),
+			business_name='Applicant Gadgets', business_type='sole_proprietor', business_reg_no='REG-123',
+			tin='1234567890', location='Kampala',
+			business_location_proof=CloudinaryResource(public_id='location-proof', version='1', format='pdf', type='authenticated', resource_type='raw'),
+			product_categories='Electronics', agreed_to_terms=True,
+		)
+
+	@patch('users.emails.send_trader_approved_email')
+	def test_approval_requires_admin_document_verification_and_issues_agreement(self, _send_email):
+		url = reverse('admin-trader-approve', args=[self.application.id])
+		blocked = self.client.post(url, {}, format='json')
+		self.assertEqual(blocked.status_code, 400)
+
+		approved = self.client.post(url, {'documents_verified': True}, format='json')
+		self.assertEqual(approved.status_code, 200)
+		self.assertTrue(approved.data['documents_verified'])
+		self.assertTrue(approved.data['agreement_reference'])
+		self.assertIsNotNone(approved.data['agreement_issued_at'])
 
 
 class TraderInventoryStockSyncTests(TestCase):

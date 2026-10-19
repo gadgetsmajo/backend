@@ -9,6 +9,7 @@ from .views import (
     TraderAccountView,
     AdminTraderListView, AdminTraderDetailView,
     AdminTraderApproveView, AdminTraderRejectView,
+    AdminTraderDocumentView,
 )
 
 urlpatterns = [
@@ -33,6 +34,7 @@ urlpatterns = [
 
     # Admin
     path('admin/',                                                      AdminTraderListView.as_view(),         name='admin-trader-list'),
+    path('admin/<int:pk>/documents/<str:document_type>/',              AdminTraderDocumentView.as_view(),      name='admin-trader-document'),
     path('admin/<int:pk>/',                                             AdminTraderDetailView.as_view(),       name='admin-trader-detail'),
     path('admin/<int:pk>/approve/',                                     AdminTraderApproveView.as_view(),      name='admin-trader-approve'),
     path('admin/<int:pk>/reject/',                                      AdminTraderRejectView.as_view(),       name='admin-trader-reject'),
