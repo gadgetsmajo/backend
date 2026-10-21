@@ -3,7 +3,7 @@ from users.models import User
 
 
 class Command(BaseCommand):
-    help = 'Create or upgrade a superadmin account with all permissions'
+    help = 'Create or synchronize a superadmin account with all permissions'
 
     def add_arguments(self, parser):
         parser.add_argument('email',    type=str)
@@ -19,7 +19,8 @@ class Command(BaseCommand):
 
         if created:
             user.full_name = name
-            user.set_password(password)
+
+        user.set_password(password)
 
         user.is_staff       = True
         user.is_superuser   = True
