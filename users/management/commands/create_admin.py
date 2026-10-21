@@ -1,26 +1,34 @@
-import os
-
-from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand
-
-User = get_user_model()
+from users.models import User
 
 
 class Command(BaseCommand):
-    help = 'Create a superadmin from environment variables ADMIN_EMAIL, ADMIN_NAME, ADMIN_PASSWORD'
+    help = 'Create or upgrade a superadmin account with all permissions'
 
-    def handle(self, *args, **options):
-        email = os.environ.get('ADMIN_EMAIL')
-        name = os.environ.get('ADMIN_NAME')
-        password = os.environ.get('ADMIN_PASSWORD')
+    def add_arguments(self, parser):
+        parser.add_argument('email',    type=str)
+        parser.add_argument('password', type=str)
+        parser.add_argument('--name',   type=str, default='Admin')
 
-        if not all([email, name, password]):
-            self.stdout.write(self.style.WARNING('Skipping: ADMIN_EMAIL, ADMIN_NAME, ADMIN_PASSWORD not set.'))
-            return
+    def handle(self, *args, **kwargs):
+        email    = kwargs['email']
+        password = kwargs['password']
+        name     = kwargs['name']
 
-        if User.objects.filter(email=email).exists():
-            self.stdout.write(self.style.WARNING(f'Admin {email} already exists, skipping.'))
-            return
+        user, created = User.objects.get_or_create(email=email)
 
-        User.objects.create_superuser(email=email, name=name, password=password)
-        self.stdout.write(self.style.SUCCESS(f'Superadmin created: {email}'))
+        if created:
+            user.full_name = name
+            user.set_password(password)
+
+        user.is_staff       = True
+        user.is_superuser   = True
+        user.admin_level    = 'superadmin'
+        user.can_manage_users   = True
+        user.can_manage_devices = True
+        user.can_manage_weather = True
+        user.can_manage_system  = True
+        user.save()
+
+        action = 'created' if created else 'upgraded'
+        self.stdout.write(self.style.SUCCESS(f'Superadmin {action}: {email}'))

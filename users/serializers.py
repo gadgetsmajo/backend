@@ -1,104 +1,96 @@
+import re
+
 from rest_framework import serializers
-from django.contrib.auth import get_user_model
-from .models import CartItem, WishlistItem, Notification
-
-User = get_user_model()
+from django.contrib.auth import authenticate
+from .models import User
 
 
-class NotificationSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Notification
-        fields = ('id', 'type', 'title', 'body', 'action_url', 'read', 'created_at')
-        read_only_fields = ('id', 'type', 'title', 'body', 'created_at')
+def normalize_phone_number(value):
+    if not value:
+        return ''
+
+    digits = re.sub(r'\D', '', value)
+    if not digits:
+        return ''
+
+    if digits.startswith('0') and len(digits) == 10:
+        return '256' + digits[1:]
+    if digits.startswith('256') and len(digits) == 12:
+        return digits
+    return digits
 
 
-class RegisterSerializer(serializers.ModelSerializer):
-    password = serializers.CharField(write_only=True, min_length=8)
-
-    class Meta:
-        model = User
-        fields = ('email', 'name', 'phone', 'password', 'country', 'region', 'district', 'village')
-
-    def create(self, validated_data):
-        validated_data.pop('is_staff', None)
-        validated_data.pop('is_superuser', None)
-        return User.objects.create_user(**validated_data)
-
-
-class UserSerializer(serializers.ModelSerializer):
-    avatar = serializers.SerializerMethodField()
-
-    def get_avatar(self, obj):
-        if not obj.avatar:
-            return None
-        return obj.avatar.url
-
-    class Meta:
-        model = User
-        fields = ('id', 'email', 'name', 'phone', 'avatar', 'is_staff', 'is_superuser', 'assigned_pages', 'created_at', 'country', 'region', 'district', 'village')
-        read_only_fields = ('id', 'email', 'is_superuser', 'created_at')
-
-
-class UpdateProfileSerializer(serializers.ModelSerializer):
-    current_password = serializers.CharField(write_only=True, required=False, allow_blank=True)
-    new_password = serializers.CharField(write_only=True, required=False, min_length=8, allow_blank=True)
-    password_confirm = serializers.CharField(write_only=True, required=False, allow_blank=True)
-    password = serializers.CharField(write_only=True, min_length=8, required=False, allow_blank=True)
-    is_staff = serializers.BooleanField(required=False)
-
-    class Meta:
-        model = User
-        fields = ('name', 'email', 'phone', 'avatar', 'current_password', 'new_password', 'password_confirm', 'password', 'is_staff', 'assigned_pages')
+class SignupSerializer(serializers.Serializer):
+    full_name        = serializers.CharField(max_length=150)
+    email            = serializers.EmailField(required=False, allow_blank=True)
+    phone_number     = serializers.CharField(max_length=20, required=False, allow_blank=True)
+    password         = serializers.CharField(write_only=True, min_length=8)
+    confirm_password = serializers.CharField(write_only=True)
 
     def validate(self, attrs):
-        current_password = attrs.get('current_password')
-        new_password = attrs.get('new_password') or attrs.get('password')
-        password_confirm = attrs.get('password_confirm')
+        email        = attrs.get('email', '').strip()
+        phone_number = attrs.get('phone_number', '').strip()
 
-        has_password_change = any(value not in (None, '') for value in [current_password, new_password, password_confirm])
-        if not has_password_change:
-            return attrs
+        if not email and not phone_number:
+            raise serializers.ValidationError({'identifier': 'Email or phone number is required.'})
 
-        if not current_password:
-            raise serializers.ValidationError({'current_password': 'Current password is required.'})
-        if not self.instance.check_password(current_password):
-            raise serializers.ValidationError({'current_password': 'Current password is incorrect.'})
-        if not new_password:
-            raise serializers.ValidationError({'new_password': 'New password is required.'})
-        if not password_confirm:
-            raise serializers.ValidationError({'password_confirm': 'Please confirm your new password.'})
-        if new_password != password_confirm:
-            raise serializers.ValidationError({'password_confirm': 'Passwords do not match.'})
+        if attrs['password'] != attrs.pop('confirm_password'):
+            raise serializers.ValidationError({'confirm_password': 'Passwords do not match.'})
+
+        if email:
+            if User.objects.filter(email=email).exists():
+                raise serializers.ValidationError({'email': 'An account with this email already exists.'})
+            attrs['email'] = email
+        else:
+            attrs['email'] = ''
+
+        if phone_number:
+            if User.objects.filter(phone_number=phone_number).exists():
+                raise serializers.ValidationError({'phone_number': 'An account with this phone number already exists.'})
+            attrs['phone_number'] = phone_number
+        else:
+            attrs['phone_number'] = ''
 
         return attrs
 
-    def update(self, instance, validated_data):
-        new_password = validated_data.pop('new_password', None)
-        if new_password is None:
-            new_password = validated_data.pop('password', None)
-        validated_data.pop('current_password', None)
-        validated_data.pop('password_confirm', None)
-
-        request = self.context.get('request')
-        if not (request and request.user.is_staff):
-            validated_data.pop('is_staff', None)
-        for attr, value in validated_data.items():
-            setattr(instance, attr, value)
-        if new_password:
-            instance.set_password(new_password)
-        instance.save()
-        return instance
+    def create(self, validated_data):
+        password = validated_data.pop('password')
+        return User.objects.create_user(password=password, **validated_data)
 
 
-class CartItemSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = CartItem
-        fields = ('id', 'product_id', 'product_name', 'product_price', 'product_image', 'product_slug', 'product_category', 'product_rating', 'quantity', 'added_at')
-        read_only_fields = ('id', 'added_at')
+class LoginSerializer(serializers.Serializer):
+    email        = serializers.EmailField(required=False, allow_blank=True)
+    phone_number = serializers.CharField(required=False, allow_blank=True)
+    password     = serializers.CharField(write_only=True)
 
+    def validate(self, attrs):
+        email        = attrs.get('email', '').strip()
+        phone_number = attrs.get('phone_number', '').strip()
+        password     = attrs.get('password')
 
-class WishlistItemSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = WishlistItem
-        fields = ('id', 'product_id', 'product_name', 'product_price', 'product_image', 'product_slug', 'product_category', 'product_rating', 'added_at')
-        read_only_fields = ('id', 'added_at')
+        user = None
+        if email:
+            user = authenticate(username=email, password=password)
+        elif phone_number:
+            normalized_phone = normalize_phone_number(phone_number)
+            candidates = {phone_number, normalized_phone}
+            if normalized_phone.startswith('256'):
+                candidates.add('0' + normalized_phone[3:])
+                candidates.add('+' + normalized_phone)
+            for candidate in candidates:
+                if not candidate:
+                    continue
+                try:
+                    u = User.objects.get(phone_number__iexact=candidate)
+                    if u.check_password(password):
+                        user = u
+                        break
+                except User.DoesNotExist:
+                    continue
+
+        if not user:
+            raise serializers.ValidationError({'detail': 'Invalid credentials.'})
+        if not user.is_active:
+            raise serializers.ValidationError({'detail': 'Account is disabled.'})
+        attrs['user'] = user
+        return attrs
