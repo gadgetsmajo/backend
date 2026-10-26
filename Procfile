@@ -1,1 +1,1 @@
-web: python manage.py migrate --noinput && if [ -n "$ADMIN_EMAIL" ] && [ -n "$ADMIN_PASSWORD" ]; then python manage.py create_admin "$ADMIN_EMAIL" "$ADMIN_PASSWORD" --name "${ADMIN_NAME:-EducFarm}"; elif [ -n "$ADMIN_EMAIL" ] || [ -n "$ADMIN_PASSWORD" ]; then echo "ADMIN_EMAIL and ADMIN_PASSWORD must both be set" >&2; exit 1; fi && python manage.py collectstatic --noinput && gunicorn config.wsgi:application --bind 0.0.0.0:$PORT
+web: bash start.sh
