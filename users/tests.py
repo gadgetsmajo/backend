@@ -500,6 +500,7 @@ class SupportChatApiTests(TestCase):
         started = self.client.post('/api/auth/support/chat/', {'start': True}, format='json')
         self.assertEqual(started.status_code, 201)
         conversation_id = started.data['conversation_id']
+        self.assertFalse(started.data['is_closed'])
 
         repeated = self.client.post('/api/auth/support/chat/', {'start': True}, format='json')
         self.assertEqual(repeated.status_code, 200)
@@ -510,6 +511,49 @@ class SupportChatApiTests(TestCase):
         self.assertEqual(len(inbox.data), 1)
         self.assertEqual(inbox.data[0]['id'], conversation_id)
         self.assertIsNone(inbox.data[0]['last_message'])
+
+    def test_staff_can_close_conversation_and_customer_can_reopen_it(self):
+        customer_key = self.register_encryption_key(self.customer)
+        staff_key = self.register_encryption_key(self.staff)
+
+        self.client.force_authenticate(user=self.customer)
+        recipients = self.client.get('/api/auth/support/encryption-keys/').data['keys']
+        sent = self.client.post('/api/auth/support/chat/', {
+            'envelope': self.encrypted_envelope(customer_key, recipients),
+        }, format='json')
+        self.assertEqual(sent.status_code, 201)
+        conversation_id = sent.data['conversation_id']
+
+        self.client.force_authenticate(user=self.staff)
+        close_url = f'/api/auth/admin/support/conversations/{conversation_id}/'
+        closed = self.client.patch(close_url, {'is_closed': True}, format='json')
+        self.assertEqual(closed.status_code, 200)
+        self.assertTrue(closed.data['is_closed'])
+
+        inbox = self.client.get('/api/auth/admin/support/conversations/')
+        self.assertTrue(inbox.data[0]['is_closed'])
+        self.assertTrue(self.client.get(close_url).data['is_closed'])
+        recipients = self.client.get(
+            f'/api/auth/support/encryption-keys/?user_id={self.customer.id}'
+        ).data['keys']
+        blocked_reply = self.client.post(close_url, {
+            'envelope': self.encrypted_envelope(staff_key, recipients),
+        }, format='json')
+        self.assertEqual(blocked_reply.status_code, 409)
+
+        self.client.force_authenticate(user=self.customer)
+        chat = self.client.get('/api/auth/support/chat/')
+        self.assertTrue(chat.data['is_closed'])
+        blocked_message = self.client.post('/api/auth/support/chat/', {
+            'envelope': self.encrypted_envelope(customer_key, recipients),
+        }, format='json')
+        self.assertEqual(blocked_message.status_code, 409)
+
+        reopened = self.client.post('/api/auth/support/chat/', {'reopen': True}, format='json')
+        self.assertEqual(reopened.status_code, 200)
+        self.assertEqual(reopened.data['conversation_id'], conversation_id)
+        self.assertFalse(reopened.data['is_closed'])
+        self.assertFalse(self.client.get('/api/auth/support/chat/').data['is_closed'])
 
     def test_customer_must_register_encryption_key_before_starting_chat(self):
         self.client.force_authenticate(user=self.customer)

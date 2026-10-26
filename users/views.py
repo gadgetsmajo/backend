@@ -567,7 +567,13 @@ class SupportChatView(APIView):
     def get(self, request):
         conversation = SupportConversation.objects.filter(user=request.user).first()
         if not conversation:
-            return Response({'conversation_id': None, 'messages': [], 'unread_count': 0, 'staff_typing': False})
+            return Response({
+                'conversation_id': None,
+                'messages': [],
+                'unread_count': 0,
+                'staff_typing': False,
+                'is_closed': False,
+            })
 
         if request.query_params.get('mark_read') == 'true':
             conversation.messages.filter(sender__is_staff=True, is_read=False).update(is_read=True)
@@ -579,6 +585,7 @@ class SupportChatView(APIView):
             'messages': [_support_message_data(message) for message in messages],
             'unread_count': unread_count,
             'staff_typing': _is_typing(conversation.staff_typing_at),
+            'is_closed': conversation.is_closed,
         })
 
     def patch(self, request):
@@ -586,25 +593,33 @@ class SupportChatView(APIView):
         if not isinstance(is_typing, bool):
             return Response({'is_typing': 'This field must be a boolean.'}, status=status.HTTP_400_BAD_REQUEST)
         conversation = SupportConversation.objects.filter(user=request.user).first()
-        if conversation:
+        if conversation and not conversation.is_closed:
             conversation.customer_typing_at = timezone.now() if is_typing else None
             conversation.save(update_fields=['customer_typing_at'])
         return Response({'is_typing': is_typing})
 
     def post(self, request):
-        if request.data.get('start') is True:
+        if request.data.get('start') is True or request.data.get('reopen') is True:
             if not SupportEncryptionKey.objects.filter(user=request.user).exists():
                 return Response(
                     {'detail': 'Register this device encryption key before starting support chat.'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
             conversation, created = SupportConversation.objects.get_or_create(user=request.user)
+            if request.data.get('reopen') is True and conversation.is_closed:
+                conversation.is_closed = False
+                conversation.save(update_fields=['is_closed', 'updated_at'])
             return Response(
-                {'conversation_id': conversation.id},
+                {'conversation_id': conversation.id, 'is_closed': conversation.is_closed},
                 status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
             )
 
         conversation, _ = SupportConversation.objects.get_or_create(user=request.user)
+        if conversation.is_closed:
+            return Response(
+                {'detail': 'This support conversation is closed. Reopen it before sending another message.'},
+                status=status.HTTP_409_CONFLICT,
+            )
         body, error = _validate_support_ciphertext(request, request.user.id)
         if error:
             return error
@@ -638,6 +653,7 @@ class AdminSupportConversationListView(APIView):
                 'user_name': conversation.user.name,
                 'user_email': conversation.user.email,
                 'updated_at': conversation.updated_at,
+                'is_closed': conversation.is_closed,
                 'unread_count': conversation.messages.filter(sender__is_staff=False, is_read=False).count(),
                 'last_message': _support_message_data(latest) if latest else None,
             })
@@ -665,6 +681,7 @@ class AdminSupportConversationView(APIView):
             'user_name': conversation.user.name,
             'user_email': conversation.user.email,
             'customer_typing': _is_typing(conversation.customer_typing_at),
+            'is_closed': conversation.is_closed,
             'messages': [_support_message_data(message) for message in messages],
         })
 
@@ -672,9 +689,24 @@ class AdminSupportConversationView(APIView):
         conversation = self.get_conversation(pk)
         if not conversation:
             return Response(status=status.HTTP_404_NOT_FOUND)
+        if 'is_closed' in request.data:
+            is_closed = request.data['is_closed']
+            if not isinstance(is_closed, bool):
+                return Response({'is_closed': 'This field must be a boolean.'}, status=status.HTTP_400_BAD_REQUEST)
+            conversation.is_closed = is_closed
+            if is_closed:
+                conversation.customer_typing_at = None
+                conversation.staff_typing_at = None
+                conversation.save(update_fields=['is_closed', 'customer_typing_at', 'staff_typing_at', 'updated_at'])
+            else:
+                conversation.save(update_fields=['is_closed', 'updated_at'])
+            return Response({'is_closed': conversation.is_closed})
+
         is_typing = request.data.get('is_typing')
         if not isinstance(is_typing, bool):
             return Response({'is_typing': 'This field must be a boolean.'}, status=status.HTTP_400_BAD_REQUEST)
+        if conversation.is_closed and is_typing:
+            return Response({'detail': 'This support conversation is closed.'}, status=status.HTTP_409_CONFLICT)
         conversation.staff_typing_at = timezone.now() if is_typing else None
         conversation.save(update_fields=['staff_typing_at'])
         return Response({'is_typing': is_typing})
@@ -683,6 +715,11 @@ class AdminSupportConversationView(APIView):
         conversation = self.get_conversation(pk)
         if not conversation:
             return Response(status=status.HTTP_404_NOT_FOUND)
+        if conversation.is_closed:
+            return Response(
+                {'detail': 'This support conversation is closed. Reopen it before replying.'},
+                status=status.HTTP_409_CONFLICT,
+            )
         body, error = _validate_support_ciphertext(request, conversation.user_id)
         if error:
             return error
