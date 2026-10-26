@@ -702,6 +702,7 @@ class AdminSupportConversationView(APIView):
         conversation = self.get_conversation(pk)
         if not conversation:
             return Response(status=status.HTTP_404_NOT_FOUND)
+        _set_support_staff_presence(conversation, request.user, True)
         conversation.messages.filter(sender__is_staff=False, is_read=False).update(is_read=True)
         messages = conversation.messages.select_related('sender').all()
         return Response({

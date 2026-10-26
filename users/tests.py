@@ -518,9 +518,9 @@ class SupportChatApiTests(TestCase):
 
         self.client.force_authenticate(user=self.staff)
         presence_url = f'/api/auth/admin/support/conversations/{conversation_id}/'
-        joined = self.client.patch(presence_url, {'is_viewing': True}, format='json')
-        self.assertEqual(joined.status_code, 200)
-        self.assertTrue(joined.data['is_viewing'])
+        opened = self.client.get(presence_url)
+        self.assertEqual(opened.status_code, 200)
+        self.assertEqual(opened.data['support_presence'], 'joined')
 
         self.client.force_authenticate(user=self.customer)
         self.assertEqual(self.client.get('/api/auth/support/chat/').data['support_presence'], 'joined')
