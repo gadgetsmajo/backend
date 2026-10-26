@@ -21,8 +21,10 @@ from django.utils import timezone
 from .serializers import RegisterSerializer, UserSerializer, UpdateProfileSerializer, CartItemSerializer, WishlistItemSerializer, NotificationSerializer
 from .models import CartItem, WishlistItem, Notification, UserBehaviour, SupportConversation, SupportConversationStaffPresence, SupportEncryptionBackup, SupportEncryptionKey, SupportMessage, EmailMfaChallenge, EmailMfaTrustedDevice
 from .emails import send_welcome_email, send_password_reset_email, send_password_changed_email, send_login_verification_email, send_signin_alert_email, send_admin_new_support_message_email
+from .emails import send_cart_reminder_email
 from .sms import send_welcome_sms
 from .authentication import requires_email_mfa
+from products.models import Product
 
 User = get_user_model()
 logger = logging.getLogger(__name__)
@@ -918,6 +920,81 @@ class CartItemView(APIView):
     def delete(self, request, product_id):
         CartItem.objects.filter(user=request.user, product_id=product_id).delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class CartReminderView(APIView):
+    permission_classes = (permissions.IsAuthenticated,)
+
+    def post(self, request):
+        with transaction.atomic():
+            user = User.objects.select_for_update().get(pk=request.user.pk)
+            cart_items = list(CartItem.objects.filter(user=user).order_by('product_id'))
+            if not cart_items:
+                return Response({'sent': False, 'reason': 'empty_cart'})
+
+            delivery_fees = dict(
+                Product.objects.filter(
+                    id__in=[item.product_id for item in cart_items]
+                ).values_list('id', 'delivery_fee')
+            )
+            items = []
+            fingerprint_data = []
+            subtotal = 0
+            delivery = 0
+            for item in cart_items:
+                item_delivery = delivery_fees.get(item.product_id, 0)
+                subtotal += item.product_price * item.quantity
+                delivery += item_delivery
+                items.append({
+                    'name': item.product_name,
+                    'image': item.product_image or '',
+                    'slug': item.product_slug,
+                    'quantity': item.quantity,
+                    'price': item.product_price,
+                    'delivery_fee': item_delivery,
+                })
+                fingerprint_data.append({
+                    'product_id': item.product_id,
+                    'name': item.product_name,
+                    'image': item.product_image or '',
+                    'slug': item.product_slug,
+                    'quantity': item.quantity,
+                    'price': str(item.product_price),
+                    'delivery_fee': str(item_delivery),
+                    'added_at': item.added_at.isoformat(),
+                })
+
+            fingerprint = hashlib.sha256(
+                json.dumps(fingerprint_data, sort_keys=True, separators=(',', ':')).encode()
+            ).hexdigest()
+            if user.cart_reminder_fingerprint == fingerprint:
+                return Response({'sent': False, 'reason': 'already_sent'})
+
+            previous_fingerprint = user.cart_reminder_fingerprint
+            user.cart_reminder_fingerprint = fingerprint
+            user.save(update_fields=['cart_reminder_fingerprint'])
+
+        try:
+            send_cart_reminder_email(
+                user.name,
+                user.email,
+                items,
+                subtotal,
+                delivery,
+                subtotal + delivery,
+            )
+        except Exception:
+            logger.exception('Failed to send cart reminder email for user %s', user.pk)
+            User.objects.filter(
+                pk=user.pk,
+                cart_reminder_fingerprint=fingerprint,
+            ).update(cart_reminder_fingerprint=previous_fingerprint)
+            return Response(
+                {'sent': False, 'reason': 'email_delivery_failed'},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        return Response({'sent': True}, status=status.HTTP_200_OK)
 
 
 class WishlistView(APIView):

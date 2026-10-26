@@ -114,6 +114,7 @@ class User(AbstractBaseUser, PermissionsMixin):
     region = models.CharField(max_length=100, blank=True)
     district = models.CharField(max_length=100, blank=True)
     village = models.CharField(max_length=150, blank=True)
+    cart_reminder_fingerprint = models.CharField(max_length=64, blank=True, default='')
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)
     assigned_pages = models.JSONField(default=list, blank=True)

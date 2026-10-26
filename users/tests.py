@@ -5,6 +5,7 @@ from unittest.mock import Mock, patch
 import base64
 import uuid
 from datetime import timedelta
+from decimal import Decimal
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase
@@ -13,7 +14,8 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework.test import APIClient
 
 from users import emails
-from users.models import EmailMfaChallenge, EmailMfaTrustedDevice, SupportConversation, SupportMessage
+from users.models import CartItem, EmailMfaChallenge, EmailMfaTrustedDevice, SupportConversation, SupportMessage
+from products.models import Product
 
 User = get_user_model()
 
@@ -117,6 +119,114 @@ class EmailStatusHeroTests(TestCase):
 
         payload = send.call_args.args[0]
         self.assertEqual(payload['reply_to'], emails.settings.SUPPORT_EMAIL)
+
+
+class CartReminderEmailTests(TestCase):
+    def test_cart_reminder_uses_order_sender_and_includes_cart_details(self):
+        with patch.object(emails, '_send') as send:
+            emails.send_cart_reminder_email(
+                '<Customer>',
+                'customer@example.com',
+                [{
+                    'name': '<Phone>',
+                    'image': 'https://images.example.com/phone.png',
+                    'slug': 'phone',
+                    'quantity': 2,
+                    'price': 5000,
+                    'delivery_fee': 2000,
+                }],
+                Decimal('10000.00'),
+                Decimal('2000.00'),
+                Decimal('12000.00'),
+            )
+
+        payload = send.call_args.args[0]
+        self.assertEqual(payload['from'], 'Majo Gadgets Orders <order@majogadgets.com>')
+        self.assertEqual(payload['reply_to'], 'order@majogadgets.com')
+        self.assertEqual(payload['to'], 'customer@example.com')
+        self.assertIn('&lt;Customer&gt;', payload['html'])
+        self.assertIn('&lt;Phone&gt;', payload['html'])
+        self.assertIn('Qty: 2', payload['html'])
+        self.assertIn('UGX 2,000', payload['html'])
+        self.assertIn('UGX 12,000', payload['html'])
+        self.assertIn('https://images.example.com/phone.png', payload['html'])
+
+
+class CartReminderEndpointTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(
+            email='cart-customer@example.com',
+            name='Cart Customer',
+            password='secure-password',
+        )
+        self.product = Product.objects.create(
+            name='Reminder Phone',
+            price='5000.00',
+            delivery_fee='2000.00',
+        )
+        self.cart_item = CartItem.objects.create(
+            user=self.user,
+            product_id=self.product.id,
+            product_name=self.product.name,
+            product_price='5000.00',
+            product_image='https://images.example.com/phone.png',
+            product_slug=self.product.slug,
+            quantity=2,
+        )
+        self.client.force_authenticate(user=self.user)
+
+    @patch('users.views.send_cart_reminder_email')
+    def test_sends_one_email_for_each_cart_snapshot(self, send_reminder):
+        first_response = self.client.post('/api/auth/cart/reminder/')
+        duplicate_response = self.client.post('/api/auth/cart/reminder/')
+
+        self.assertEqual(first_response.status_code, 200)
+        self.assertEqual(first_response.data, {'sent': True})
+        self.assertEqual(duplicate_response.data, {'sent': False, 'reason': 'already_sent'})
+        send_reminder.assert_called_once_with(
+            'Cart Customer',
+            'cart-customer@example.com',
+            [{
+                'name': 'Reminder Phone',
+                'image': 'https://images.example.com/phone.png',
+                'slug': self.product.slug,
+                'quantity': 2,
+                'price': Decimal('5000.00'),
+                'delivery_fee': Decimal('2000.00'),
+            }],
+            Decimal('10000.00'),
+            Decimal('2000.00'),
+            Decimal('12000.00'),
+        )
+
+        self.cart_item.quantity = 3
+        self.cart_item.save()
+        changed_response = self.client.post('/api/auth/cart/reminder/')
+
+        self.assertEqual(changed_response.data, {'sent': True})
+        self.assertEqual(send_reminder.call_count, 2)
+
+    @patch('users.views.send_cart_reminder_email')
+    def test_empty_cart_does_not_send_email(self, send_reminder):
+        self.cart_item.delete()
+
+        response = self.client.post('/api/auth/cart/reminder/')
+
+        self.assertEqual(response.data, {'sent': False, 'reason': 'empty_cart'})
+        send_reminder.assert_not_called()
+
+    @patch('users.views.send_cart_reminder_email')
+    def test_failed_delivery_can_be_retried(self, send_reminder):
+        send_reminder.side_effect = [RuntimeError('Email provider unavailable'), None]
+
+        with self.assertLogs('users.views', level='ERROR'):
+            failed_response = self.client.post('/api/auth/cart/reminder/')
+        retry_response = self.client.post('/api/auth/cart/reminder/')
+
+        self.assertEqual(failed_response.status_code, 503)
+        self.assertEqual(retry_response.status_code, 200)
+        self.assertEqual(send_reminder.call_count, 2)
 
 
 class ProfilePasswordFlowTests(TestCase):

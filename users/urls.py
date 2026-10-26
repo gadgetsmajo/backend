@@ -1,7 +1,7 @@
 from django.urls import path
 from .views import (
     LoginView, RegisterView, ProfileView,
-    CartView, CartItemView,
+    CartView, CartItemView, CartReminderView,
     WishlistView, WishlistItemView,
     AdminUsersView, AdminUserDetailView,
     ForgotPasswordView, ResetPasswordView,
@@ -23,6 +23,7 @@ urlpatterns = [
     path('profile/', ProfileView.as_view(), name='profile'),
     path('cart/', CartView.as_view(), name='cart'),
     path('cart/<int:product_id>/', CartItemView.as_view(), name='cart-item'),
+    path('cart/reminder/', CartReminderView.as_view(), name='cart-reminder'),
     path('wishlist/', WishlistView.as_view(), name='wishlist'),
     path('wishlist/<int:product_id>/', WishlistItemView.as_view(), name='wishlist-item'),
     path('admin/users/', AdminUsersView.as_view(), name='admin-users'),

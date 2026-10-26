@@ -242,6 +242,64 @@ def send_admin_new_support_message_email(customer_name: str, customer_email: str
     })
 
 
+def send_cart_reminder_email(name: str, email: str, items: list, subtotal, delivery, total):
+    rows = ''
+    for item in items:
+        image_url = item['image'] if item['image'].startswith('https://') else ''
+        image = (
+            f'<img src="{escape(image_url, quote=True)}" width="64" height="64" '
+            f'alt="{escape(item["name"], quote=True)}" style="object-fit:contain;display:block" />'
+            if image_url else ''
+        )
+        product_url = f'{settings.FRONTEND_URL}/shop/{escape(item["slug"], quote=True)}'
+        line_total = item['price'] * item['quantity']
+        rows += f'''
+          <tr>
+            <td style="padding:12px 8px;border-bottom:1px solid #E2E8F0">{image}</td>
+            <td style="padding:12px 8px;border-bottom:1px solid #E2E8F0;color:#0F172A">
+              <a href="{product_url}" style="color:#0F172A !important;text-decoration:none !important">{escape(item['name'])}</a>
+              <div style="margin-top:4px;font-size:12px;color:#64748B">Qty: {item['quantity']} · UGX {item['price']:,.0f} each</div>
+            </td>
+            <td style="padding:12px 8px;border-bottom:1px solid #E2E8F0;text-align:right;color:#0F172A">UGX {line_total:,.0f}</td>
+          </tr>
+          <tr>
+            <td colspan="2" style="padding:4px 8px 12px;font-size:12px;color:#64748B">Delivery</td>
+            <td style="padding:4px 8px 12px;text-align:right;font-size:12px;color:#64748B">UGX {item['delivery_fee']:,.0f}</td>
+          </tr>
+        '''
+
+    body = f'''
+      <div style="text-align:center;margin-bottom:24px">
+        <h2 style="margin:0 0 8px;font-size:22px;color:#111111">Your cart is waiting</h2>
+        <p style="margin:0;font-size:14px;color:#475569">Hi {escape(name)}, you left these items in your Majo Gadgets cart.</p>
+      </div>
+      <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse">
+        <thead>
+          <tr>
+            <th colspan="2" style="padding:8px;text-align:left;font-size:12px;color:#64748B">Product</th>
+            <th style="padding:8px;text-align:right;font-size:12px;color:#64748B">Amount</th>
+          </tr>
+        </thead>
+        <tbody>{rows}</tbody>
+        <tfoot>
+          <tr><td colspan="2" style="padding:12px 8px 4px;color:#475569">Subtotal</td><td style="padding:12px 8px 4px;text-align:right">UGX {subtotal:,.0f}</td></tr>
+          <tr><td colspan="2" style="padding:4px 8px;color:#475569">Delivery total</td><td style="padding:4px 8px;text-align:right">UGX {delivery:,.0f}</td></tr>
+          <tr><td colspan="2" style="padding:12px 8px;font-weight:700;color:#0F172A">Total</td><td style="padding:12px 8px;text-align:right;font-weight:700;color:#0F172A">UGX {total:,.0f}</td></tr>
+        </tfoot>
+      </table>
+      <div style="text-align:center;margin-top:24px">
+        <a href="{escape(settings.FRONTEND_URL, quote=True)}/cart/" style="display:inline-block;padding:14px 32px;background:#071A2B !important;color:#ffffff !important;font-weight:700;text-decoration:none !important">Return to your cart</a>
+      </div>
+    '''
+    _send({
+        'from': 'Majo Gadgets Orders <order@majogadgets.com>',
+        'to': email,
+        'reply_to': 'order@majogadgets.com',
+        'subject': 'Your Majo Gadgets cart is waiting',
+        'html': _wrap(body),
+    })
+
+
 def send_order_placed_email(name: str, email: str, order_code: str, total: str, items: list, delivery_address: str):
     body = f'''
       <div style="text-align:center;margin-bottom:24px">
