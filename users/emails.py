@@ -215,6 +215,33 @@ def send_admin_new_order_email(order_code: str, customer_name: str, customer_ema
     _send({'from': FROM, 'to': settings.ADMIN_EMAIL, 'reply_to': settings.ADMIN_EMAIL, 'subject': f'New Order #{order_code} — UGX {total}', 'html': _wrap(body)})
 
 
+def send_admin_new_support_message_email(customer_name: str, customer_email: str):
+    support_url = f'{settings.FRONTEND_URL}/admin/support'
+    body = f'''
+      <div style="text-align:center;margin-bottom:24px">
+        <h2 style="margin:0 0 6px;font-size:22px;color:#111111">New Support Message</h2>
+        <p style="margin:0;font-size:14px;color:#333333">A customer has sent a message to Majo Support.</p>
+      </div>
+      <div style="padding:16px 20px;margin-bottom:24px">
+        <p style="margin:0 0 2px;font-size:11px;font-weight:700;color:#333333;text-transform:uppercase;letter-spacing:0.5px">Customer</p>
+        <p style="margin:0;font-size:13px;color:#111111">{escape(customer_name)} &mdash; {escape(customer_email)}</p>
+        <p style="margin:16px 0 0;font-size:13px;color:#333333">The message is end-to-end encrypted and is not included in this email.</p>
+      </div>
+      <div style="text-align:center">
+        <a href="{support_url}" style="display:inline-block;padding:14px 32px;background:#071A2B !important;background-color:#071A2B !important;color:#ffffff !important;border:1px solid #071A2B;border-radius:0;font-weight:700;font-size:15px;text-decoration:none !important">
+          Open Support Inbox &rarr;
+        </a>
+      </div>
+    '''
+    _send({
+        'from': FROM,
+        'to': settings.ADMIN_EMAIL,
+        'reply_to': settings.ADMIN_EMAIL,
+        'subject': 'New customer message — Majo Support',
+        'html': _wrap(body),
+    })
+
+
 def send_order_placed_email(name: str, email: str, order_code: str, total: str, items: list, delivery_address: str):
     body = f'''
       <div style="text-align:center;margin-bottom:24px">

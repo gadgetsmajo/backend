@@ -23,6 +23,7 @@ class EmailStatusHeroTests(TestCase):
         email_senders = (
             (emails.send_welcome_email, ('Customer', 'customer@example.com')),
             (emails.send_admin_new_order_email, ('ORD-1', 'Customer', 'customer@example.com', '100', [], 'Kampala')),
+            (emails.send_admin_new_support_message_email, ('Customer', 'customer@example.com')),
             (emails.send_order_placed_email, ('Customer', 'customer@example.com', 'ORD-1', '100', [], 'Kampala')),
             (emails.send_order_confirmed_email, ('Customer', 'customer@example.com', 'ORD-1', '100', [], 'Kampala')),
             (emails.send_order_shipped_email, ('Customer', 'customer@example.com', 'ORD-1', 'Kampala')),
@@ -96,6 +97,19 @@ class EmailStatusHeroTests(TestCase):
         payload = send.call_args.args[0]
         self.assertEqual(payload['to'], emails.settings.ADMIN_EMAIL)
         self.assertEqual(payload['reply_to'], emails.settings.ADMIN_EMAIL)
+
+    def test_admin_support_message_email_contains_no_message_content(self):
+        with patch.object(emails, '_send') as send:
+            emails.send_admin_new_support_message_email('Customer', 'customer@example.com')
+
+        payload = send.call_args.args[0]
+        self.assertEqual(payload['to'], emails.settings.ADMIN_EMAIL)
+        self.assertEqual(payload['reply_to'], emails.settings.ADMIN_EMAIL)
+        self.assertIn('New Support Message', payload['html'])
+        self.assertIn('customer@example.com', payload['html'])
+        self.assertIn('end-to-end encrypted', payload['html'])
+        self.assertIn('/admin/support', payload['html'])
+        self.assertNotIn('ciphertext', payload['html'])
 
     def test_customer_transactional_email_replies_to_support_alias(self):
         with patch.object(emails.resend.Emails, 'send') as send:
@@ -444,10 +458,12 @@ class SupportChatApiTests(TestCase):
 
         self.client.force_authenticate(user=self.customer)
         recipients = self.client.get('/api/auth/support/encryption-keys/').data['keys']
-        sent = self.client.post('/api/auth/support/chat/', {
-            'envelope': self.encrypted_envelope(customer_key, recipients),
-        }, format='json')
+        with patch('users.views.send_admin_new_support_message_email') as send_alert:
+            sent = self.client.post('/api/auth/support/chat/', {
+                'envelope': self.encrypted_envelope(customer_key, recipients),
+            }, format='json')
         self.assertEqual(sent.status_code, 201)
+        send_alert.assert_called_once_with('Customer', 'customer@example.com')
         conversation_id = sent.data['conversation_id']
 
         self.client.force_authenticate(user=self.staff)

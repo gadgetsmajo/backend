@@ -19,7 +19,7 @@ from django.conf import settings
 from django.utils import timezone
 from .serializers import RegisterSerializer, UserSerializer, UpdateProfileSerializer, CartItemSerializer, WishlistItemSerializer, NotificationSerializer
 from .models import CartItem, WishlistItem, Notification, UserBehaviour, SupportConversation, SupportEncryptionBackup, SupportEncryptionKey, SupportMessage, EmailMfaChallenge, EmailMfaTrustedDevice
-from .emails import send_welcome_email, send_password_reset_email, send_password_changed_email, send_login_verification_email, send_signin_alert_email
+from .emails import send_welcome_email, send_password_reset_email, send_password_changed_email, send_login_verification_email, send_signin_alert_email, send_admin_new_support_message_email
 from .sms import send_welcome_sms
 from .authentication import requires_email_mfa
 
@@ -612,6 +612,15 @@ class SupportChatView(APIView):
         message = SupportMessage.objects.create(conversation=conversation, sender=request.user, body=body)
         conversation.customer_typing_at = None
         conversation.save(update_fields=['updated_at', 'customer_typing_at'])
+        if not request.user.is_staff:
+            try:
+                send_admin_new_support_message_email(request.user.name, request.user.email)
+            except Exception as error:
+                logger.warning(
+                    'Unable to send new support message alert for conversation %s (%s)',
+                    conversation.id,
+                    type(error).__name__,
+                )
         return Response(_support_message_data(message), status=status.HTTP_201_CREATED)
 
 
