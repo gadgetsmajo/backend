@@ -343,6 +343,18 @@ class SupportChatView(APIView):
         return Response({'is_typing': is_typing})
 
     def post(self, request):
+        if request.data.get('start') is True:
+            if not SupportEncryptionKey.objects.filter(user=request.user).exists():
+                return Response(
+                    {'detail': 'Register this device encryption key before starting support chat.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            conversation, created = SupportConversation.objects.get_or_create(user=request.user)
+            return Response(
+                {'conversation_id': conversation.id},
+                status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+            )
+
         conversation, _ = SupportConversation.objects.get_or_create(user=request.user)
         body, error = _validate_support_ciphertext(request, request.user.id)
         if error:

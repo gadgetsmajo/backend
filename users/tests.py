@@ -213,6 +213,33 @@ class SupportChatApiTests(TestCase):
         self.client.force_authenticate(user=self.customer)
         self.assertEqual(self.client.get('/api/auth/admin/support/conversations/').status_code, 403)
 
+    def test_customer_can_start_empty_conversation_before_sending(self):
+        self.register_encryption_key(self.customer)
+        self.client.force_authenticate(user=self.customer)
+        self.assertIsNone(self.client.get('/api/auth/support/chat/').data['conversation_id'])
+
+        started = self.client.post('/api/auth/support/chat/', {'start': True}, format='json')
+        self.assertEqual(started.status_code, 201)
+        conversation_id = started.data['conversation_id']
+
+        repeated = self.client.post('/api/auth/support/chat/', {'start': True}, format='json')
+        self.assertEqual(repeated.status_code, 200)
+        self.assertEqual(repeated.data['conversation_id'], conversation_id)
+
+        self.client.force_authenticate(user=self.staff)
+        inbox = self.client.get('/api/auth/admin/support/conversations/')
+        self.assertEqual(len(inbox.data), 1)
+        self.assertEqual(inbox.data[0]['id'], conversation_id)
+        self.assertIsNone(inbox.data[0]['last_message'])
+
+    def test_customer_must_register_encryption_key_before_starting_chat(self):
+        self.client.force_authenticate(user=self.customer)
+        response = self.client.post('/api/auth/support/chat/', {'start': True}, format='json')
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('Register this device', response.data['detail'])
+        self.assertIsNone(self.client.get('/api/auth/support/chat/').data['conversation_id'])
+
     def test_customer_message_rejects_blank_content(self):
         self.client.force_authenticate(user=self.customer)
         response = self.client.post('/api/auth/support/chat/', {'body': '  '}, format='json')
