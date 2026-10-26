@@ -35,6 +35,7 @@ class SupportConversation(models.Model):
     customer_typing_at = models.DateTimeField(null=True, blank=True)
     staff_typing_at = models.DateTimeField(null=True, blank=True)
     is_closed = models.BooleanField(default=False)
+    admin_new_message_alert_sent = models.BooleanField(default=False)
 
     class Meta:
         ordering = ['-updated_at']

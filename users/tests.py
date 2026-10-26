@@ -490,11 +490,13 @@ class SupportChatApiTests(TestCase):
         self.assertEqual(len(chat.data['messages']), 3)
         self.assertEqual(chat.data['unread_count'], 0)
 
-    def test_existing_conversation_messages_do_not_trigger_new_admin_email(self):
+    def test_existing_conversation_does_not_trigger_admin_email(self):
         customer_key = self.register_encryption_key(self.customer)
         self.register_encryption_key(self.staff)
         conversation = SupportConversation.objects.create(user=self.customer)
         SupportMessage.objects.create(conversation=conversation, sender=self.customer, body='{"version":1}')
+        conversation.admin_new_message_alert_sent = True
+        conversation.save(update_fields=['admin_new_message_alert_sent'])
 
         self.client.force_authenticate(user=self.customer)
         recipients = self.client.get('/api/auth/support/encryption-keys/').data['keys']
@@ -505,6 +507,24 @@ class SupportChatApiTests(TestCase):
 
         self.assertEqual(response.status_code, 201)
         send_alert.assert_not_called()
+
+    def test_failed_admin_email_is_not_retried_for_follow_up_messages(self):
+        customer_key = self.register_encryption_key(self.customer)
+        self.register_encryption_key(self.staff)
+
+        self.client.force_authenticate(user=self.customer)
+        recipients = self.client.get('/api/auth/support/encryption-keys/').data['keys']
+        with patch(
+            'users.views.send_admin_new_support_message_email',
+            side_effect=RuntimeError('Email service unavailable'),
+        ) as send_alert:
+            for _ in range(2):
+                response = self.client.post('/api/auth/support/chat/', {
+                    'envelope': self.encrypted_envelope(customer_key, recipients),
+                }, format='json')
+                self.assertEqual(response.status_code, 201)
+
+        self.assertEqual(send_alert.call_count, 1)
 
     def test_customer_sees_support_join_and_leave_presence_and_can_keep_messaging(self):
         customer_key = self.register_encryption_key(self.customer)

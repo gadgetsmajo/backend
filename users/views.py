@@ -651,12 +651,17 @@ class SupportChatView(APIView):
                     {'detail': 'This support conversation is closed. Reopen it before sending another message.'},
                     status=status.HTTP_409_CONFLICT,
                 )
-            is_first_message = not conversation.messages.exists()
+            should_send_admin_alert = not request.user.is_staff and not conversation.admin_new_message_alert_sent
+            if should_send_admin_alert:
+                conversation.admin_new_message_alert_sent = True
             message = SupportMessage.objects.create(conversation=conversation, sender=request.user, body=body)
             conversation.customer_typing_at = None
-            conversation.save(update_fields=['updated_at', 'customer_typing_at'])
+            update_fields = ['updated_at', 'customer_typing_at']
+            if should_send_admin_alert:
+                update_fields.append('admin_new_message_alert_sent')
+            conversation.save(update_fields=update_fields)
 
-        if is_first_message and not request.user.is_staff:
+        if should_send_admin_alert:
             try:
                 send_admin_new_support_message_email(request.user.name, request.user.email)
             except Exception as error:
