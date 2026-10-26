@@ -1,5 +1,6 @@
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
 from django.db import models
+import uuid
 import cloudinary.models
 
 
@@ -41,10 +42,29 @@ class SupportConversation(models.Model):
         return f'Support conversation with {self.user.email}'
 
 
+class SupportEncryptionKey(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='support_encryption_keys')
+    device_id = models.UUIDField()
+    public_key = models.CharField(max_length=64)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['user', 'device_id'], name='unique_support_key_per_device'),
+        ]
+
+
+class SupportEncryptionBackup(models.Model):
+    user = models.OneToOneField('User', on_delete=models.CASCADE, related_name='support_encryption_backup')
+    payload = models.JSONField()
+    updated_at = models.DateTimeField(auto_now=True)
+
+
 class SupportMessage(models.Model):
     conversation = models.ForeignKey(SupportConversation, on_delete=models.CASCADE, related_name='messages')
     sender = models.ForeignKey('User', on_delete=models.CASCADE, related_name='support_messages')
-    body = models.CharField(max_length=2000)
+    body = models.TextField()
     is_read = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
 

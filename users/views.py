@@ -1,5 +1,8 @@
 import logging
 import secrets
+import base64
+import json
+import uuid
 from datetime import timedelta
 from urllib.parse import urlparse
 from rest_framework import generics, permissions, status
@@ -12,7 +15,7 @@ from django.core.cache import cache
 from django.conf import settings
 from django.utils import timezone
 from .serializers import RegisterSerializer, UserSerializer, UpdateProfileSerializer, CartItemSerializer, WishlistItemSerializer, NotificationSerializer
-from .models import CartItem, WishlistItem, Notification, UserBehaviour, SupportConversation, SupportMessage
+from .models import CartItem, WishlistItem, Notification, UserBehaviour, SupportConversation, SupportEncryptionBackup, SupportEncryptionKey, SupportMessage
 from .emails import send_welcome_email, send_password_reset_email, send_password_changed_email
 from .sms import send_welcome_sms
 
@@ -104,6 +107,10 @@ class AdminUserDetailView(APIView):
 
 
 def _support_message_data(message):
+    try:
+        encryption_version = json.loads(message.body).get('version')
+    except (json.JSONDecodeError, AttributeError):
+        encryption_version = None
     return {
         'id': message.id,
         'conversation_id': message.conversation_id,
@@ -111,6 +118,7 @@ def _support_message_data(message):
         'sender_name': message.sender.name,
         'is_staff': message.sender.is_staff,
         'body': message.body,
+        'encryption_version': encryption_version,
         'is_read': message.is_read,
         'created_at': message.created_at,
     }
@@ -118,6 +126,181 @@ def _support_message_data(message):
 
 def _is_typing(timestamp):
     return bool(timestamp and timestamp >= timezone.now() - timedelta(seconds=8))
+
+
+def _support_staff_keys():
+    support_staff_ids = [
+        user.id
+        for user in User.objects.filter(is_active=True, is_staff=True).only('id', 'is_superuser', 'assigned_pages')
+        if user.is_superuser or not user.assigned_pages or 'Support' in user.assigned_pages
+    ]
+    return SupportEncryptionKey.objects.filter(user_id__in=support_staff_ids).select_related('user')
+
+
+def _support_encryption_key_data(key):
+    return {
+        'key_id': str(key.id),
+        'device_id': str(key.device_id),
+        'user_id': key.user_id,
+        'is_staff': key.user.is_staff,
+        'public_key': key.public_key,
+        'created_at': key.created_at,
+    }
+
+
+class SupportEncryptionKeysView(APIView):
+    permission_classes = (permissions.IsAuthenticated,)
+
+    def get(self, request):
+        keys = _support_staff_keys()
+        if request.user.is_staff:
+            if not IsSupportStaff().has_permission(request, self):
+                return Response(status=status.HTTP_403_FORBIDDEN)
+            user_id = request.query_params.get('user_id')
+            if user_id:
+                try:
+                    customer = User.objects.get(pk=user_id, is_staff=False, is_active=True)
+                except (User.DoesNotExist, ValueError):
+                    return Response({'detail': 'Customer not found.'}, status=status.HTTP_404_NOT_FOUND)
+                keys = keys | SupportEncryptionKey.objects.filter(user=customer).select_related('user')
+            else:
+                keys = keys | SupportEncryptionKey.objects.filter(user=request.user).select_related('user')
+        else:
+            keys = keys | SupportEncryptionKey.objects.filter(user=request.user).select_related('user')
+
+        return Response({'keys': [_support_encryption_key_data(key) for key in keys.order_by('user_id', 'id')]})
+
+    def post(self, request):
+        device_id = request.data.get('device_id')
+        public_key = request.data.get('public_key')
+        try:
+            device_id = uuid.UUID(str(device_id))
+            decoded_key = base64.b64decode(public_key, validate=True)
+        except (ValueError, TypeError):
+            return Response({'detail': 'A valid device ID and base64 public key are required.'}, status=status.HTTP_400_BAD_REQUEST)
+        if len(decoded_key) != 32:
+            return Response({'public_key': 'Public keys must be 32 bytes.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        key, _ = SupportEncryptionKey.objects.update_or_create(
+            user=request.user,
+            device_id=device_id,
+            defaults={'public_key': public_key},
+        )
+        return Response(_support_encryption_key_data(key), status=status.HTTP_201_CREATED)
+
+    def delete(self, request):
+        try:
+            device_id = uuid.UUID(str(request.data.get('device_id')))
+        except (ValueError, TypeError):
+            return Response({'device_id': 'A valid device ID is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        deleted, _ = SupportEncryptionKey.objects.filter(user=request.user, device_id=device_id).delete()
+        return Response(status=status.HTTP_204_NO_CONTENT if deleted else status.HTTP_404_NOT_FOUND)
+
+
+class SupportEncryptionBackupView(APIView):
+    permission_classes = (permissions.IsAuthenticated,)
+    required_iterations = 600_000
+
+    def get(self, request):
+        backup = SupportEncryptionBackup.objects.filter(user=request.user).first()
+        return Response({'backup': backup.payload if backup else None})
+
+    def put(self, request):
+        payload = request.data.get('backup')
+        if not isinstance(payload, dict):
+            return Response({'detail': 'An encrypted support key backup is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        if (
+            type(payload.get('version')) is not int
+            or payload.get('version') != 1
+            or payload.get('kdf') != 'PBKDF2-SHA256'
+            or type(payload.get('iterations')) is not int
+            or payload.get('iterations') != self.required_iterations
+        ):
+            return Response({'detail': 'Unsupported support key backup format.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            device_id = uuid.UUID(str(payload.get('device_id')))
+        except (ValueError, TypeError, AttributeError):
+            return Response({'detail': 'Support key backup device ID is invalid.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            salt = base64.b64decode(payload.get('salt'), validate=True)
+            ciphertext = base64.b64decode(payload.get('ciphertext'), validate=True)
+        except (ValueError, TypeError):
+            return Response({'detail': 'Support key backup data must be base64 encoded.'}, status=status.HTTP_400_BAD_REQUEST)
+        if len(salt) != 16 or len(ciphertext) < 28 or len(ciphertext) > 16_384:
+            return Response({'detail': 'Support key backup data has invalid size.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        current = SupportEncryptionBackup.objects.filter(user=request.user).first()
+        if current and current.payload.get('device_id') != str(device_id):
+            return Response(
+                {'detail': 'A different encryption identity is already backed up. Restore it before replacing this device key.'},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        backup, _ = SupportEncryptionBackup.objects.update_or_create(
+            user=request.user,
+            defaults={'payload': {
+                'version': payload['version'],
+                'kdf': payload['kdf'],
+                'iterations': payload['iterations'],
+                'device_id': str(device_id),
+                'salt': payload['salt'],
+                'ciphertext': payload['ciphertext'],
+            }},
+        )
+        return Response({'backup': backup.payload, 'updated_at': backup.updated_at})
+
+
+def _validate_support_ciphertext(request, recipient_user_id):
+    envelope = request.data.get('envelope')
+    if not isinstance(envelope, dict) or envelope.get('version') != 1:
+        return None, Response({'detail': 'Messages must use the supported encrypted envelope.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        sender_key_id = uuid.UUID(str(envelope.get('sender_key_id')))
+    except (ValueError, TypeError):
+        return None, Response({'detail': 'A valid sender key is required.'}, status=status.HTTP_400_BAD_REQUEST)
+    if not SupportEncryptionKey.objects.filter(id=sender_key_id, user=request.user).exists():
+        return None, Response({'detail': 'Register this device encryption key before sending.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    entries = envelope.get('recipients')
+    if not isinstance(entries, list) or not entries or len(entries) > 100:
+        return None, Response({'detail': 'Encrypted messages must include valid recipients.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    included_ids = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            return None, Response({'detail': 'Invalid encrypted recipient entry.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            key_id = uuid.UUID(str(entry.get('key_id')))
+            nonce = base64.b64decode(entry.get('nonce'), validate=True)
+            ciphertext = base64.b64decode(entry.get('ciphertext'), validate=True)
+        except (ValueError, TypeError):
+            return None, Response({'detail': 'Invalid encrypted recipient data.'}, status=status.HTTP_400_BAD_REQUEST)
+        if len(nonce) != 24 or len(ciphertext) < 16:
+            return None, Response({'detail': 'Invalid encrypted recipient data.'}, status=status.HTTP_400_BAD_REQUEST)
+        included_ids.add(key_id)
+
+    if len(included_ids) != len(entries):
+        return None, Response({'detail': 'Encrypted recipient keys must be unique.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    required_ids = set(
+        SupportEncryptionKey.objects.filter(user_id=recipient_user_id).values_list('id', flat=True)
+    )
+    staff_ids = set(_support_staff_keys().values_list('id', flat=True))
+    if not staff_ids:
+        return None, Response({'detail': 'Support encryption keys are not configured yet.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+    required_ids.update(staff_ids)
+    required_ids.add(sender_key_id)
+    if not required_ids or required_ids != included_ids:
+        return None, Response({'detail': 'Encryption keys changed; refresh the recipient list and retry.'}, status=status.HTTP_409_CONFLICT)
+    registered_ids = set(SupportEncryptionKey.objects.filter(id__in=included_ids).values_list('id', flat=True))
+    if registered_ids != included_ids:
+        return None, Response({'detail': 'One or more recipient keys are no longer registered.'}, status=status.HTTP_409_CONFLICT)
+
+    serialized = json.dumps(envelope, separators=(',', ':'))
+    if len(serialized.encode('utf-8')) > 64_000:
+        return None, Response({'detail': 'Encrypted message is too large.'}, status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
+    return serialized, None
 
 
 class IsSupportStaff(permissions.BasePermission):
@@ -160,14 +343,12 @@ class SupportChatView(APIView):
         return Response({'is_typing': is_typing})
 
     def post(self, request):
-        body = request.data.get('body', '')
-        if not isinstance(body, str) or not body.strip():
-            return Response({'body': 'Enter a message.'}, status=status.HTTP_400_BAD_REQUEST)
-        if len(body.strip()) > 2000:
-            return Response({'body': 'Messages cannot exceed 2000 characters.'}, status=status.HTTP_400_BAD_REQUEST)
-
         conversation, _ = SupportConversation.objects.get_or_create(user=request.user)
-        message = SupportMessage.objects.create(conversation=conversation, sender=request.user, body=body.strip())
+        body, error = _validate_support_ciphertext(request, request.user.id)
+        if error:
+            return error
+
+        message = SupportMessage.objects.create(conversation=conversation, sender=request.user, body=body)
         conversation.customer_typing_at = None
         conversation.save(update_fields=['updated_at', 'customer_typing_at'])
         return Response(_support_message_data(message), status=status.HTTP_201_CREATED)
@@ -232,13 +413,11 @@ class AdminSupportConversationView(APIView):
         conversation = self.get_conversation(pk)
         if not conversation:
             return Response(status=status.HTTP_404_NOT_FOUND)
-        body = request.data.get('body', '')
-        if not isinstance(body, str) or not body.strip():
-            return Response({'body': 'Enter a reply.'}, status=status.HTTP_400_BAD_REQUEST)
-        if len(body.strip()) > 2000:
-            return Response({'body': 'Messages cannot exceed 2000 characters.'}, status=status.HTTP_400_BAD_REQUEST)
+        body, error = _validate_support_ciphertext(request, conversation.user_id)
+        if error:
+            return error
 
-        message = SupportMessage.objects.create(conversation=conversation, sender=request.user, body=body.strip())
+        message = SupportMessage.objects.create(conversation=conversation, sender=request.user, body=body)
         conversation.staff_typing_at = None
         conversation.save(update_fields=['updated_at', 'staff_typing_at'])
         return Response(_support_message_data(message), status=status.HTTP_201_CREATED)

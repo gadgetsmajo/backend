@@ -2,6 +2,9 @@ import json
 import re
 from unittest.mock import Mock, patch
 
+import base64
+import uuid
+
 from django.contrib.auth import get_user_model
 from django.test import TestCase
 from rest_framework.test import APIClient
@@ -149,9 +152,38 @@ class SupportChatApiTests(TestCase):
             email='staff@example.com', name='Support Agent', password='password-123', is_staff=True,
         )
 
+    def register_encryption_key(self, user):
+        self.client.force_authenticate(user=user)
+        response = self.client.post('/api/auth/support/encryption-keys/', {
+            'device_id': str(uuid.uuid4()),
+            'public_key': base64.b64encode(bytes([user.id % 255 + 1]) * 32).decode('ascii'),
+        }, format='json')
+        self.assertEqual(response.status_code, 201)
+        return response.data
+
+    def encrypted_envelope(self, sender_key, recipients):
+        return {
+            'version': 1,
+            'sender_key_id': sender_key['key_id'],
+            'recipients': [
+                {
+                    'key_id': key['key_id'],
+                    'nonce': base64.b64encode(bytes(24)).decode('ascii'),
+                    'ciphertext': base64.b64encode(bytes(16)).decode('ascii'),
+                }
+                for key in recipients
+            ],
+        }
+
     def test_customer_can_send_message_and_staff_can_reply(self):
+        customer_key = self.register_encryption_key(self.customer)
+        staff_key = self.register_encryption_key(self.staff)
+
         self.client.force_authenticate(user=self.customer)
-        sent = self.client.post('/api/auth/support/chat/', {'body': 'I need help with my order.'}, format='json')
+        recipients = self.client.get('/api/auth/support/encryption-keys/').data['keys']
+        sent = self.client.post('/api/auth/support/chat/', {
+            'envelope': self.encrypted_envelope(customer_key, recipients),
+        }, format='json')
         self.assertEqual(sent.status_code, 201)
         conversation_id = sent.data['conversation_id']
 
@@ -159,9 +191,12 @@ class SupportChatApiTests(TestCase):
         inbox = self.client.get('/api/auth/admin/support/conversations/')
         self.assertEqual(inbox.status_code, 200)
         self.assertEqual(inbox.data[0]['unread_count'], 1)
+        recipients = self.client.get(
+            f'/api/auth/support/encryption-keys/?user_id={self.customer.id}'
+        ).data['keys']
         reply = self.client.post(
             f'/api/auth/admin/support/conversations/{conversation_id}/',
-            {'body': 'We are checking this for you.'},
+            {'envelope': self.encrypted_envelope(staff_key, recipients)},
             format='json',
         )
         self.assertEqual(reply.status_code, 201)
@@ -183,6 +218,79 @@ class SupportChatApiTests(TestCase):
         response = self.client.post('/api/auth/support/chat/', {'body': '  '}, format='json')
         self.assertEqual(response.status_code, 400)
 
+    def test_encryption_key_directory_is_limited_to_customer_and_support_staff(self):
+        customer_key = self.register_encryption_key(self.customer)
+        staff_key = self.register_encryption_key(self.staff)
+        other_customer = User.objects.create_user(
+            email='other-customer@example.com', name='Other Customer', password='password-123',
+        )
+        self.register_encryption_key(other_customer)
+
+        self.client.force_authenticate(user=self.customer)
+        customer_keys = self.client.get('/api/auth/support/encryption-keys/').data['keys']
+        self.assertEqual({key['key_id'] for key in customer_keys}, {customer_key['key_id'], staff_key['key_id']})
+
+        self.client.force_authenticate(user=self.staff)
+        staff_keys = self.client.get(
+            f'/api/auth/support/encryption-keys/?user_id={self.customer.id}'
+        ).data['keys']
+        self.assertEqual({key['key_id'] for key in staff_keys}, {customer_key['key_id'], staff_key['key_id']})
+
+    def test_support_key_backup_is_private_and_validated(self):
+        url = '/api/auth/support/encryption-backup/'
+        self.client.force_authenticate(user=self.customer)
+        self.assertIsNone(self.client.get(url).data['backup'])
+
+        invalid = self.client.put(url, {'backup': {'version': 1}}, format='json')
+        self.assertEqual(invalid.status_code, 400)
+
+        backup = {
+            'version': 1,
+            'kdf': 'PBKDF2-SHA256',
+            'iterations': 600_000,
+            'device_id': str(uuid.uuid4()),
+            'salt': base64.b64encode(bytes(16)).decode('ascii'),
+            'ciphertext': base64.b64encode(bytes(28)).decode('ascii'),
+        }
+        saved = self.client.put(url, {'backup': backup}, format='json')
+        self.assertEqual(saved.status_code, 200)
+        self.assertEqual(saved.data['backup'], backup)
+        conflicting_backup = {**backup, 'device_id': str(uuid.uuid4())}
+        conflict = self.client.put(url, {'backup': conflicting_backup}, format='json')
+        self.assertEqual(conflict.status_code, 409)
+        self.assertEqual(self.client.get(url).data['backup'], backup)
+
+        self.client.force_authenticate(user=self.staff)
+        self.assertIsNone(self.client.get(url).data['backup'])
+
+    def test_support_key_backup_requires_authentication(self):
+        response = self.client.get('/api/auth/support/encryption-backup/')
+        self.assertEqual(response.status_code, 401)
+
+    def test_plaintext_support_messages_are_rejected(self):
+        self.client.force_authenticate(user=self.customer)
+        response = self.client.post('/api/auth/support/chat/', {'body': 'plaintext'}, format='json')
+        self.assertEqual(response.status_code, 400)
+
+    def test_encrypted_messages_reject_unrelated_and_duplicate_recipients(self):
+        customer_key = self.register_encryption_key(self.customer)
+        self.register_encryption_key(self.staff)
+        other_customer = User.objects.create_user(
+            email='unrelated-customer@example.com', name='Unrelated Customer', password='password-123',
+        )
+        unrelated_key = self.register_encryption_key(other_customer)
+
+        self.client.force_authenticate(user=self.customer)
+        recipients = self.client.get('/api/auth/support/encryption-keys/').data['keys']
+        envelope = self.encrypted_envelope(customer_key, recipients + [unrelated_key])
+        response = self.client.post('/api/auth/support/chat/', {'envelope': envelope}, format='json')
+        self.assertEqual(response.status_code, 409)
+
+        envelope = self.encrypted_envelope(customer_key, recipients)
+        envelope['recipients'].append(envelope['recipients'][0].copy())
+        response = self.client.post('/api/auth/support/chat/', {'envelope': envelope}, format='json')
+        self.assertEqual(response.status_code, 400)
+
     def test_staff_without_support_assignment_cannot_open_inbox(self):
         self.staff.assigned_pages = ['Orders']
         self.staff.save(update_fields=['assigned_pages'])
@@ -191,8 +299,14 @@ class SupportChatApiTests(TestCase):
         self.assertEqual(response.status_code, 403)
 
     def test_typing_status_is_visible_to_the_other_participant(self):
+        customer_key = self.register_encryption_key(self.customer)
+        staff_key = self.register_encryption_key(self.staff)
+
         self.client.force_authenticate(user=self.customer)
-        sent = self.client.post('/api/auth/support/chat/', {'body': 'Can someone help?'}, format='json')
+        recipients = self.client.get('/api/auth/support/encryption-keys/').data['keys']
+        sent = self.client.post('/api/auth/support/chat/', {
+            'envelope': self.encrypted_envelope(customer_key, recipients),
+        }, format='json')
         conversation_id = sent.data['conversation_id']
         self.client.patch('/api/auth/support/chat/', {'is_typing': True}, format='json')
 
