@@ -174,12 +174,19 @@ class EmailMfaLoginTests(TestCase):
         self.assertTrue(send_code.call_args.args[2].isdigit())
 
     @patch('users.emails._send')
-    def test_login_code_email_escapes_user_content(self, send_email):
-        emails.send_login_verification_email('<Staff>', 'staff@example.com', '123456')
+    def test_login_code_email_contains_copy_guidance_and_escapes_code(self, send_email):
+        emails.send_login_verification_email('<Staff>', 'staff@example.com', '<123>')
         payload = send_email.call_args.args[0]
 
-        self.assertIn('&lt;Staff&gt;', payload['html'])
-        self.assertIn('123456', payload['html'])
+        self.assertIn('Hi there,', payload['html'])
+        self.assertIn('Your verification code', payload['html'])
+        self.assertIn('aria-label="Select code to copy"', payload['html'])
+        self.assertIn('Select to copy', payload['html'])
+        self.assertIn('Select the code to copy it.', payload['html'])
+        self.assertIn('&lt;123&gt;', payload['html'])
+        self.assertNotIn('<123>', payload['html'])
+        self.assertIn("Didn't request this code?", payload['html'])
+        self.assertIn('The Majo Gadgets Team', payload['html'])
         self.assertEqual(payload['to'], 'staff@example.com')
 
     @patch('users.views.send_login_verification_email')

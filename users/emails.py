@@ -522,16 +522,30 @@ def send_password_changed_email(name: str, email: str):
 
 
 def send_login_verification_email(name: str, email: str, code: str):
-    safe_name = escape(name or 'there')
     body = f'''
       <div style="text-align:center;margin-bottom:28px">
         <h2 style="margin:0 0 8px;font-size:22px;color:#0F172A">Verify your sign-in</h2>
-        <p style="margin:0;font-size:14px;color:#64748B">A sign-in attempt needs an email verification code</p>
+        <p style="margin:0;font-size:14px;color:#64748B">Secure access to your account</p>
       </div>
-      <p style="margin:0 0 20px;font-size:15px;color:#475569;line-height:1.7">Hi <strong>{safe_name}</strong>, enter this code to continue signing in to your Majo Gadgets account:</p>
-      <div style="margin:0 auto 24px;padding:18px;background:#F1F5F9;text-align:center;font-size:30px;font-weight:800;letter-spacing:8px;color:#071A2B">{escape(code)}</div>
-      <p style="margin:0 0 8px;font-size:13px;color:#64748B">This code expires in 10 minutes and can only be used once. Do not share it with anyone.</p>
-      <p style="margin:0;font-size:13px;color:#64748B">If you did not try to sign in, you can ignore this email and consider changing your password.</p>
+      <p style="margin:0 0 16px;font-size:15px;color:#475569;line-height:1.7">Hi there,</p>
+      <p style="margin:0 0 16px;font-size:15px;color:#475569;line-height:1.7">We received a request to sign in to your <strong>Majo Gadgets</strong> account.</p>
+      <p style="margin:0 0 20px;font-size:15px;color:#475569;line-height:1.7">To securely access your account, please enter the verification code below:</p>
+      <p style="margin:0 0 10px;font-size:14px;font-weight:700;color:#0F172A">Your verification code</p>
+      <table role="presentation" style="margin:0 0 8px;border-collapse:collapse">
+        <tr>
+          <td style="padding:16px 20px;background:#F1F5F9;font-size:30px;font-weight:800;letter-spacing:8px;color:#071A2B">{escape(code)}</td>
+          <td aria-label="Select code to copy" style="padding:0 0 0 12px;color:#64748B;font-size:13px;white-space:nowrap">
+            <span style="display:inline-block;width:10px;height:10px;border:1px solid #64748B;margin-right:-6px"></span><span style="display:inline-block;width:10px;height:10px;border:1px solid #64748B;background:#FFFFFF"></span>
+            <span style="padding-left:4px">Select to copy</span>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0 0 24px;font-size:12px;color:#64748B">Select the code to copy it. On a phone, press and hold the code, then tap Copy.</p>
+      <p style="margin:0 0 20px;font-size:13px;color:#475569;line-height:1.7">This code expires in <strong>10 minutes</strong> and can only be used once. For your security, never share this code with anyone, including anyone claiming to represent Majo Gadgets.</p>
+      <p style="margin:0 0 8px;font-size:14px;font-weight:700;color:#0F172A">Didn't request this code?</p>
+      <p style="margin:0 0 20px;font-size:13px;color:#475569;line-height:1.7">If you didn't attempt to sign in, you can safely ignore this email. Your account remains secure unless someone has access to your login credentials. If you suspect unauthorized activity, we recommend changing your password.</p>
+      <p style="margin:0 0 16px;font-size:13px;color:#475569;line-height:1.7">Thank you for choosing Majo Gadgets. We're committed to keeping your account safe and your shopping experience secure.</p>
+      <p style="margin:0;font-size:13px;color:#475569;line-height:1.7">Best regards,<br><strong>The Majo Gadgets Team</strong><br><em>Quality gadgets, great value.</em></p>
     '''
     _send({'from': FROM, 'to': email, 'subject': 'Your Majo Gadgets sign-in code', 'html': _wrap(body)})
 
