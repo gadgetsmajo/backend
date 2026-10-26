@@ -74,6 +74,24 @@ class ProductRecommendationsAPITest(TestCase):
         self.assertEqual(product_ids[:2], [self.purchased_product.id, self.related_product.id])
         self.assertNotIn(self.other_product.id, product_ids)
 
+    def test_product_list_honors_page_size_and_returns_next_page(self):
+        for index in range(3):
+            Product.objects.create(
+                name=f'Extra Product {index}',
+                category=self.phone_category,
+                price=10000,
+                stock=1,
+            )
+
+        first_page = self.client.get(reverse('product-list'), {'page_size': 2})
+        self.assertEqual(first_page.status_code, 200)
+        self.assertEqual(len(first_page.data['results']), 2)
+        self.assertIsNotNone(first_page.data['next'])
+
+        second_page = self.client.get(reverse('product-list'), {'page': 2, 'page_size': 2})
+        self.assertEqual(second_page.status_code, 200)
+        self.assertEqual(len(second_page.data['results']), 2)
+
 
 class FlashSalePermissionAPITest(TestCase):
     def setUp(self):

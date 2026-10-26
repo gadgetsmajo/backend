@@ -11,6 +11,7 @@ from rest_framework import generics, filters, permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from .pagination import ProductPagination
 from .models import Category, Product, ProductImage, FlashSale, ProductReview, ReviewImage
 from .serializers import (
     CategorySerializer, ProductSerializer, ProductImageSerializer,
@@ -105,6 +106,7 @@ PRODUCT_CACHE_TTL = 60 * 15  # 15 minutes
 class ProductListView(generics.ListCreateAPIView):
     serializer_class = ProductSerializer
     permission_classes = (IsAdminOrReadOnly,)
+    pagination_class = ProductPagination
     filter_backends = (filters.SearchFilter, filters.OrderingFilter)
     search_fields = ('name', 'category__name')
     ordering_fields = ('price', 'rating', 'created_at')
