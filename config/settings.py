@@ -160,9 +160,17 @@ SIMPLE_JWT = {
 }
 
 # CORS — allow frontend origins
-CORS_ALLOWED_ORIGINS = config('CORS_ALLOWED_ORIGINS',
-    default='https://www.educfarm.com,https://educfarm.com,http://www.educfarm.com,http://educfarm.com,https://ssemata.github.io,https://kababoopishamie-oss.github.io,http://localhost:5173,http://127.0.0.1:5173'
-).split(',')
+CORS_ALLOWED_ORIGINS = [
+    origin.strip().rstrip('/')
+    for origin in (
+        *config('CORS_ALLOWED_ORIGINS',
+            default='https://www.educfarm.com,https://educfarm.com,http://www.educfarm.com,http://educfarm.com,https://ssemata.github.io,https://kababoopishamie-oss.github.io,http://localhost:5173,http://127.0.0.1:5173'
+        ).split(','),
+        'https://majogadgets.com',
+        'https://www.majogadgets.com',
+    )
+    if origin.strip()
+]
 
 # Weather API Configuration
 # Get your free API key from: https://openweathermap.org/api
