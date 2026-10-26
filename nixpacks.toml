@@ -1,0 +1,4 @@
+[variables]
+# Secrets are injected at runtime by Railway — do not list them here.
+# Only non-sensitive build-time config belongs in this file.
+PYTHONUNBUFFERED = "1"

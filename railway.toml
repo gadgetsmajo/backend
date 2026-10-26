@@ -1,7 +1,8 @@
 [build]
-variables = { MISE_PYTHON_GITHUB_ATTESTATIONS = "false" }
+builder = "nixpacks"
 
 [deploy]
-preDeployCommand = ["python manage.py migrate --noinput"]
 startCommand = "bash start.sh"
-healthcheckPath = "/api/core/health/"
+healthcheckPath = "/api/products/"
+healthcheckTimeout = 30
+restartPolicyType = "on_failure"

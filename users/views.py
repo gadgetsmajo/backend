@@ -1,244 +1,731 @@
-from rest_framework.views import APIView
+import logging
+import secrets
+from datetime import timedelta
+from urllib.parse import urlparse
+from rest_framework import generics, permissions, status
 from rest_framework.response import Response
-from rest_framework import status
-from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.views import APIView
+from rest_framework_simplejwt.views import TokenRefreshView
 from rest_framework_simplejwt.tokens import RefreshToken
-from .serializers import SignupSerializer, LoginSerializer
-from .models import User
+from django.contrib.auth import get_user_model, authenticate
+from django.core.cache import cache
+from django.conf import settings
+from django.utils import timezone
+from .serializers import RegisterSerializer, UserSerializer, UpdateProfileSerializer, CartItemSerializer, WishlistItemSerializer, NotificationSerializer
+from .models import CartItem, WishlistItem, Notification, UserBehaviour, SupportConversation, SupportMessage
+from .emails import send_welcome_email, send_password_reset_email, send_password_changed_email
+from .sms import send_welcome_sms
+
+User = get_user_model()
+logger = logging.getLogger(__name__)
 
 
-def _token_response(user):
-    refresh = RefreshToken.for_user(user)
-    return {
-        'access':  str(refresh.access_token),
-        'refresh': str(refresh),
-        'user': {
-            'id':                 user.id,
-            'full_name':          user.full_name,
-            'email':              user.email,
-            'phone_number':       user.phone_number,
-            'is_staff':           user.is_staff,
-            'must_change_password': getattr(user, 'must_change_password', False),
-            'weather_access':     getattr(user, 'weather_access', True),
-            'admin_level':        getattr(user, 'admin_level', 'user'),
-            'can_manage_users':   getattr(user, 'can_manage_users', False),
-            'can_manage_devices': getattr(user, 'can_manage_devices', False),
-            'can_manage_weather': getattr(user, 'can_manage_weather', False),
-            'can_manage_system':  getattr(user, 'can_manage_system', False),
-            'avatar_url':         user.avatar_url or '',
-        },
-    }
+def _store_google_avatar(user, picture_url):
+    if user.avatar or not picture_url:
+        return
 
+    parsed_url = urlparse(picture_url)
+    hostname = parsed_url.hostname or ''
+    if parsed_url.scheme != 'https' or not (
+        hostname == 'googleusercontent.com' or hostname.endswith('.googleusercontent.com')
+    ):
+        return
 
-class CheckIdentifierView(APIView):
-    permission_classes = [AllowAny]
-
-    def get(self, request):
-        try:
-            from django_ratelimit.core import is_ratelimited
-            if is_ratelimited(request, fn=None, key='ip', rate='10/m', method='GET', increment=True):
-                return Response({'available': False}, status=status.HTTP_429_TOO_MANY_REQUESTS)
-        except Exception:
-            pass
-        value = request.query_params.get('value', '').strip()
-        if not value:
-            return Response({'available': False})
-        taken = (
-            User.objects.filter(email=value).exists() or
-            User.objects.filter(phone_number=value).exists()
-        )
-        return Response({'available': not taken})
-
-
-class SignupView(APIView):
-    permission_classes = [AllowAny]
-
-    def post(self, request):
-        serializer = SignupSerializer(data=request.data)
-        if serializer.is_valid():
-            user = serializer.save()
-            from api.models import FarmSettings
-            FarmSettings.objects.get_or_create(user=user)
-            return Response(_token_response(user), status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        import cloudinary.uploader
+        result = cloudinary.uploader.upload(picture_url, folder='avatars/')
+        public_id = result.get('public_id')
+        if public_id:
+            user.avatar = public_id
+            user.save(update_fields=['avatar'])
+    except Exception:
+        logger.exception('Failed to save Google profile photo for user %s', user.pk)
 
 
 class LoginView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = (permissions.AllowAny,)
 
     def post(self, request):
-        try:
-            from django_ratelimit.core import is_ratelimited
-            if is_ratelimited(request, fn=None, key='ip', rate='5/15m', method='POST', increment=True):
-                return Response({'detail': 'Too many login attempts. Try again later.'}, status=status.HTTP_429_TOO_MANY_REQUESTS)
-        except Exception:
-            pass
-        serializer = LoginSerializer(data=request.data)
-        if serializer.is_valid():
-            from django.utils import timezone
-            user = serializer.validated_data['user']
-            user.last_seen = timezone.now()
-            user.save(update_fields=['last_seen'])
-            return Response(_token_response(user))
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        email = request.data.get('email', '').strip().lower()
+        password = request.data.get('password', '')
+        user = authenticate(request, username=email, password=password)
+        if user is None:
+            return Response({'detail': 'No active account found with the given credentials'}, status=status.HTTP_401_UNAUTHORIZED)
+        refresh = RefreshToken.for_user(user)
+        return Response({'access': str(refresh.access_token), 'refresh': str(refresh)})
 
 
-class MeView(APIView):
-    """Returns the authenticated user's profile from the database — never from client input."""
-    permission_classes = [IsAuthenticated]
+class AdminUsersView(APIView):
+    permission_classes = (permissions.IsAdminUser,)
 
     def get(self, request):
-        user = request.user
-        response = Response({
-            'id':                   user.id,
-            'full_name':            user.full_name,
-            'email':                user.email,
-            'phone_number':         user.phone_number,
-            'farm_name':            user.farm_name,
-            'is_staff':             user.is_staff,
-            'must_change_password': user.must_change_password,
-            'weather_access':       user.weather_access,
-            'admin_level':          user.admin_level,
-            'can_manage_users':     user.can_manage_users,
-            'can_manage_devices':   user.can_manage_devices,
-            'can_manage_weather':   user.can_manage_weather,
-            'can_manage_system':    user.can_manage_system,
-            'profile_updated_at':   user.profile_updated_at,
-            'avatar_url':            user.avatar_url,
-        })
-        # Disable caching to ensure fresh avatar on every fetch
-        response['Cache-Control'] = 'no-cache, no-store, must-revalidate, max-age=0'
-        response['Pragma'] = 'no-cache'
-        response['Expires'] = '0'
-        return response
+        users = User.objects.all().order_by('-id')
+        return Response(UserSerializer(users, many=True).data)
 
-    def patch(self, request):
-        user = request.user
-        data = request.data
-        fields = []
+    def post(self, request):
+        password = request.data.get('password')
+        if not password:
+            return Response({'password': 'Password is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            user = User.objects.create_user(
+                email=request.data.get('email', ''),
+                password=password,
+                name=request.data.get('name', ''),
+                phone=request.data.get('phone', ''),
+            )
+            if request.data.get('is_staff'):
+                user.is_staff = True
+                user.save()
+        except Exception as e:
+            return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(UserSerializer(user).data, status=status.HTTP_201_CREATED)
 
-        if 'full_name' in data:
-            name = data['full_name'].strip()
-            if not name:
-                return Response({'detail': 'Name cannot be empty.'}, status=status.HTTP_400_BAD_REQUEST)
-            user.full_name = name
-            fields.append('full_name')
 
-        if 'farm_name' in data:
-            user.farm_name = data['farm_name'].strip()
-            fields.append('farm_name')
+class AdminUserDetailView(APIView):
+    permission_classes = (permissions.IsAdminUser,)
 
-        if 'email' in data:
-            email = data['email'].strip()
-            if email and User.objects.filter(email=email).exclude(pk=user.pk).exists():
-                return Response({'detail': 'Email already in use.'}, status=status.HTTP_400_BAD_REQUEST)
-            user.email = email or None
-            fields.append('email')
+    def patch(self, request, pk):
+        try:
+            user = User.objects.get(pk=pk)
+        except User.DoesNotExist:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+        serializer = UpdateProfileSerializer(user, data=request.data, partial=True, context={'request': request})
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(UserSerializer(user).data)
 
-        if 'phone_number' in data:
-            phone = data['phone_number'].strip()
-            if phone and User.objects.filter(phone_number=phone).exclude(pk=user.pk).exists():
-                return Response({'detail': 'Phone number already in use.'}, status=status.HTTP_400_BAD_REQUEST)
-            user.phone_number = phone or None
-            fields.append('phone_number')
-
-        if 'new_password' in data:
-            current = data.get('current_password', '')
-            if not user.check_password(current):
-                return Response({'detail': 'Current password is incorrect.'}, status=status.HTTP_400_BAD_REQUEST)
-            new_pass = data['new_password']
-            if len(new_pass) < 8:
-                return Response({'detail': 'Password must be at least 8 characters.'}, status=status.HTTP_400_BAD_REQUEST)
-            user.set_password(new_pass)
-            fields.append('password')
-
-        if not fields:
-            return Response({'detail': 'No changes provided.'}, status=status.HTTP_400_BAD_REQUEST)
-
-        profile_fields = {'full_name', 'farm_name', 'email', 'phone_number'}
-        if fields and (set(fields) & profile_fields):
-            from django.utils import timezone
-            user.profile_updated_at = timezone.now()
-            fields.append('profile_updated_at')
-
-        user.save(update_fields=fields)
-
-        # Return fresh tokens if password changed so the session stays alive
-        if 'password' in fields:
-            response = Response(_token_response(user))
-        else:
-            response = Response({'detail': 'Profile updated.'})
-        
-        # Disable caching to ensure fresh avatar on every update
-        response['Cache-Control'] = 'no-cache, no-store, must-revalidate, max-age=0'
-        response['Pragma'] = 'no-cache'
-        response['Expires'] = '0'
-        return response
-
-    def delete(self, request):
-        user = request.user
-        current = request.data.get('current_password', '')
-        if not user.check_password(current):
-            return Response({'detail': 'Current password is incorrect.'}, status=status.HTTP_400_BAD_REQUEST)
+    def delete(self, request, pk):
+        try:
+            user = User.objects.get(pk=pk)
+        except User.DoesNotExist:
+            return Response(status=status.HTTP_404_NOT_FOUND)
         user.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
-class AvatarUploadView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def post(self, request):
-        import cloudinary.uploader
-        from django.utils import timezone
-        file = request.FILES.get('avatar')
-        if not file:
-            return Response({'detail': 'No file provided.'}, status=status.HTTP_400_BAD_REQUEST)
-        if file.size > 2 * 1024 * 1024:
-            return Response({'detail': 'Image must be under 2 MB.'}, status=status.HTTP_400_BAD_REQUEST)
-        if not file.content_type.startswith('image/'):
-            return Response({'detail': 'File must be an image.'}, status=status.HTTP_400_BAD_REQUEST)
-
-        result = cloudinary.uploader.upload(
-            file,
-            folder='educfarm/avatars',
-            public_id=f'user_{request.user.id}',
-            overwrite=True,
-            transformation=[{'width': 256, 'height': 256, 'crop': 'fill', 'gravity': 'face'}],
-        )
-        url = result['secure_url']
-        # Add cache-busting parameter with timestamp
-        url = f"{url}?v={int(timezone.now().timestamp())}"
-        request.user.avatar_url = url
-        request.user.save(update_fields=['avatar_url'])
-        response = Response({'avatar_url': url})
-        # Disable caching to force refresh on other devices
-        response['Cache-Control'] = 'no-cache, no-store, must-revalidate, max-age=0'
-        response['Pragma'] = 'no-cache'
-        response['Expires'] = '0'
-        return response
+def _support_message_data(message):
+    return {
+        'id': message.id,
+        'conversation_id': message.conversation_id,
+        'sender_id': message.sender_id,
+        'sender_name': message.sender.name,
+        'is_staff': message.sender.is_staff,
+        'body': message.body,
+        'is_read': message.is_read,
+        'created_at': message.created_at,
+    }
 
 
-class HeartbeatView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def post(self, request):
-        from django.utils import timezone
-        request.user.last_seen = timezone.now()
-        request.user.save(update_fields=['last_seen'])
-        return Response({'ok': True})
+def _is_typing(timestamp):
+    return bool(timestamp and timestamp >= timezone.now() - timedelta(seconds=8))
 
 
-class SetPasswordView(APIView):
-    """Called right after first login — sets permanent password, clears OTP flag."""
-    permission_classes = [IsAuthenticated]
-
-    def post(self, request):
-        new_pass = request.data.get('new_password', '')
-        if len(new_pass) < 8:
-            return Response({'detail': 'Password must be at least 8 characters.'}, status=status.HTTP_400_BAD_REQUEST)
+class IsSupportStaff(permissions.BasePermission):
+    def has_permission(self, request, view):
         user = request.user
-        user.set_password(new_pass)
-        user.must_change_password = False
-        user.otp_code = ''
-        user.save(update_fields=['password', 'must_change_password', 'otp_code'])
-        return Response(_token_response(user))
+        return bool(
+            user and user.is_authenticated and user.is_staff
+            and (user.is_superuser or not user.assigned_pages or 'Support' in user.assigned_pages)
+        )
+
+
+class SupportChatView(APIView):
+    permission_classes = (permissions.IsAuthenticated,)
+
+    def get(self, request):
+        conversation = SupportConversation.objects.filter(user=request.user).first()
+        if not conversation:
+            return Response({'conversation_id': None, 'messages': [], 'unread_count': 0, 'staff_typing': False})
+
+        if request.query_params.get('mark_read') == 'true':
+            conversation.messages.filter(sender__is_staff=True, is_read=False).update(is_read=True)
+
+        messages = conversation.messages.select_related('sender').all()
+        unread_count = conversation.messages.filter(sender__is_staff=True, is_read=False).count()
+        return Response({
+            'conversation_id': conversation.id,
+            'messages': [_support_message_data(message) for message in messages],
+            'unread_count': unread_count,
+            'staff_typing': _is_typing(conversation.staff_typing_at),
+        })
+
+    def patch(self, request):
+        is_typing = request.data.get('is_typing')
+        if not isinstance(is_typing, bool):
+            return Response({'is_typing': 'This field must be a boolean.'}, status=status.HTTP_400_BAD_REQUEST)
+        conversation = SupportConversation.objects.filter(user=request.user).first()
+        if conversation:
+            conversation.customer_typing_at = timezone.now() if is_typing else None
+            conversation.save(update_fields=['customer_typing_at'])
+        return Response({'is_typing': is_typing})
+
+    def post(self, request):
+        body = request.data.get('body', '')
+        if not isinstance(body, str) or not body.strip():
+            return Response({'body': 'Enter a message.'}, status=status.HTTP_400_BAD_REQUEST)
+        if len(body.strip()) > 2000:
+            return Response({'body': 'Messages cannot exceed 2000 characters.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        conversation, _ = SupportConversation.objects.get_or_create(user=request.user)
+        message = SupportMessage.objects.create(conversation=conversation, sender=request.user, body=body.strip())
+        conversation.customer_typing_at = None
+        conversation.save(update_fields=['updated_at', 'customer_typing_at'])
+        return Response(_support_message_data(message), status=status.HTTP_201_CREATED)
+
+
+class AdminSupportConversationListView(APIView):
+    permission_classes = (IsSupportStaff,)
+
+    def get(self, request):
+        conversations = SupportConversation.objects.select_related('user').prefetch_related('messages__sender')
+        results = []
+        for conversation in conversations:
+            latest = conversation.messages.order_by('-created_at').first()
+            results.append({
+                'id': conversation.id,
+                'user_id': conversation.user_id,
+                'user_name': conversation.user.name,
+                'user_email': conversation.user.email,
+                'updated_at': conversation.updated_at,
+                'unread_count': conversation.messages.filter(sender__is_staff=False, is_read=False).count(),
+                'last_message': _support_message_data(latest) if latest else None,
+            })
+        return Response(results)
+
+
+class AdminSupportConversationView(APIView):
+    permission_classes = (IsSupportStaff,)
+
+    def get_conversation(self, pk):
+        try:
+            return SupportConversation.objects.select_related('user').get(pk=pk)
+        except SupportConversation.DoesNotExist:
+            return None
+
+    def get(self, request, pk):
+        conversation = self.get_conversation(pk)
+        if not conversation:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+        conversation.messages.filter(sender__is_staff=False, is_read=False).update(is_read=True)
+        messages = conversation.messages.select_related('sender').all()
+        return Response({
+            'id': conversation.id,
+            'user_id': conversation.user_id,
+            'user_name': conversation.user.name,
+            'user_email': conversation.user.email,
+            'customer_typing': _is_typing(conversation.customer_typing_at),
+            'messages': [_support_message_data(message) for message in messages],
+        })
+
+    def patch(self, request, pk):
+        conversation = self.get_conversation(pk)
+        if not conversation:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+        is_typing = request.data.get('is_typing')
+        if not isinstance(is_typing, bool):
+            return Response({'is_typing': 'This field must be a boolean.'}, status=status.HTTP_400_BAD_REQUEST)
+        conversation.staff_typing_at = timezone.now() if is_typing else None
+        conversation.save(update_fields=['staff_typing_at'])
+        return Response({'is_typing': is_typing})
+
+    def post(self, request, pk):
+        conversation = self.get_conversation(pk)
+        if not conversation:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+        body = request.data.get('body', '')
+        if not isinstance(body, str) or not body.strip():
+            return Response({'body': 'Enter a reply.'}, status=status.HTTP_400_BAD_REQUEST)
+        if len(body.strip()) > 2000:
+            return Response({'body': 'Messages cannot exceed 2000 characters.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        message = SupportMessage.objects.create(conversation=conversation, sender=request.user, body=body.strip())
+        conversation.staff_typing_at = None
+        conversation.save(update_fields=['updated_at', 'staff_typing_at'])
+        return Response(_support_message_data(message), status=status.HTTP_201_CREATED)
+
+
+class RegisterView(generics.CreateAPIView):
+    serializer_class = RegisterSerializer
+    permission_classes = (permissions.AllowAny,)
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user = serializer.save()
+        refresh = RefreshToken.for_user(user)
+        try:
+            send_welcome_email(user.name, user.email)
+        except Exception:
+            pass
+        try:
+            send_welcome_sms(user.name, user.phone)
+        except Exception:
+            pass
+        Notification.objects.create(user=user, type='welcome', title='Welcome to Majo Gadgets!', body='Thanks for joining! Explore our latest gadgets and enjoy exclusive deals made just for you.')
+        return Response({'access': str(refresh.access_token), 'refresh': str(refresh)}, status=status.HTTP_201_CREATED)
+
+
+class ForgotPasswordView(APIView):
+    permission_classes = (permissions.AllowAny,)
+
+    def post(self, request):
+        email = request.data.get('email', '').strip().lower()
+        user = User.objects.filter(email=email).first()
+        # Always return 200 to avoid email enumeration
+        if user:
+            token = secrets.token_urlsafe(32)
+            cache.set(f'pwd_reset:{token}', user.pk, timeout=3600)
+            reset_url = f"{settings.FRONTEND_URL}/reset-password?token={token}"
+            try:
+                send_password_reset_email(user.name, user.email, reset_url)
+            except Exception:
+                pass
+        return Response({'detail': 'If that email exists, a reset link has been sent.'})
+
+
+class ResetPasswordView(APIView):
+    permission_classes = (permissions.AllowAny,)
+
+    def post(self, request):
+        token = request.data.get('token', '')
+        password = request.data.get('password', '')
+        if not token or not password:
+            return Response({'detail': 'Token and password are required.'}, status=status.HTTP_400_BAD_REQUEST)
+        user_pk = cache.get(f'pwd_reset:{token}')
+        if not user_pk:
+            return Response({'detail': 'Invalid or expired reset link.'}, status=status.HTTP_400_BAD_REQUEST)
+        user = User.objects.filter(pk=user_pk).first()
+        if not user:
+            return Response({'detail': 'User not found.'}, status=status.HTTP_400_BAD_REQUEST)
+        user.set_password(password)
+        user.save()
+        cache.delete(f'pwd_reset:{token}')
+        try:
+            send_password_changed_email(user.name, user.email)
+        except Exception:
+            pass
+        Notification.objects.create(user=user, type='system', title='Password reset successfully', body='Your account password was reset. If you did not do this, please contact us immediately.')
+        return Response({'detail': 'Password reset successful.'})
+
+
+class ProfileView(generics.RetrieveAPIView):
+    serializer_class = UserSerializer
+    permission_classes = (permissions.IsAuthenticated,)
+
+    def get_object(self):
+        return self.request.user
+
+    def patch(self, request, *args, **kwargs):
+        serializer = UpdateProfileSerializer(
+            request.user, data=request.data, partial=True, context={'request': request}
+        )
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        if serializer.validated_data.get('new_password') or serializer.validated_data.get('password'):
+            try:
+                send_password_changed_email(request.user.name, request.user.email)
+            except Exception:
+                pass
+            Notification.objects.create(user=request.user, type='system', title='Password changed', body='Your account password was changed successfully. If you did not do this, please contact us immediately.')
+        return Response(UserSerializer(request.user).data)
+
+    def delete(self, request, *args, **kwargs):
+        request.user.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class CartView(APIView):
+    permission_classes = (permissions.IsAuthenticated,)
+
+    def get(self, request):
+        items = CartItem.objects.filter(user=request.user)
+        return Response(CartItemSerializer(items, many=True).data)
+
+    def post(self, request):
+        product_id = request.data.get('product_id')
+        quantity = int(request.data.get('quantity', 1))
+        item, created = CartItem.objects.get_or_create(
+            user=request.user,
+            product_id=product_id,
+            defaults={
+                'product_name': request.data.get('product_name', ''),
+                'product_price': request.data.get('product_price', 0),
+                'product_image': request.data.get('product_image'),
+                'product_slug': request.data.get('product_slug', ''),
+                'product_category': request.data.get('product_category', ''),
+                'product_rating': request.data.get('product_rating', 0),
+                'quantity': quantity,
+            }
+        )
+        if not created:
+            item.quantity += quantity
+            item.save()
+        return Response(CartItemSerializer(item).data, status=status.HTTP_201_CREATED)
+
+    def delete(self, request):
+        CartItem.objects.filter(user=request.user).delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class CartItemView(APIView):
+    permission_classes = (permissions.IsAuthenticated,)
+
+    def patch(self, request, product_id):
+        try:
+            item = CartItem.objects.get(user=request.user, product_id=product_id)
+            quantity = int(request.data.get('quantity', item.quantity))
+            if quantity <= 0:
+                item.delete()
+                return Response(status=status.HTTP_204_NO_CONTENT)
+            item.quantity = quantity
+            item.save()
+            return Response(CartItemSerializer(item).data)
+        except CartItem.DoesNotExist:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+
+    def delete(self, request, product_id):
+        CartItem.objects.filter(user=request.user, product_id=product_id).delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class WishlistView(APIView):
+    permission_classes = (permissions.IsAuthenticated,)
+
+    def get(self, request):
+        items = WishlistItem.objects.filter(user=request.user)
+        return Response(WishlistItemSerializer(items, many=True).data)
+
+    def post(self, request):
+        product_id = request.data.get('product_id')
+        item, created = WishlistItem.objects.get_or_create(
+            user=request.user,
+            product_id=product_id,
+            defaults={
+                'product_name': request.data.get('product_name', ''),
+                'product_price': request.data.get('product_price', 0),
+                'product_image': request.data.get('product_image'),
+                'product_slug': request.data.get('product_slug', ''),
+                'product_category': request.data.get('product_category', ''),
+                'product_rating': request.data.get('product_rating', 0),
+            }
+        )
+        return Response(WishlistItemSerializer(item).data, status=status.HTTP_201_CREATED)
+
+
+class WishlistItemView(APIView):
+    permission_classes = (permissions.IsAuthenticated,)
+
+    def delete(self, request, product_id):
+        WishlistItem.objects.filter(user=request.user, product_id=product_id).delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class NotificationsView(APIView):
+    permission_classes = (permissions.IsAuthenticated,)
+
+    def get(self, request):
+        qs = Notification.objects.filter(user=request.user)
+        return Response(NotificationSerializer(qs, many=True).data)
+
+    def delete(self, request):
+        """Delete all notifications for the user."""
+        Notification.objects.filter(user=request.user).delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class NotificationDetailView(APIView):
+    permission_classes = (permissions.IsAuthenticated,)
+
+    def patch(self, request, pk):
+        try:
+            n = Notification.objects.get(pk=pk, user=request.user)
+        except Notification.DoesNotExist:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+        n.read = True
+        n.save(update_fields=['read'])
+        return Response(NotificationSerializer(n).data)
+
+    def delete(self, request, pk):
+        Notification.objects.filter(pk=pk, user=request.user).delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class NotificationMarkAllReadView(APIView):
+    permission_classes = (permissions.IsAuthenticated,)
+
+    def post(self, request):
+        Notification.objects.filter(user=request.user, read=False).update(read=True)
+        return Response({'status': 'ok'})
+
+
+class GoogleLoginView(APIView):
+    permission_classes = (permissions.AllowAny,)
+
+    def post(self, request):
+        credential = request.data.get('credential', '')
+        if not credential:
+            return Response({'detail': 'Google credential is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            import urllib.request, json as _json
+            with urllib.request.urlopen(f'https://www.googleapis.com/oauth2/v3/userinfo?access_token={credential}') as r:
+                info = _json.loads(r.read())
+        except Exception:
+            return Response({'detail': 'Invalid Google token.'}, status=status.HTTP_401_UNAUTHORIZED)
+
+        email = info.get('email', '').lower()
+        name = info.get('name', '') or email.split('@')[0]
+        if not email:
+            return Response({'detail': 'Could not get email from Google.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        user, created = User.objects.get_or_create(email=email, defaults={'name': name})
+        _store_google_avatar(user, info.get('picture'))
+        if created:
+            user.set_unusable_password()
+            user.save()
+            try:
+                send_welcome_email(user.name, user.email)
+            except Exception:
+                pass
+            try:
+                send_welcome_sms(user.name, user.phone)
+            except Exception:
+                pass
+            Notification.objects.create(user=user, type='welcome', title='Welcome to Majo Gadgets!', body='Thanks for joining! Explore our latest gadgets and enjoy exclusive deals made just for you.')
+
+        if not user.phone or not user.district:
+            # Issue a short-lived JWT encoding just the user pk — no server-side storage needed
+            from rest_framework_simplejwt.tokens import AccessToken
+            from datetime import timedelta
+            token = AccessToken()
+            token.set_exp(lifetime=timedelta(minutes=10))
+            token['user_id'] = user.pk
+            token['profile_setup'] = True
+            return Response({'needs_profile': True, 'tmp_token': str(token), 'name': user.name, 'email': user.email})
+
+        refresh = RefreshToken.for_user(user)
+        return Response({'access': str(refresh.access_token), 'refresh': str(refresh)})
+
+
+class CompleteGoogleProfileView(APIView):
+    permission_classes = (permissions.AllowAny,)
+
+    def post(self, request):
+        tmp = request.data.get('tmp_token', '')
+        if not tmp:
+            return Response({'detail': 'Invalid session.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            from rest_framework_simplejwt.tokens import AccessToken
+            token = AccessToken(tmp)
+            if not token.get('profile_setup'):
+                raise Exception('not a profile setup token')
+            user_pk = token['user_id']
+        except Exception:
+            return Response({'detail': 'Session expired. Please sign in again.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        user = User.objects.filter(pk=user_pk).first()
+        if not user:
+            return Response({'detail': 'User not found.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        phone = request.data.get('phone', '').strip()
+        region = request.data.get('region', '').strip()
+        district = request.data.get('district', '').strip()
+        village = request.data.get('village', '').strip()
+
+        if not phone or not region or not district:
+            return Response({'detail': 'Phone, region and district are required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        user.phone = phone
+        user.region = region
+        user.district = district
+        user.village = village
+        user.country = 'Uganda'
+        user.save()
+
+        refresh = RefreshToken.for_user(user)
+        return Response({'access': str(refresh.access_token), 'refresh': str(refresh)})
+
+
+# ── Behaviour tracking ────────────────────────────────────────────────────────
+
+SCORE_MAP = {'view': 1, 'click': 3, 'category': 5}
+MAX_RECENT = 60
+
+
+def _update_behaviour(user, event_type, category_slug, product_id=None):
+    behaviour, _ = UserBehaviour.objects.get_or_create(user=user)
+    scores = dict(behaviour.category_scores or {})
+    recent = list(behaviour.recent_product_ids or [])
+    if category_slug:
+        scores[category_slug] = scores.get(category_slug, 0) + SCORE_MAP.get(event_type, 1)
+    if product_id:
+        recent = [product_id] + [pid for pid in recent if pid != product_id]
+        recent = recent[:MAX_RECENT]
+    behaviour.category_scores = scores
+    behaviour.recent_product_ids = recent
+    behaviour.save(update_fields=['category_scores', 'recent_product_ids', 'updated_at'])
+
+
+class BehaviourTrackView(APIView):
+    """
+    POST /api/auth/behaviour/
+    { event: 'view'|'click'|'category', category_slug: str, product_id?: int }
+    """
+    permission_classes = (permissions.IsAuthenticated,)
+
+    def post(self, request):
+        event = request.data.get('event', '')
+        category_slug = request.data.get('category_slug', '').strip()
+        if event not in SCORE_MAP or not category_slug:
+            return Response({'detail': 'Invalid payload.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            product_id = int(request.data['product_id']) if request.data.get('product_id') else None
+        except (ValueError, TypeError):
+            product_id = None
+        _update_behaviour(request.user, event, category_slug, product_id)
+        return Response({'status': 'ok'})
+
+
+class RecommendedProductsView(APIView):
+    """
+    GET /api/auth/recommended/?page=1&page_size=12&exclude=1,2,3
+    Returns products ranked by the authenticated user's behaviour scores.
+    Falls back to random order for guests.
+    """
+    permission_classes = (permissions.AllowAny,)
+
+    def get(self, request):
+        import random
+        from products.models import Product
+        from products.serializers import ProductSerializer
+
+        page = max(1, int(request.query_params.get('page', 1)))
+        page_size = min(24, int(request.query_params.get('page_size', 12)))
+        exclude_ids = set()
+        for x in request.query_params.get('exclude', '').split(','):
+            try:
+                exclude_ids.add(int(x.strip()))
+            except ValueError:
+                pass
+
+        qs = Product.objects.filter(is_active=True).select_related('category').prefetch_related('images')
+        if exclude_ids:
+            qs = qs.exclude(id__in=exclude_ids)
+
+        products = list(qs)
+        total = len(products)
+
+        if request.user and request.user.is_authenticated:
+            behaviour = getattr(request.user, 'behaviour', None)
+            scores = dict(behaviour.category_scores) if behaviour else {}
+            recent_ids = set(behaviour.recent_product_ids) if behaviour else set()
+
+            def rank(p):
+                cat_slug = p.category.slug if p.category else ''
+                return scores.get(cat_slug, 0) + (-20 if p.id in recent_ids else 0) + random.uniform(0, 3)
+
+            products.sort(key=rank, reverse=True)
+        else:
+            random.shuffle(products)
+
+        start = (page - 1) * page_size
+        page_products = products[start:start + page_size]
+        has_next = (start + page_size) < total
+
+        return Response({
+            'results': ProductSerializer(page_products, many=True).data,
+            'count': total,
+            'next': page + 1 if has_next else None,
+        })
+
+
+# ── Behaviour tracking ────────────────────────────────────────────────────────
+
+SCORE_MAP = {'view': 1, 'click': 3, 'category': 5}
+MAX_RECENT = 60
+
+
+def _update_behaviour(user, event_type, category_slug, product_id=None):
+    behaviour, _ = UserBehaviour.objects.get_or_create(user=user)
+    scores = dict(behaviour.category_scores or {})
+    recent = list(behaviour.recent_product_ids or [])
+    if category_slug:
+        scores[category_slug] = scores.get(category_slug, 0) + SCORE_MAP.get(event_type, 1)
+    if product_id:
+        recent = [product_id] + [pid for pid in recent if pid != product_id]
+        recent = recent[:MAX_RECENT]
+    behaviour.category_scores = scores
+    behaviour.recent_product_ids = recent
+    behaviour.save(update_fields=['category_scores', 'recent_product_ids', 'updated_at'])
+
+
+class BehaviourTrackView(APIView):
+    """
+    POST /api/auth/behaviour/
+    { event: 'view'|'click'|'category', category_slug: str, product_id?: int }
+    """
+    permission_classes = (permissions.IsAuthenticated,)
+
+    def post(self, request):
+        event = request.data.get('event', '')
+        category_slug = request.data.get('category_slug', '').strip()
+        if event not in SCORE_MAP or not category_slug:
+            return Response({'detail': 'Invalid payload.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            product_id = int(request.data['product_id']) if request.data.get('product_id') else None
+        except (ValueError, TypeError):
+            product_id = None
+        _update_behaviour(request.user, event, category_slug, product_id)
+        return Response({'status': 'ok'})
+
+
+class RecommendedProductsView(APIView):
+    """
+    GET /api/auth/recommended/?page=1&page_size=12&exclude=1,2,3
+    Returns products ranked by the authenticated user's behaviour scores.
+    Falls back to random order for guests.
+    """
+    permission_classes = (permissions.AllowAny,)
+
+    def get(self, request):
+        import random
+        from products.models import Product
+        from products.serializers import ProductSerializer
+
+        page = max(1, int(request.query_params.get('page', 1)))
+        page_size = min(24, int(request.query_params.get('page_size', 12)))
+        exclude_ids = set()
+        for x in request.query_params.get('exclude', '').split(','):
+            try:
+                exclude_ids.add(int(x.strip()))
+            except ValueError:
+                pass
+
+        qs = Product.objects.filter(is_active=True).select_related('category').prefetch_related('images')
+        if exclude_ids:
+            qs = qs.exclude(id__in=exclude_ids)
+
+        products = list(qs)
+        total = len(products)
+
+        if request.user and request.user.is_authenticated:
+            behaviour = getattr(request.user, 'behaviour', None)
+            scores = dict(behaviour.category_scores) if behaviour else {}
+            recent_ids = set(behaviour.recent_product_ids) if behaviour else set()
+
+            def rank(p):
+                cat_slug = p.category.slug if p.category else ''
+                return scores.get(cat_slug, 0) + (-20 if p.id in recent_ids else 0) + random.uniform(0, 3)
+
+            products.sort(key=rank, reverse=True)
+        else:
+            random.shuffle(products)
+
+        start = (page - 1) * page_size
+        page_products = products[start:start + page_size]
+        has_next = (start + page_size) < total
+
+        return Response({
+            'results': ProductSerializer(page_products, many=True).data,
+            'count': total,
+            'next': page + 1 if has_next else None,
+        })
