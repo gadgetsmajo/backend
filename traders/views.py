@@ -5,7 +5,7 @@ import logging
 import mimetypes
 import os
 
-from cloudinary.utils import private_download_url
+from cloudinary.utils import cloudinary_url, private_download_url
 from django.conf import settings
 from django.core.serializers.json import DjangoJSONEncoder
 from django.http import HttpResponse
@@ -528,20 +528,45 @@ class AdminTraderDocumentView(APIView):
             return Response({'detail': 'Document not found.'}, status=status.HTTP_404_NOT_FOUND)
 
         try:
-            document_url = private_download_url(
-                document.public_id,
-                document.format,
-                resource_type=document.resource_type,
-                type=document.type,
-                expires_at=int(timezone.now().timestamp()) + 60,
-            )
-            with urlopen(document_url, timeout=20) as upstream:
+            try:
+                document_url = private_download_url(
+                    document.public_id,
+                    document.format,
+                    resource_type=document.resource_type,
+                    type=document.type,
+                    expires_at=int(timezone.now().timestamp()) + 60,
+                )
+                upstream_context = urlopen(document_url, timeout=20)
+            except Exception as private_download_error:
+                logger.warning(
+                    'Cloudinary private download failed for trader application %s (%s) (%s); trying signed delivery',
+                    pk,
+                    document_type,
+                    type(private_download_error).__name__,
+                )
+                document_url = cloudinary_url(
+                    document.public_id,
+                    format=document.format,
+                    resource_type=document.resource_type,
+                    type=document.type,
+                    version=document.version,
+                    sign_url=True,
+                    secure=True,
+                )[0]
+                upstream_context = urlopen(document_url, timeout=20)
+
+            with upstream_context as upstream:
                 content = upstream.read(MAX_TRADER_DOCUMENT_SIZE + 1)
                 if len(content) > MAX_TRADER_DOCUMENT_SIZE:
                     return Response({'detail': 'Document exceeds the permitted size.'}, status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
                 content_type = upstream.headers.get('Content-Type') or mimetypes.guess_type(document.format or '')[0] or 'application/octet-stream'
-        except Exception:
-            logger.exception('Unable to retrieve trader application document for application %s (%s)', pk, document_type)
+        except Exception as retrieval_error:
+            logger.error(
+                'Unable to retrieve trader application document for application %s (%s): %s',
+                pk,
+                document_type,
+                type(retrieval_error).__name__,
+            )
             return Response({'detail': 'Could not retrieve the document from secure storage.'}, status=status.HTTP_502_BAD_GATEWAY)
 
         filename = os.path.basename(document.public_id or f'{document_type}.{document.format or "pdf"}')

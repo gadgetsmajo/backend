@@ -1,5 +1,6 @@
 from datetime import timedelta
 from unittest.mock import MagicMock, patch
+from urllib.error import HTTPError
 
 from cloudinary import CloudinaryResource
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -290,14 +291,46 @@ class TraderApplicationApprovalTests(TestCase):
 		self.assertEqual(download_url.call_args.kwargs['resource_type'], 'raw')
 		self.assertEqual(download_url.call_args.kwargs['type'], 'upload')
 
+	def test_admin_document_preview_falls_back_to_signed_delivery_url(self):
+		url = reverse('admin-trader-document', args=[self.application.id, 'national-id'])
+		upstream_response = MagicMock()
+		upstream_response.read.return_value = b'%PDF-id-copy'
+		upstream_response.headers.get.return_value = 'application/pdf'
+		fallback_context = MagicMock()
+		fallback_context.__enter__.return_value = upstream_response
+		private_download_error = HTTPError(
+			'https://cloudinary.test/private-download', 403, 'Forbidden', {}, None,
+		)
+
+		with patch('traders.views.private_download_url', return_value='https://cloudinary.test/private-download'):
+			with patch('traders.views.cloudinary_url', return_value=('https://cloudinary.test/signed-delivery', {})) as signed_url:
+				with patch('traders.views.urlopen', side_effect=[private_download_error, fallback_context]) as open_url:
+					response = self.client.get(url)
+
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(response.content, b'%PDF-id-copy')
+		signed_url.assert_called_once_with(
+			'id-copy',
+			format='pdf',
+			resource_type='raw',
+			type='authenticated',
+			version='1',
+			sign_url=True,
+			secure=True,
+		)
+		self.assertEqual(open_url.call_count, 2)
+
 	def test_admin_document_preview_sanitizes_storage_errors(self):
 		url = reverse('admin-trader-document', args=[self.application.id, 'national-id'])
 		with patch('traders.views.private_download_url', side_effect=OSError('Cloudinary unavailable')):
-			with self.assertLogs('traders.views', level='ERROR'):
-				response = self.client.get(url)
+			with patch('traders.views.cloudinary_url', return_value=('https://cloudinary.test/signed-delivery', {})):
+				with patch('traders.views.urlopen', side_effect=OSError('Cloudinary unavailable')):
+					with self.assertLogs('traders.views', level='ERROR') as logs:
+						response = self.client.get(url)
 
 		self.assertEqual(response.status_code, 502)
 		self.assertEqual(response.data['detail'], 'Could not retrieve the document from secure storage.')
+		self.assertNotIn('cloudinary.test', '\n'.join(logs.output))
 
 
 class TraderInventoryStockSyncTests(TestCase):
