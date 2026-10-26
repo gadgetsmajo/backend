@@ -13,7 +13,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework.test import APIClient
 
 from users import emails
-from users.models import EmailMfaChallenge, EmailMfaTrustedDevice
+from users.models import EmailMfaChallenge, EmailMfaTrustedDevice, SupportConversation, SupportMessage
 
 User = get_user_model()
 
@@ -462,14 +462,18 @@ class SupportChatApiTests(TestCase):
             sent = self.client.post('/api/auth/support/chat/', {
                 'envelope': self.encrypted_envelope(customer_key, recipients),
             }, format='json')
-        self.assertEqual(sent.status_code, 201)
-        send_alert.assert_called_once_with('Customer', 'customer@example.com')
+            self.assertEqual(sent.status_code, 201)
+            follow_up = self.client.post('/api/auth/support/chat/', {
+                'envelope': self.encrypted_envelope(customer_key, recipients),
+            }, format='json')
+            self.assertEqual(follow_up.status_code, 201)
+            send_alert.assert_called_once_with('Customer', 'customer@example.com')
         conversation_id = sent.data['conversation_id']
 
         self.client.force_authenticate(user=self.staff)
         inbox = self.client.get('/api/auth/admin/support/conversations/')
         self.assertEqual(inbox.status_code, 200)
-        self.assertEqual(inbox.data[0]['unread_count'], 1)
+        self.assertEqual(inbox.data[0]['unread_count'], 2)
         recipients = self.client.get(
             f'/api/auth/support/encryption-keys/?user_id={self.customer.id}'
         ).data['keys']
@@ -483,8 +487,24 @@ class SupportChatApiTests(TestCase):
         self.client.force_authenticate(user=self.customer)
         chat = self.client.get('/api/auth/support/chat/?mark_read=true')
         self.assertEqual(chat.status_code, 200)
-        self.assertEqual(len(chat.data['messages']), 2)
+        self.assertEqual(len(chat.data['messages']), 3)
         self.assertEqual(chat.data['unread_count'], 0)
+
+    def test_existing_conversation_messages_do_not_trigger_new_admin_email(self):
+        customer_key = self.register_encryption_key(self.customer)
+        self.register_encryption_key(self.staff)
+        conversation = SupportConversation.objects.create(user=self.customer)
+        SupportMessage.objects.create(conversation=conversation, sender=self.customer, body='{"version":1}')
+
+        self.client.force_authenticate(user=self.customer)
+        recipients = self.client.get('/api/auth/support/encryption-keys/').data['keys']
+        with patch('users.views.send_admin_new_support_message_email') as send_alert:
+            response = self.client.post('/api/auth/support/chat/', {
+                'envelope': self.encrypted_envelope(customer_key, recipients),
+            }, format='json')
+
+        self.assertEqual(response.status_code, 201)
+        send_alert.assert_not_called()
 
     def test_chat_requires_authentication_and_staff_routes_require_staff(self):
         self.assertEqual(self.client.get('/api/auth/support/chat/').status_code, 401)

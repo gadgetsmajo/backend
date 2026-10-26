@@ -7,6 +7,7 @@ import math
 import uuid
 from datetime import timedelta
 from urllib.parse import urlparse
+from django.db import transaction
 from rest_framework import generics, permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -615,19 +616,23 @@ class SupportChatView(APIView):
             )
 
         conversation, _ = SupportConversation.objects.get_or_create(user=request.user)
-        if conversation.is_closed:
-            return Response(
-                {'detail': 'This support conversation is closed. Reopen it before sending another message.'},
-                status=status.HTTP_409_CONFLICT,
-            )
         body, error = _validate_support_ciphertext(request, request.user.id)
         if error:
             return error
 
-        message = SupportMessage.objects.create(conversation=conversation, sender=request.user, body=body)
-        conversation.customer_typing_at = None
-        conversation.save(update_fields=['updated_at', 'customer_typing_at'])
-        if not request.user.is_staff:
+        with transaction.atomic():
+            conversation = SupportConversation.objects.select_for_update().get(pk=conversation.pk)
+            if conversation.is_closed:
+                return Response(
+                    {'detail': 'This support conversation is closed. Reopen it before sending another message.'},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            is_first_message = not conversation.messages.exists()
+            message = SupportMessage.objects.create(conversation=conversation, sender=request.user, body=body)
+            conversation.customer_typing_at = None
+            conversation.save(update_fields=['updated_at', 'customer_typing_at'])
+
+        if is_first_message and not request.user.is_staff:
             try:
                 send_admin_new_support_message_email(request.user.name, request.user.email)
             except Exception as error:
