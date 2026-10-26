@@ -43,6 +43,18 @@ class SupportConversation(models.Model):
         return f'Support conversation with {self.user.email}'
 
 
+class SupportConversationStaffPresence(models.Model):
+    conversation = models.ForeignKey(SupportConversation, on_delete=models.CASCADE, related_name='staff_presence')
+    staff = models.ForeignKey('User', on_delete=models.CASCADE, related_name='support_conversation_presence')
+    first_joined_at = models.DateTimeField(null=True, blank=True)
+    last_seen_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['conversation', 'staff'], name='unique_support_staff_presence'),
+        ]
+
+
 class SupportEncryptionKey(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='support_encryption_keys')

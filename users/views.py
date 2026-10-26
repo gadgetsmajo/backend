@@ -19,7 +19,7 @@ from django.core.cache import cache
 from django.conf import settings
 from django.utils import timezone
 from .serializers import RegisterSerializer, UserSerializer, UpdateProfileSerializer, CartItemSerializer, WishlistItemSerializer, NotificationSerializer
-from .models import CartItem, WishlistItem, Notification, UserBehaviour, SupportConversation, SupportEncryptionBackup, SupportEncryptionKey, SupportMessage, EmailMfaChallenge, EmailMfaTrustedDevice
+from .models import CartItem, WishlistItem, Notification, UserBehaviour, SupportConversation, SupportConversationStaffPresence, SupportEncryptionBackup, SupportEncryptionKey, SupportMessage, EmailMfaChallenge, EmailMfaTrustedDevice
 from .emails import send_welcome_email, send_password_reset_email, send_password_changed_email, send_login_verification_email, send_signin_alert_email, send_admin_new_support_message_email
 from .sms import send_welcome_sms
 from .authentication import requires_email_mfa
@@ -378,6 +378,28 @@ def _is_typing(timestamp):
     return bool(timestamp and timestamp >= timezone.now() - timedelta(seconds=8))
 
 
+def _support_presence_status(conversation):
+    now = timezone.now()
+    presence = conversation.staff_presence.all()
+    if presence.filter(last_seen_at__gte=now - timedelta(seconds=15)).exists():
+        return 'joined'
+    if presence.filter(first_joined_at__isnull=False).exists():
+        return 'left'
+    return 'waiting'
+
+
+def _set_support_staff_presence(conversation, staff, is_viewing):
+    now = timezone.now()
+    presence, _ = SupportConversationStaffPresence.objects.get_or_create(
+        conversation=conversation,
+        staff=staff,
+    )
+    presence.last_seen_at = now if is_viewing else None
+    if is_viewing and presence.first_joined_at is None:
+        presence.first_joined_at = now
+    presence.save(update_fields=['first_joined_at', 'last_seen_at'])
+
+
 def _support_staff_keys():
     support_staff_ids = [
         user.id
@@ -574,6 +596,7 @@ class SupportChatView(APIView):
                 'unread_count': 0,
                 'staff_typing': False,
                 'is_closed': False,
+                'support_presence': 'waiting',
             })
 
         if request.query_params.get('mark_read') == 'true':
@@ -587,6 +610,7 @@ class SupportChatView(APIView):
             'unread_count': unread_count,
             'staff_typing': _is_typing(conversation.staff_typing_at),
             'is_closed': conversation.is_closed,
+            'support_presence': _support_presence_status(conversation),
         })
 
     def patch(self, request):
@@ -687,6 +711,7 @@ class AdminSupportConversationView(APIView):
             'user_email': conversation.user.email,
             'customer_typing': _is_typing(conversation.customer_typing_at),
             'is_closed': conversation.is_closed,
+            'support_presence': _support_presence_status(conversation),
             'messages': [_support_message_data(message) for message in messages],
         })
 
@@ -694,6 +719,13 @@ class AdminSupportConversationView(APIView):
         conversation = self.get_conversation(pk)
         if not conversation:
             return Response(status=status.HTTP_404_NOT_FOUND)
+        if 'is_viewing' in request.data:
+            is_viewing = request.data['is_viewing']
+            if not isinstance(is_viewing, bool):
+                return Response({'is_viewing': 'This field must be a boolean.'}, status=status.HTTP_400_BAD_REQUEST)
+            _set_support_staff_presence(conversation, request.user, is_viewing)
+            return Response({'is_viewing': is_viewing})
+
         if 'is_closed' in request.data:
             is_closed = request.data['is_closed']
             if not isinstance(is_closed, bool):

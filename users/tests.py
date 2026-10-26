@@ -506,6 +506,44 @@ class SupportChatApiTests(TestCase):
         self.assertEqual(response.status_code, 201)
         send_alert.assert_not_called()
 
+    def test_customer_sees_support_join_and_leave_presence_and_can_keep_messaging(self):
+        customer_key = self.register_encryption_key(self.customer)
+        self.register_encryption_key(self.staff)
+
+        self.client.force_authenticate(user=self.customer)
+        started = self.client.post('/api/auth/support/chat/', {'start': True}, format='json')
+        self.assertEqual(started.status_code, 201)
+        conversation_id = started.data['conversation_id']
+        self.assertEqual(self.client.get('/api/auth/support/chat/').data['support_presence'], 'waiting')
+
+        self.client.force_authenticate(user=self.staff)
+        presence_url = f'/api/auth/admin/support/conversations/{conversation_id}/'
+        joined = self.client.patch(presence_url, {'is_viewing': True}, format='json')
+        self.assertEqual(joined.status_code, 200)
+        self.assertTrue(joined.data['is_viewing'])
+
+        self.client.force_authenticate(user=self.customer)
+        self.assertEqual(self.client.get('/api/auth/support/chat/').data['support_presence'], 'joined')
+
+        self.client.force_authenticate(user=self.staff)
+        left = self.client.patch(presence_url, {'is_viewing': False}, format='json')
+        self.assertEqual(left.status_code, 200)
+        self.assertFalse(left.data['is_viewing'])
+
+        self.client.force_authenticate(user=self.customer)
+        self.assertEqual(self.client.get('/api/auth/support/chat/').data['support_presence'], 'left')
+        recipients = self.client.get('/api/auth/support/encryption-keys/').data['keys']
+        with patch('users.views.send_admin_new_support_message_email'):
+            message = self.client.post('/api/auth/support/chat/', {
+                'envelope': self.encrypted_envelope(customer_key, recipients),
+            }, format='json')
+        self.assertEqual(message.status_code, 201)
+
+        self.client.force_authenticate(user=self.staff)
+        inbox = self.client.get('/api/auth/admin/support/conversations/')
+        self.assertEqual(len(inbox.data), 1)
+        self.assertFalse(inbox.data[0]['is_closed'])
+
     def test_chat_requires_authentication_and_staff_routes_require_staff(self):
         self.assertEqual(self.client.get('/api/auth/support/chat/').status_code, 401)
 
