@@ -550,6 +550,29 @@ def send_login_verification_email(name: str, email: str, code: str):
     _send({'from': FROM, 'to': email, 'subject': 'Your Majo Gadgets sign-in code', 'html': _wrap(body)})
 
 
+def send_signin_alert_email(name: str, email: str, device_name: str, location: str, signed_in_at: str):
+    reset_url = f'{settings.FRONTEND_URL}/forgot-password'
+    body = f'''
+      <div style="text-align:center;margin-bottom:28px">
+        <h2 style="margin:0 0 8px;font-size:22px;color:#0F172A">New sign-in to your account</h2>
+        <p style="margin:0;font-size:14px;color:#64748B">A successful sign-in to your Majo Gadgets account was detected</p>
+      </div>
+      <p style="margin:0 0 20px;font-size:15px;color:#475569;line-height:1.7">Hi <strong>{escape(name or 'there')}</strong>, here are the details of the sign-in:</p>
+      <table role="presentation" style="width:100%;margin:0 0 24px;border-collapse:collapse;background:#F8FAFC">
+        <tr><td style="padding:12px 16px;font-size:13px;color:#64748B">Device</td><td style="padding:12px 16px;font-size:13px;font-weight:700;color:#0F172A">{escape(device_name)}</td></tr>
+        <tr><td style="padding:12px 16px;font-size:13px;color:#64748B">Approximate location</td><td style="padding:12px 16px;font-size:13px;font-weight:700;color:#0F172A">{escape(location)}</td></tr>
+        <tr><td style="padding:12px 16px;font-size:13px;color:#64748B">Time</td><td style="padding:12px 16px;font-size:13px;font-weight:700;color:#0F172A">{escape(signed_in_at)}</td></tr>
+      </table>
+      <p style="margin:0 0 20px;font-size:14px;font-weight:700;color:#0F172A">Wasn't you?</p>
+      <p style="margin:0 0 20px;font-size:13px;color:#475569;line-height:1.7">If you don't recognize this activity, reset your password immediately to secure your account. This will also sign out trusted devices.</p>
+      <div style="text-align:center;margin-bottom:24px">
+        <a href="{escape(reset_url)}" style="display:inline-block;padding:14px 32px;background:#1E3A8A;color:#ffffff;border-radius:6px;font-size:14px;font-weight:700;text-decoration:none">Reset my password</a>
+      </div>
+      <p style="margin:0;font-size:12px;color:#64748B;line-height:1.6">Location is shared by your device only if you granted location permission. It may be unavailable or approximate.</p>
+    '''
+    _send({'from': FROM, 'to': email, 'subject': 'New sign-in to your Majo Gadgets account', 'html': _wrap(body)})
+
+
 def send_payment_successful_email(name: str, email: str, order_code: str, total: str, items: list, payment_method: str = ''):
     method_line = f'<p style="margin:0 0 12px;font-size:13px;color:#334155"><strong>Payment method:</strong> {payment_method}</p>' if payment_method else ''
     body = f'''

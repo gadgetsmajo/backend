@@ -3,6 +3,7 @@ import secrets
 import base64
 import hashlib
 import json
+import math
 import uuid
 from datetime import timedelta
 from urllib.parse import urlparse
@@ -18,7 +19,7 @@ from django.conf import settings
 from django.utils import timezone
 from .serializers import RegisterSerializer, UserSerializer, UpdateProfileSerializer, CartItemSerializer, WishlistItemSerializer, NotificationSerializer
 from .models import CartItem, WishlistItem, Notification, UserBehaviour, SupportConversation, SupportEncryptionBackup, SupportEncryptionKey, SupportMessage, EmailMfaChallenge, EmailMfaTrustedDevice
-from .emails import send_welcome_email, send_password_reset_email, send_password_changed_email, send_login_verification_email
+from .emails import send_welcome_email, send_password_reset_email, send_password_changed_email, send_login_verification_email, send_signin_alert_email
 from .sms import send_welcome_sms
 from .authentication import requires_email_mfa
 
@@ -44,6 +45,81 @@ def _mask_email(email):
     return f'{local[:1]}***@{domain}' if separator else 'your registered email'
 
 
+def _signin_device_name(request):
+    supplied_name = request.data.get('device_name')
+    if isinstance(supplied_name, str):
+        supplied_name = supplied_name.strip()
+        if supplied_name and len(supplied_name) <= 120 and all(char.isprintable() for char in supplied_name):
+            return supplied_name
+
+    user_agent = request.META.get('HTTP_USER_AGENT', '').lower()
+    if 'iphone' in user_agent:
+        device = 'iPhone'
+    elif 'ipad' in user_agent:
+        device = 'iPad'
+    elif 'android' in user_agent:
+        device = 'Android device'
+    elif 'windows' in user_agent:
+        device = 'Windows computer'
+    elif 'mac os' in user_agent or 'macintosh' in user_agent:
+        device = 'Mac'
+    elif 'linux' in user_agent:
+        device = 'Linux computer'
+    else:
+        device = 'Unknown device'
+
+    if 'edg/' in user_agent:
+        browser = 'Edge'
+    elif 'opr/' in user_agent:
+        browser = 'Opera'
+    elif 'firefox/' in user_agent:
+        browser = 'Firefox'
+    elif 'chrome/' in user_agent or 'crios/' in user_agent:
+        browser = 'Chrome'
+    elif 'safari/' in user_agent:
+        browser = 'Safari'
+    else:
+        browser = ''
+    return f'{device} ({browser})' if browser else device
+
+
+def _signin_location(data):
+    if not isinstance(data, dict):
+        return 'Unavailable (location permission not granted or unavailable)'
+    latitude = data.get('latitude')
+    longitude = data.get('longitude')
+    if isinstance(latitude, bool) or isinstance(longitude, bool):
+        return 'Unavailable (location permission not granted or unavailable)'
+    try:
+        latitude = float(latitude)
+        longitude = float(longitude)
+    except (TypeError, ValueError):
+        return 'Unavailable (location permission not granted or unavailable)'
+    if (
+        not math.isfinite(latitude)
+        or not math.isfinite(longitude)
+        or not -90 <= latitude <= 90
+        or not -180 <= longitude <= 180
+    ):
+        return 'Unavailable (location permission not granted or unavailable)'
+    return f'{latitude:.3f}, {longitude:.3f}'
+
+
+def _send_signin_alert(user, device_name, location):
+    try:
+        send_signin_alert_email(
+            user.name,
+            user.email,
+            device_name,
+            _signin_location(location),
+            timezone.localtime().strftime('%Y-%m-%d %H:%M %Z'),
+        )
+    except Exception:
+        logger.exception('Failed to deliver sign-in alert for user %s', user.pk)
+        return False
+    return True
+
+
 def _send_mfa_code(challenge, code):
     try:
         send_login_verification_email(challenge.user.name, challenge.user.email, code)
@@ -52,13 +128,18 @@ def _send_mfa_code(challenge, code):
         raise
 
 
-def _start_email_mfa(user, trusted_device_token=None):
+def _start_email_mfa(user, trusted_device_token=None, request=None):
     if isinstance(trusted_device_token, str) and trusted_device_token:
         token_hash = hashlib.sha256(trusted_device_token.encode('utf-8')).hexdigest()
         trusted_device = EmailMfaTrustedDevice.objects.filter(
             user=user, token_hash=token_hash, expires_at__gt=timezone.now(),
         ).first()
         if trusted_device:
+            if not _send_signin_alert(user, _signin_device_name(request), request.data.get('signin_location')):
+                return Response(
+                    {'detail': 'Could not send a sign-in security alert. Please try again shortly.'},
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                )
             return Response(_issue_tokens(user, email_mfa_verified=True))
         EmailMfaTrustedDevice.objects.filter(user=user, token_hash=token_hash).delete()
 
@@ -75,6 +156,7 @@ def _start_email_mfa(user, trusted_device_token=None):
     challenge = EmailMfaChallenge.objects.create(
         user=user,
         code_hash=make_password(code),
+        device_name=_signin_device_name(request),
         expires_at=now + MFA_CODE_LIFETIME,
         last_sent_at=now,
     )
@@ -96,7 +178,7 @@ def _start_email_mfa(user, trusted_device_token=None):
 def _verified_login_response(user, request):
     if not requires_email_mfa(user):
         return Response(_issue_tokens(user))
-    return _start_email_mfa(user, request.data.get('trusted_device'))
+    return _start_email_mfa(user, request.data.get('trusted_device'), request)
 
 
 class EmailMfaVerifyView(APIView):
@@ -132,6 +214,15 @@ class EmailMfaVerifyView(APIView):
 
         challenge.consumed_at = timezone.now()
         challenge.save(update_fields=['consumed_at'])
+        if not _send_signin_alert(
+            challenge.user,
+            challenge.device_name,
+            request.data.get('signin_location'),
+        ):
+            return Response(
+                {'detail': 'Could not send a sign-in security alert. Please try again shortly.'},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
         result = _issue_tokens(challenge.user, email_mfa_verified=True)
         if request.data.get('remember_device') is True:
             device_token = secrets.token_urlsafe(32)

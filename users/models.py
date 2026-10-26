@@ -118,6 +118,7 @@ class EmailMfaChallenge(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='email_mfa_challenges')
     challenge_id = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
     code_hash = models.CharField(max_length=128)
+    device_name = models.CharField(max_length=120, default='Unknown device')
     expires_at = models.DateTimeField()
     last_sent_at = models.DateTimeField()
     send_count = models.PositiveSmallIntegerField(default=1)

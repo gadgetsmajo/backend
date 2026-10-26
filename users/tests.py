@@ -34,6 +34,7 @@ class EmailStatusHeroTests(TestCase):
             (emails.send_password_reset_email, ('Customer', 'customer@example.com', 'https://example.com/reset')),
             (emails.send_password_changed_email, ('Customer', 'customer@example.com')),
             (emails.send_login_verification_email, ('Staff', 'staff@example.com', '123456')),
+            (emails.send_signin_alert_email, ('Staff', 'staff@example.com', 'Windows computer (Edge)', '0.347, 32.582', '2026-10-26 18:00 EAT')),
             (emails.send_payment_successful_email, ('Customer', 'customer@example.com', 'ORD-1', '100', [])),
             (emails.send_payment_failed_email, ('Customer', 'customer@example.com', 'ORD-1', '100')),
             (emails.send_return_approved_email, ('customer@example.com', 'ORD-1')),
@@ -189,18 +190,38 @@ class EmailMfaLoginTests(TestCase):
         self.assertIn('The Majo Gadgets Team', payload['html'])
         self.assertEqual(payload['to'], 'staff@example.com')
 
+    @patch('users.emails._send')
+    def test_signin_alert_includes_device_location_and_password_reset_action(self, send_email):
+        emails.send_signin_alert_email(
+            '<Staff>',
+            'staff@example.com',
+            '<Unknown device>',
+            '0.347, 32.582',
+            '2026-10-26 18:00 EAT',
+        )
+        payload = send_email.call_args.args[0]
+
+        self.assertIn('&lt;Staff&gt;', payload['html'])
+        self.assertIn('&lt;Unknown device&gt;', payload['html'])
+        self.assertIn('0.347, 32.582', payload['html'])
+        self.assertIn('/forgot-password', payload['html'])
+        self.assertIn('Reset my password', payload['html'])
+        self.assertEqual(payload['to'], 'staff@example.com')
+
+    @patch('users.views.send_signin_alert_email')
     @patch('users.views.send_login_verification_email')
-    def test_valid_code_issues_mfa_tokens_and_seven_day_trusted_device(self, send_code):
+    def test_valid_code_issues_mfa_tokens_sends_alert_and_seven_day_trusted_device(self, send_code, send_alert):
         challenge_response = self.client.post('/api/auth/login/', {
             'email': self.user.email,
             'password': 'strong-password-123',
-        }, format='json')
+        }, format='json', HTTP_USER_AGENT='Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) Version/18.0 Safari/605.1')
         challenge = EmailMfaChallenge.objects.get(challenge_id=challenge_response.data['challenge_id'])
 
         verified = self.client.post('/api/auth/login/email-code/verify/', {
             'challenge_id': challenge_response.data['challenge_id'],
             'code': send_code.call_args.args[2],
             'remember_device': True,
+            'signin_location': {'latitude': 0.3476, 'longitude': 32.5825},
         }, format='json')
 
         self.assertEqual(verified.status_code, 200)
@@ -212,9 +233,17 @@ class EmailMfaLoginTests(TestCase):
         self.assertGreater(trusted_device.expires_at, timezone.now() + timedelta(days=6, hours=23))
         challenge.refresh_from_db()
         self.assertIsNotNone(challenge.consumed_at)
+        send_alert.assert_called_once()
+        self.assertEqual(send_alert.call_args.args[:4], (
+            self.user.name,
+            self.user.email,
+            'iPhone (Safari)',
+            '0.348, 32.583',
+        ))
 
+    @patch('users.views.send_signin_alert_email')
     @patch('users.views.send_login_verification_email')
-    def test_valid_trusted_device_skips_code_for_seven_days(self, send_code):
+    def test_valid_trusted_device_skips_code_and_sends_signin_alert(self, send_code, send_alert):
         challenge_response = self.client.post('/api/auth/login/', {
             'email': self.user.email,
             'password': 'strong-password-123',
@@ -230,12 +259,18 @@ class EmailMfaLoginTests(TestCase):
             'email': self.user.email,
             'password': 'strong-password-123',
             'trusted_device': verified.data['trusted_device'],
+            'signin_location': {'latitude': 37.422, 'longitude': -122.084},
         }, format='json')
 
         self.assertEqual(repeated.status_code, 200)
         self.assertIn('access', repeated.data)
         self.assertNotIn('mfa_required', repeated.data)
         send_code.assert_not_called()
+        self.assertEqual(send_alert.call_count, 2)
+        self.assertEqual(send_alert.call_args.args[2:4], (
+            'Unknown device',
+            '37.422, -122.084',
+        ))
 
     @patch('users.views.send_login_verification_email')
     def test_wrong_code_is_rejected_and_attempt_counted(self, send_code):
@@ -253,7 +288,7 @@ class EmailMfaLoginTests(TestCase):
         challenge = EmailMfaChallenge.objects.get(challenge_id=challenge_response.data['challenge_id'])
         self.assertEqual(challenge.failed_attempts, 1)
 
-    def test_approved_trader_login_requires_email_code(self):
+    def test_approved_trader_login_requires_email_code_and_sends_signin_alert(self):
         from traders.models import TraderApplication
 
         trader = User.objects.create_user(
@@ -271,17 +306,35 @@ class EmailMfaLoginTests(TestCase):
             status='approved',
         )
 
-        with patch('users.views.send_login_verification_email') as send_code:
+        with (
+            patch('users.views.send_login_verification_email') as send_code,
+            patch('users.views.send_signin_alert_email') as send_alert,
+        ):
             response = self.client.post('/api/auth/login/', {
                 'email': trader.email,
                 'password': 'trader-password-123',
             }, format='json')
 
-        self.assertEqual(response.status_code, 200)
-        self.assertTrue(response.data['mfa_required'])
-        send_code.assert_called_once()
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(response.data['mfa_required'])
+            send_code.assert_called_once()
+            verified = self.client.post('/api/auth/login/email-code/verify/', {
+                'challenge_id': response.data['challenge_id'],
+                'code': send_code.call_args.args[2],
+                'signin_location': {'latitude': 0.347, 'longitude': 32.582},
+            }, format='json')
 
-    def test_customer_login_does_not_require_email_mfa(self):
+        self.assertEqual(verified.status_code, 200)
+        send_alert.assert_called_once()
+        self.assertEqual(send_alert.call_args.args[:4], (
+            trader.name,
+            trader.email,
+            'Unknown device',
+            '0.347, 32.582',
+        ))
+
+    @patch('users.views.send_signin_alert_email')
+    def test_customer_login_does_not_require_email_mfa_or_signin_alert(self, send_alert):
         customer = User.objects.create_user(
             email='customer@example.com', name='Customer', password='customer-password-123',
         )
@@ -294,6 +347,23 @@ class EmailMfaLoginTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn('access', response.data)
         self.assertNotIn('mfa_required', response.data)
+        send_alert.assert_not_called()
+
+    @patch('users.views.send_signin_alert_email', side_effect=RuntimeError('Email service unavailable'))
+    @patch('users.views.send_login_verification_email')
+    def test_login_is_not_completed_when_signin_alert_cannot_be_sent(self, send_code, send_alert):
+        challenge_response = self.client.post('/api/auth/login/', {
+            'email': self.user.email,
+            'password': 'strong-password-123',
+        }, format='json')
+        response = self.client.post('/api/auth/login/email-code/verify/', {
+            'challenge_id': challenge_response.data['challenge_id'],
+            'code': send_code.call_args.args[2],
+        }, format='json')
+
+        self.assertEqual(response.status_code, 503)
+        self.assertNotIn('access', response.data)
+        send_alert.assert_called_once()
 
     def test_unverified_legacy_refresh_token_is_rejected_for_staff(self):
         response = self.client.post('/api/auth/token/refresh/', {
@@ -310,8 +380,9 @@ class EmailMfaLoginTests(TestCase):
 
         self.assertEqual(response.status_code, 401)
 
+    @patch('users.views.send_signin_alert_email')
     @patch('users.views.send_login_verification_email')
-    def test_mfa_verified_access_and_refresh_tokens_are_accepted(self, send_code):
+    def test_mfa_verified_access_and_refresh_tokens_are_accepted(self, send_code, send_alert):
         challenge_response = self.client.post('/api/auth/login/', {
             'email': self.user.email,
             'password': 'strong-password-123',
