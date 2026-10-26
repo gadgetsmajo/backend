@@ -1,6 +1,6 @@
 from django.urls import path
 from .views import (
-    OrderListCreateView, OrderDetailView, OrderCancelView, ServiceRatingView,
+    OrderListCreateView, CartQuoteView, OrderDetailView, OrderCancelView, ServiceRatingView,
     ReturnRequestView, ReturnRequestListView,
     AdminOrderListView, AdminOrderDetailView, AdminOrderConfirmView, AdminOrderCancelView,
     AdminOrderShipView, AdminOrderReadyForPickupView, AdminOrderDeliverView,
@@ -25,6 +25,7 @@ urlpatterns = [
     path('danger/reset-inventory/', ResetInventoryView.as_view(), name='reset-inventory'),
 
     # ── Orders ────────────────────────────────────────────────────────────────
+    path('quote/', CartQuoteView.as_view(), name='cart-quote'),
     path('', OrderListCreateView.as_view(), name='order-list'),
     path('returns/', ReturnRequestListView.as_view(), name='return-list'),
     path('admin/', AdminOrderListView.as_view(), name='admin-order-list'),

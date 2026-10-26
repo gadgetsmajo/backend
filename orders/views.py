@@ -10,7 +10,9 @@ from accounting.models import Refund as AccountingRefund
 from .models import Order, ServiceRating, Payment, ReturnRequest
 from .serializers import OrderSerializer, ServiceRatingSerializer, PaymentSerializer, ReturnRequestSerializer, AdminReturnRequestSerializer
 from .tasks import send_product_rating_notifications
-from users.models import Notification
+from users.models import CartItem, Notification
+from settings_app.models import District
+from products.models import Product
 from users.emails import (
     send_admin_new_order_email,
     send_order_confirmed_email,
@@ -26,6 +28,7 @@ from users.emails import (
 )
 import requests as http_requests
 import logging
+from decimal import Decimal, InvalidOperation
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +72,96 @@ class OrderListCreateView(generics.ListCreateAPIView):
     def perform_create(self, serializer):
         # Payment and all order notifications are handled after Pesapal verification.
         serializer.save(user=self.request.user)
+
+
+class CartQuoteView(APIView):
+    permission_classes = (permissions.AllowAny,)
+
+    def post(self, request):
+        district = None
+        district_id = request.data.get('district_id')
+        if district_id not in (None, ''):
+            try:
+                district = District.objects.get(pk=int(district_id))
+            except (District.DoesNotExist, TypeError, ValueError):
+                return Response({'detail': 'Select a valid delivery district.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if request.user.is_authenticated:
+            cart_items = list(CartItem.objects.filter(user=request.user).order_by('product_id'))
+            requested_items = [(item.product_id, item.quantity, item.pk) for item in cart_items]
+            if len(requested_items) > 100:
+                return Response({'detail': 'Your cart has too many different products.'}, status=status.HTTP_400_BAD_REQUEST)
+        else:
+            raw_items = request.data.get('items')
+            if not isinstance(raw_items, list):
+                return Response({'detail': 'Cart items are required.'}, status=status.HTTP_400_BAD_REQUEST)
+            if len(raw_items) > 100:
+                return Response({'detail': 'Your cart has too many different products.'}, status=status.HTTP_400_BAD_REQUEST)
+            requested_items = []
+            for raw_item in raw_items:
+                if not isinstance(raw_item, dict):
+                    return Response({'detail': 'Invalid cart item.'}, status=status.HTTP_400_BAD_REQUEST)
+                try:
+                    product_id = int(raw_item.get('product_id'))
+                    quantity = int(raw_item.get('quantity'))
+                except (TypeError, ValueError):
+                    return Response({'detail': 'Invalid cart item.'}, status=status.HTTP_400_BAD_REQUEST)
+                if product_id < 1 or not 1 <= quantity <= 100:
+                    return Response({'detail': 'Invalid cart item quantity.'}, status=status.HTTP_400_BAD_REQUEST)
+                requested_items.append((product_id, quantity, None))
+
+        if len({product_id for product_id, _, _ in requested_items}) != len(requested_items):
+            return Response({'detail': 'Duplicate products are not allowed in the cart.'}, status=status.HTTP_400_BAD_REQUEST)
+        if any(not 1 <= quantity <= 100 for _, quantity, _ in requested_items):
+            return Response({'detail': 'Invalid cart item quantity.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        products = {
+            product.pk: product
+            for product in Product.objects.filter(
+                pk__in=[product_id for product_id, _, _ in requested_items],
+                is_active=True,
+            )
+        }
+        if len(products) != len(requested_items):
+            return Response(
+                {'detail': 'A product in your cart is no longer available. Please refresh your cart.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        items = []
+        subtotal = 0
+        product_delivery_total = 0
+        for product_id, quantity, cart_item_id in requested_items:
+            product = products[product_id]
+            if quantity > product.stock:
+                return Response(
+                    {'detail': f'Not enough stock for "{product.name}". Available: {product.stock}.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            line_total = product.price * quantity
+            subtotal += line_total
+            product_delivery_total += product.delivery_fee
+            items.append({
+                'id': cart_item_id or product_id,
+                'product_id': product_id,
+                'product_name': product.name,
+                'product_price': product.price,
+                'product_image': product.image.url if product.image else None,
+                'product_slug': product.slug,
+                'product_category': product.category.name if product.category else '',
+                'product_rating': product.rating,
+                'quantity': quantity,
+                'delivery_fee': product.delivery_fee,
+                'line_total': line_total,
+            })
+
+        delivery_fee = district.price if district else product_delivery_total
+        return Response({
+            'items': items,
+            'subtotal': subtotal,
+            'delivery_fee': delivery_fee,
+            'total': subtotal + delivery_fee,
+        })
 
 
 class OrderDetailView(generics.RetrieveAPIView):
@@ -693,16 +786,40 @@ class PesapalIPNView(APIView):
             resp.raise_for_status()
             data = resp.json()
 
-            # Verify the amount Pesapal reports matches what we stored
-            pesapal_amount = float(data.get('amount', 0))
-            if pesapal_amount and abs(pesapal_amount - float(payment.amount)) > 0.01:
-                logger.error('IPN amount mismatch: expected=%s pesapal=%s tracking=%s', payment.amount, pesapal_amount, tracking_id)
-                return Response({'detail': 'Amount mismatch'}, status=status.HTTP_400_BAD_REQUEST)
+            try:
+                pesapal_amount = Decimal(str(data['amount']))
+            except (KeyError, TypeError, ValueError, InvalidOperation):
+                logger.error('IPN response has no valid amount for tracking=%s', tracking_id)
+                return Response({'detail': 'Invalid payment amount.'}, status=status.HTTP_400_BAD_REQUEST)
+
+            pesapal_currency = str(data.get('currency_code') or data.get('currency') or '').upper()
+            provider_reference = str(data.get('merchant_reference') or '').strip()
+            provider_tracking_id = str(data.get('order_tracking_id') or '').strip()
+            if (
+                not pesapal_amount.is_finite()
+                or pesapal_amount <= 0
+                or pesapal_amount != payment.amount
+                or not payment.order
+                or payment.amount != payment.order.total
+                or pesapal_currency != payment.currency.upper()
+                or (payment.merchant_reference and provider_reference != payment.merchant_reference)
+                or (provider_tracking_id and provider_tracking_id != tracking_id)
+            ):
+                logger.error(
+                    'IPN verification mismatch: expected_amount=%s reported_amount=%s expected_currency=%s '
+                    'reported_currency=%s tracking=%s',
+                    payment.amount, pesapal_amount, payment.currency, pesapal_currency, tracking_id,
+                )
+                return Response({'detail': 'Payment verification failed.'}, status=status.HTTP_400_BAD_REQUEST)
 
             payment_status_desc = data.get('payment_status_description', '').lower()
             mapped = {'completed': 'completed', 'failed': 'failed', 'invalid': 'invalid', 'cancelled': 'cancelled'}.get(payment_status_desc, 'pending')
 
             with transaction.atomic():
+                payment = Payment.objects.select_for_update().select_related('order__user').get(pk=payment.pk)
+                if payment.status == 'completed':
+                    return Response({'orderNotificationType': 'IPNCHANGE', 'orderTrackingId': tracking_id, 'orderMerchantReference': merchant_ref, 'status': 200})
+
                 payment.status = mapped
                 payment.payment_method = data.get('payment_method', '')
                 payment.confirmation_code = data.get('confirmation_code', '')
@@ -710,7 +827,6 @@ class PesapalIPNView(APIView):
 
                 order = payment.order
                 if order:
-                    from products.models import Product
                     if mapped == 'completed' and order.status in ('pending', 'processing'):
                         # This is the first completed transition because completed payments return above.
                         for item in order.items.select_related('product').all():

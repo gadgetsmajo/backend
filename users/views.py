@@ -8,7 +8,7 @@ import uuid
 from datetime import timedelta
 from urllib.parse import urlparse
 from django.db import transaction
-from rest_framework import generics, permissions, status
+from rest_framework import generics, permissions, serializers, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.views import TokenRefreshView
@@ -876,24 +876,54 @@ class CartView(APIView):
         return Response(CartItemSerializer(items, many=True).data)
 
     def post(self, request):
-        product_id = request.data.get('product_id')
-        quantity = int(request.data.get('quantity', 1))
-        item, created = CartItem.objects.get_or_create(
-            user=request.user,
-            product_id=product_id,
-            defaults={
-                'product_name': request.data.get('product_name', ''),
-                'product_price': request.data.get('product_price', 0),
-                'product_image': request.data.get('product_image'),
-                'product_slug': request.data.get('product_slug', ''),
-                'product_category': request.data.get('product_category', ''),
-                'product_rating': request.data.get('product_rating', 0),
-                'quantity': quantity,
+        try:
+            product_id = serializers.IntegerField(min_value=1).run_validation(request.data.get('product_id'))
+            quantity = serializers.IntegerField(min_value=1, max_value=100).run_validation(
+                request.data.get('quantity', 1)
+            )
+        except serializers.ValidationError as exc:
+            return Response({'detail': exc.detail}, status=status.HTTP_400_BAD_REQUEST)
+
+        with transaction.atomic():
+            try:
+                product = Product.objects.select_for_update().get(pk=product_id, is_active=True)
+            except Product.DoesNotExist:
+                return Response({'detail': 'Product not found.'}, status=status.HTTP_404_NOT_FOUND)
+            item = CartItem.objects.select_for_update().filter(
+                user=request.user,
+                product_id=product.pk,
+            ).first()
+            if item is None and CartItem.objects.filter(user=request.user).count() >= 100:
+                return Response(
+                    {'detail': 'Your cart has too many different products.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            new_quantity = quantity + (item.quantity if item else 0)
+            if new_quantity > product.stock or new_quantity > 100:
+                return Response(
+                    {'detail': f'Not enough stock for "{product.name}". Available: {product.stock}.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            canonical_values = {
+                'product_name': product.name,
+                'product_price': product.price,
+                'product_image': product.image.url if product.image else None,
+                'product_slug': product.slug,
+                'product_category': product.category.name if product.category else '',
+                'product_rating': product.rating,
+                'quantity': new_quantity,
             }
-        )
-        if not created:
-            item.quantity += quantity
-            item.save()
+            if item:
+                for field, value in canonical_values.items():
+                    setattr(item, field, value)
+                item.save()
+            else:
+                item = CartItem.objects.create(
+                    user=request.user,
+                    product_id=product.pk,
+                    **canonical_values,
+                )
         return Response(CartItemSerializer(item).data, status=status.HTTP_201_CREATED)
 
     def delete(self, request):
@@ -907,13 +937,31 @@ class CartItemView(APIView):
     def patch(self, request, product_id):
         try:
             item = CartItem.objects.get(user=request.user, product_id=product_id)
-            quantity = int(request.data.get('quantity', item.quantity))
-            if quantity <= 0:
+            quantity = serializers.IntegerField(min_value=0, max_value=100).run_validation(
+                request.data.get('quantity', item.quantity)
+            )
+            if quantity == 0:
                 item.delete()
                 return Response(status=status.HTTP_204_NO_CONTENT)
+            product = Product.objects.get(pk=product_id, is_active=True)
+            if quantity > product.stock:
+                return Response(
+                    {'detail': f'Not enough stock for "{product.name}". Available: {product.stock}.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             item.quantity = quantity
+            item.product_name = product.name
+            item.product_price = product.price
+            item.product_image = product.image.url if product.image else None
+            item.product_slug = product.slug
+            item.product_category = product.category.name if product.category else ''
+            item.product_rating = product.rating
             item.save()
             return Response(CartItemSerializer(item).data)
+        except serializers.ValidationError as exc:
+            return Response({'detail': exc.detail}, status=status.HTTP_400_BAD_REQUEST)
+        except Product.DoesNotExist:
+            return Response({'detail': 'Product not found.'}, status=status.HTTP_404_NOT_FOUND)
         except CartItem.DoesNotExist:
             return Response(status=status.HTTP_404_NOT_FOUND)
 

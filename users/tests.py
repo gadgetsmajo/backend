@@ -229,6 +229,37 @@ class CartReminderEndpointTests(TestCase):
         self.assertEqual(send_reminder.call_count, 2)
 
 
+class CartApiPriceIntegrityTests(TestCase):
+    def test_cart_add_uses_product_values_from_database(self):
+        user = User.objects.create_user(
+            email='cart-integrity@example.com',
+            name='Cart Integrity',
+            password='secure-password',
+        )
+        product = Product.objects.create(
+            name='Trusted Product',
+            price='7500.00',
+            stock=4,
+        )
+        client = APIClient()
+        client.force_authenticate(user=user)
+
+        response = client.post('/api/auth/cart/', {
+            'product_id': product.id,
+            'product_name': 'Fake Product',
+            'product_price': '1.00',
+            'product_image': 'https://example.com/fake.png',
+            'product_slug': 'fake-product',
+            'quantity': 2,
+        }, format='json')
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data['product_name'], 'Trusted Product')
+        self.assertEqual(response.data['product_price'], '7500.00')
+        self.assertEqual(response.data['product_slug'], product.slug)
+        self.assertEqual(response.data['quantity'], 2)
+
+
 class ProfilePasswordFlowTests(TestCase):
     def setUp(self):
         self.client = APIClient()
