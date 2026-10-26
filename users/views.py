@@ -1,6 +1,7 @@
 import logging
 import secrets
 import base64
+import hashlib
 import json
 import uuid
 from datetime import timedelta
@@ -11,16 +12,174 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.views import TokenRefreshView
 from rest_framework_simplejwt.tokens import RefreshToken
 from django.contrib.auth import get_user_model, authenticate
+from django.contrib.auth.hashers import check_password, make_password
 from django.core.cache import cache
 from django.conf import settings
 from django.utils import timezone
 from .serializers import RegisterSerializer, UserSerializer, UpdateProfileSerializer, CartItemSerializer, WishlistItemSerializer, NotificationSerializer
-from .models import CartItem, WishlistItem, Notification, UserBehaviour, SupportConversation, SupportEncryptionBackup, SupportEncryptionKey, SupportMessage
-from .emails import send_welcome_email, send_password_reset_email, send_password_changed_email
+from .models import CartItem, WishlistItem, Notification, UserBehaviour, SupportConversation, SupportEncryptionBackup, SupportEncryptionKey, SupportMessage, EmailMfaChallenge, EmailMfaTrustedDevice
+from .emails import send_welcome_email, send_password_reset_email, send_password_changed_email, send_login_verification_email
 from .sms import send_welcome_sms
+from .authentication import requires_email_mfa
 
 User = get_user_model()
 logger = logging.getLogger(__name__)
+MFA_CODE_LIFETIME = timedelta(minutes=10)
+MFA_TRUST_LIFETIME = timedelta(days=7)
+MFA_MAX_ATTEMPTS = 5
+MFA_MAX_SENDS = 3
+MFA_SEND_WINDOW = timedelta(minutes=15)
+MFA_RESEND_COOLDOWN = timedelta(seconds=30)
+
+
+def _issue_tokens(user, email_mfa_verified=False):
+    refresh = RefreshToken.for_user(user)
+    if email_mfa_verified:
+        refresh['email_mfa_verified'] = True
+    return {'access': str(refresh.access_token), 'refresh': str(refresh)}
+
+
+def _mask_email(email):
+    local, separator, domain = email.partition('@')
+    return f'{local[:1]}***@{domain}' if separator else 'your registered email'
+
+
+def _send_mfa_code(challenge, code):
+    try:
+        send_login_verification_email(challenge.user.name, challenge.user.email, code)
+    except Exception:
+        logger.exception('Failed to deliver email MFA code for user %s', challenge.user_id)
+        raise
+
+
+def _start_email_mfa(user, trusted_device_token=None):
+    if isinstance(trusted_device_token, str) and trusted_device_token:
+        token_hash = hashlib.sha256(trusted_device_token.encode('utf-8')).hexdigest()
+        trusted_device = EmailMfaTrustedDevice.objects.filter(
+            user=user, token_hash=token_hash, expires_at__gt=timezone.now(),
+        ).first()
+        if trusted_device:
+            return Response(_issue_tokens(user, email_mfa_verified=True))
+        EmailMfaTrustedDevice.objects.filter(user=user, token_hash=token_hash).delete()
+
+    now = timezone.now()
+    recent_challenges = EmailMfaChallenge.objects.filter(user=user, created_at__gte=now - MFA_SEND_WINDOW)
+    if sum(recent_challenges.values_list('send_count', flat=True)) >= MFA_MAX_SENDS:
+        return Response(
+            {'detail': 'Too many verification codes requested. Please try again later.'},
+            status=status.HTTP_429_TOO_MANY_REQUESTS,
+        )
+
+    EmailMfaChallenge.objects.filter(user=user, consumed_at__isnull=True).update(consumed_at=now)
+    code = f'{secrets.randbelow(1_000_000):06d}'
+    challenge = EmailMfaChallenge.objects.create(
+        user=user,
+        code_hash=make_password(code),
+        expires_at=now + MFA_CODE_LIFETIME,
+        last_sent_at=now,
+    )
+    try:
+        _send_mfa_code(challenge, code)
+    except Exception:
+        challenge.delete()
+        return Response(
+            {'detail': 'Could not send a verification code. Please try again shortly.'},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+    return Response({
+        'mfa_required': True,
+        'challenge_id': str(challenge.challenge_id),
+        'email_hint': _mask_email(user.email),
+    }, status=status.HTTP_200_OK)
+
+
+def _verified_login_response(user, request):
+    if not requires_email_mfa(user):
+        return Response(_issue_tokens(user))
+    return _start_email_mfa(user, request.data.get('trusted_device'))
+
+
+class EmailMfaVerifyView(APIView):
+    permission_classes = (permissions.AllowAny,)
+
+    def post(self, request):
+        challenge_id = request.data.get('challenge_id')
+        code = request.data.get('code', '')
+        if not isinstance(code, str) or not code.isdigit() or len(code) != 6:
+            return Response({'detail': 'Enter the six-digit verification code.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            challenge = EmailMfaChallenge.objects.select_related('user').get(
+                challenge_id=challenge_id, consumed_at__isnull=True,
+            )
+        except (EmailMfaChallenge.DoesNotExist, ValueError, TypeError):
+            return Response({'detail': 'This verification request is invalid or expired. Sign in again.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not challenge.user.is_active:
+            challenge.consumed_at = timezone.now()
+            challenge.save(update_fields=['consumed_at'])
+            return Response({'detail': 'This account is inactive.'}, status=status.HTTP_401_UNAUTHORIZED)
+
+        if challenge.expires_at <= timezone.now() or challenge.failed_attempts >= MFA_MAX_ATTEMPTS:
+            challenge.consumed_at = timezone.now()
+            challenge.save(update_fields=['consumed_at'])
+            return Response({'detail': 'This verification code has expired. Sign in again for a new code.'}, status=status.HTTP_400_BAD_REQUEST)
+        if not check_password(code, challenge.code_hash):
+            challenge.failed_attempts += 1
+            if challenge.failed_attempts >= MFA_MAX_ATTEMPTS:
+                challenge.consumed_at = timezone.now()
+            challenge.save(update_fields=['failed_attempts', 'consumed_at'])
+            return Response({'detail': 'The verification code is incorrect.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        challenge.consumed_at = timezone.now()
+        challenge.save(update_fields=['consumed_at'])
+        result = _issue_tokens(challenge.user, email_mfa_verified=True)
+        if request.data.get('remember_device') is True:
+            device_token = secrets.token_urlsafe(32)
+            EmailMfaTrustedDevice.objects.create(
+                user=challenge.user,
+                token_hash=hashlib.sha256(device_token.encode('utf-8')).hexdigest(),
+                expires_at=timezone.now() + MFA_TRUST_LIFETIME,
+            )
+            result['trusted_device'] = device_token
+        return Response(result)
+
+
+class EmailMfaResendView(APIView):
+    permission_classes = (permissions.AllowAny,)
+
+    def post(self, request):
+        try:
+            challenge = EmailMfaChallenge.objects.select_related('user').get(
+                challenge_id=request.data.get('challenge_id'), consumed_at__isnull=True,
+            )
+        except (EmailMfaChallenge.DoesNotExist, ValueError, TypeError):
+            return Response({'detail': 'This verification request is invalid or expired. Sign in again.'}, status=status.HTTP_400_BAD_REQUEST)
+        now = timezone.now()
+        if challenge.expires_at <= now or challenge.failed_attempts >= MFA_MAX_ATTEMPTS:
+            challenge.consumed_at = now
+            challenge.save(update_fields=['consumed_at'])
+            return Response({'detail': 'This verification request has expired. Sign in again.'}, status=status.HTTP_400_BAD_REQUEST)
+        if challenge.send_count >= MFA_MAX_SENDS:
+            return Response({'detail': 'The resend limit has been reached. Sign in again later.'}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+        if challenge.last_sent_at + MFA_RESEND_COOLDOWN > now:
+            return Response({'detail': 'Wait 30 seconds before requesting another code.'}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+
+        code = f'{secrets.randbelow(1_000_000):06d}'
+        try:
+            _send_mfa_code(challenge, code)
+        except Exception:
+            return Response({'detail': 'Could not send a verification code. Please try again shortly.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        challenge.code_hash = make_password(code)
+        challenge.last_sent_at = now
+        challenge.send_count += 1
+        challenge.save(update_fields=['code_hash', 'last_sent_at', 'send_count'])
+        return Response({'detail': f'A new verification code was sent to {_mask_email(challenge.user.email)}.'})
+
+
+class EmailMfaTokenRefreshView(TokenRefreshView):
+    from .authentication import MfaTokenRefreshSerializer
+
+    serializer_class = MfaTokenRefreshSerializer
 
 
 def _store_google_avatar(user, picture_url):
@@ -54,8 +213,7 @@ class LoginView(APIView):
         user = authenticate(request, username=email, password=password)
         if user is None:
             return Response({'detail': 'No active account found with the given credentials'}, status=status.HTTP_401_UNAUTHORIZED)
-        refresh = RefreshToken.for_user(user)
-        return Response({'access': str(refresh.access_token), 'refresh': str(refresh)})
+        return _verified_login_response(user, request)
 
 
 class AdminUsersView(APIView):
@@ -490,6 +648,8 @@ class ResetPasswordView(APIView):
             return Response({'detail': 'User not found.'}, status=status.HTTP_400_BAD_REQUEST)
         user.set_password(password)
         user.save()
+        EmailMfaTrustedDevice.objects.filter(user=user).delete()
+        EmailMfaChallenge.objects.filter(user=user, consumed_at__isnull=True).update(consumed_at=timezone.now())
         cache.delete(f'pwd_reset:{token}')
         try:
             send_password_changed_email(user.name, user.email)
@@ -513,6 +673,7 @@ class ProfileView(generics.RetrieveAPIView):
         serializer.is_valid(raise_exception=True)
         serializer.save()
         if serializer.validated_data.get('new_password') or serializer.validated_data.get('password'):
+            EmailMfaTrustedDevice.objects.filter(user=request.user).delete()
             try:
                 send_password_changed_email(request.user.name, request.user.email)
             except Exception:
@@ -669,6 +830,8 @@ class GoogleLoginView(APIView):
             return Response({'detail': 'Could not get email from Google.'}, status=status.HTTP_400_BAD_REQUEST)
 
         user, created = User.objects.get_or_create(email=email, defaults={'name': name})
+        if not user.is_active:
+            return Response({'detail': 'No active account found with the given credentials.'}, status=status.HTTP_401_UNAUTHORIZED)
         _store_google_avatar(user, info.get('picture'))
         if created:
             user.set_unusable_password()
@@ -693,8 +856,7 @@ class GoogleLoginView(APIView):
             token['profile_setup'] = True
             return Response({'needs_profile': True, 'tmp_token': str(token), 'name': user.name, 'email': user.email})
 
-        refresh = RefreshToken.for_user(user)
-        return Response({'access': str(refresh.access_token), 'refresh': str(refresh)})
+        return _verified_login_response(user, request)
 
 
 class CompleteGoogleProfileView(APIView):
@@ -732,8 +894,7 @@ class CompleteGoogleProfileView(APIView):
         user.country = 'Uganda'
         user.save()
 
-        refresh = RefreshToken.for_user(user)
-        return Response({'access': str(refresh.access_token), 'refresh': str(refresh)})
+        return _verified_login_response(user, request)
 
 
 # ── Behaviour tracking ────────────────────────────────────────────────────────

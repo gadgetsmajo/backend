@@ -114,6 +114,25 @@ class User(AbstractBaseUser, PermissionsMixin):
         return self.email
 
 
+class EmailMfaChallenge(models.Model):
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='email_mfa_challenges')
+    challenge_id = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    code_hash = models.CharField(max_length=128)
+    expires_at = models.DateTimeField()
+    last_sent_at = models.DateTimeField()
+    send_count = models.PositiveSmallIntegerField(default=1)
+    failed_attempts = models.PositiveSmallIntegerField(default=0)
+    consumed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+
+class EmailMfaTrustedDevice(models.Model):
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='email_mfa_trusted_devices')
+    token_hash = models.CharField(max_length=64, unique=True)
+    expires_at = models.DateTimeField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+
 class CartItem(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='cart_items')
     product_id = models.IntegerField()

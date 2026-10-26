@@ -521,6 +521,21 @@ def send_password_changed_email(name: str, email: str):
     _send({'from': FROM, 'to': email, 'subject': 'Your password has been changed', 'html': _wrap(body)})
 
 
+def send_login_verification_email(name: str, email: str, code: str):
+    safe_name = escape(name or 'there')
+    body = f'''
+      <div style="text-align:center;margin-bottom:28px">
+        <h2 style="margin:0 0 8px;font-size:22px;color:#0F172A">Verify your sign-in</h2>
+        <p style="margin:0;font-size:14px;color:#64748B">A sign-in attempt needs an email verification code</p>
+      </div>
+      <p style="margin:0 0 20px;font-size:15px;color:#475569;line-height:1.7">Hi <strong>{safe_name}</strong>, enter this code to continue signing in to your Majo Gadgets account:</p>
+      <div style="margin:0 auto 24px;padding:18px;background:#F1F5F9;text-align:center;font-size:30px;font-weight:800;letter-spacing:8px;color:#071A2B">{escape(code)}</div>
+      <p style="margin:0 0 8px;font-size:13px;color:#64748B">This code expires in 10 minutes and can only be used once. Do not share it with anyone.</p>
+      <p style="margin:0;font-size:13px;color:#64748B">If you did not try to sign in, you can ignore this email and consider changing your password.</p>
+    '''
+    _send({'from': FROM, 'to': email, 'subject': 'Your Majo Gadgets sign-in code', 'html': _wrap(body)})
+
+
 def send_payment_successful_email(name: str, email: str, order_code: str, total: str, items: list, payment_method: str = ''):
     method_line = f'<p style="margin:0 0 12px;font-size:13px;color:#334155"><strong>Payment method:</strong> {payment_method}</p>' if payment_method else ''
     body = f'''

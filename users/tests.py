@@ -4,12 +4,16 @@ from unittest.mock import Mock, patch
 
 import base64
 import uuid
+from datetime import timedelta
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase
+from django.utils import timezone
+from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework.test import APIClient
 
 from users import emails
+from users.models import EmailMfaChallenge, EmailMfaTrustedDevice
 
 User = get_user_model()
 
@@ -29,6 +33,7 @@ class EmailStatusHeroTests(TestCase):
             (emails.send_order_cancelled_email, ('Customer', 'customer@example.com', 'ORD-1', 'Out of stock')),
             (emails.send_password_reset_email, ('Customer', 'customer@example.com', 'https://example.com/reset')),
             (emails.send_password_changed_email, ('Customer', 'customer@example.com')),
+            (emails.send_login_verification_email, ('Staff', 'staff@example.com', '123456')),
             (emails.send_payment_successful_email, ('Customer', 'customer@example.com', 'ORD-1', '100', [])),
             (emails.send_payment_failed_email, ('Customer', 'customer@example.com', 'ORD-1', '100')),
             (emails.send_return_approved_email, ('customer@example.com', 'ORD-1')),
@@ -140,6 +145,186 @@ class ProfilePasswordFlowTests(TestCase):
         self.assertIn('current_password', response.data)
         self.user.refresh_from_db()
         self.assertTrue(self.user.check_password('old-password-123'))
+
+
+class EmailMfaLoginTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(
+            email='staff@example.com',
+            name='Staff User',
+            password='strong-password-123',
+            is_staff=True,
+        )
+
+    @patch('users.views.send_login_verification_email')
+    def test_staff_login_requires_email_code_before_tokens_are_issued(self, send_code):
+        response = self.client.post('/api/auth/login/', {
+            'email': self.user.email,
+            'password': 'strong-password-123',
+        }, format='json')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data['mfa_required'])
+        self.assertNotIn('access', response.data)
+        self.assertEqual(response.data['email_hint'], 's***@example.com')
+        send_code.assert_called_once()
+        self.assertEqual(send_code.call_args.args[1], self.user.email)
+        self.assertEqual(len(send_code.call_args.args[2]), 6)
+        self.assertTrue(send_code.call_args.args[2].isdigit())
+
+    @patch('users.emails._send')
+    def test_login_code_email_escapes_user_content(self, send_email):
+        emails.send_login_verification_email('<Staff>', 'staff@example.com', '123456')
+        payload = send_email.call_args.args[0]
+
+        self.assertIn('&lt;Staff&gt;', payload['html'])
+        self.assertIn('123456', payload['html'])
+        self.assertEqual(payload['to'], 'staff@example.com')
+
+    @patch('users.views.send_login_verification_email')
+    def test_valid_code_issues_mfa_tokens_and_seven_day_trusted_device(self, send_code):
+        challenge_response = self.client.post('/api/auth/login/', {
+            'email': self.user.email,
+            'password': 'strong-password-123',
+        }, format='json')
+        challenge = EmailMfaChallenge.objects.get(challenge_id=challenge_response.data['challenge_id'])
+
+        verified = self.client.post('/api/auth/login/email-code/verify/', {
+            'challenge_id': challenge_response.data['challenge_id'],
+            'code': send_code.call_args.args[2],
+            'remember_device': True,
+        }, format='json')
+
+        self.assertEqual(verified.status_code, 200)
+        self.assertIn('access', verified.data)
+        self.assertIn('refresh', verified.data)
+        self.assertIn('trusted_device', verified.data)
+        self.assertEqual(EmailMfaTrustedDevice.objects.filter(user=self.user).count(), 1)
+        trusted_device = EmailMfaTrustedDevice.objects.get(user=self.user)
+        self.assertGreater(trusted_device.expires_at, timezone.now() + timedelta(days=6, hours=23))
+        challenge.refresh_from_db()
+        self.assertIsNotNone(challenge.consumed_at)
+
+    @patch('users.views.send_login_verification_email')
+    def test_valid_trusted_device_skips_code_for_seven_days(self, send_code):
+        challenge_response = self.client.post('/api/auth/login/', {
+            'email': self.user.email,
+            'password': 'strong-password-123',
+        }, format='json')
+        verified = self.client.post('/api/auth/login/email-code/verify/', {
+            'challenge_id': challenge_response.data['challenge_id'],
+            'code': send_code.call_args.args[2],
+            'remember_device': True,
+        }, format='json')
+
+        send_code.reset_mock()
+        repeated = self.client.post('/api/auth/login/', {
+            'email': self.user.email,
+            'password': 'strong-password-123',
+            'trusted_device': verified.data['trusted_device'],
+        }, format='json')
+
+        self.assertEqual(repeated.status_code, 200)
+        self.assertIn('access', repeated.data)
+        self.assertNotIn('mfa_required', repeated.data)
+        send_code.assert_not_called()
+
+    @patch('users.views.send_login_verification_email')
+    def test_wrong_code_is_rejected_and_attempt_counted(self, send_code):
+        challenge_response = self.client.post('/api/auth/login/', {
+            'email': self.user.email,
+            'password': 'strong-password-123',
+        }, format='json')
+
+        response = self.client.post('/api/auth/login/email-code/verify/', {
+            'challenge_id': challenge_response.data['challenge_id'],
+            'code': '000000' if send_code.call_args.args[2] != '000000' else '000001',
+        }, format='json')
+
+        self.assertEqual(response.status_code, 400)
+        challenge = EmailMfaChallenge.objects.get(challenge_id=challenge_response.data['challenge_id'])
+        self.assertEqual(challenge.failed_attempts, 1)
+
+    def test_approved_trader_login_requires_email_code(self):
+        from traders.models import TraderApplication
+
+        trader = User.objects.create_user(
+            email='trader@example.com', name='Trader', password='trader-password-123',
+        )
+        TraderApplication.objects.create(
+            full_name='Trader',
+            email=trader.email,
+            phone='+256700000000',
+            business_name='Trader Store',
+            business_type='sole_proprietor',
+            location='Kampala',
+            product_categories='Electronics',
+            user=trader,
+            status='approved',
+        )
+
+        with patch('users.views.send_login_verification_email') as send_code:
+            response = self.client.post('/api/auth/login/', {
+                'email': trader.email,
+                'password': 'trader-password-123',
+            }, format='json')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data['mfa_required'])
+        send_code.assert_called_once()
+
+    def test_customer_login_does_not_require_email_mfa(self):
+        customer = User.objects.create_user(
+            email='customer@example.com', name='Customer', password='customer-password-123',
+        )
+
+        response = self.client.post('/api/auth/login/', {
+            'email': customer.email,
+            'password': 'customer-password-123',
+        }, format='json')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('access', response.data)
+        self.assertNotIn('mfa_required', response.data)
+
+    def test_unverified_legacy_refresh_token_is_rejected_for_staff(self):
+        response = self.client.post('/api/auth/token/refresh/', {
+            'refresh': str(RefreshToken.for_user(self.user)),
+        }, format='json')
+
+        self.assertEqual(response.status_code, 401)
+
+    def test_unverified_legacy_access_token_is_rejected_for_staff(self):
+        response = self.client.get(
+            '/api/auth/profile/',
+            HTTP_AUTHORIZATION=f'Bearer {str(RefreshToken.for_user(self.user).access_token)}',
+        )
+
+        self.assertEqual(response.status_code, 401)
+
+    @patch('users.views.send_login_verification_email')
+    def test_mfa_verified_access_and_refresh_tokens_are_accepted(self, send_code):
+        challenge_response = self.client.post('/api/auth/login/', {
+            'email': self.user.email,
+            'password': 'strong-password-123',
+        }, format='json')
+        verified = self.client.post('/api/auth/login/email-code/verify/', {
+            'challenge_id': challenge_response.data['challenge_id'],
+            'code': send_code.call_args.args[2],
+        }, format='json')
+
+        profile = self.client.get(
+            '/api/auth/profile/',
+            HTTP_AUTHORIZATION=f"Bearer {verified.data['access']}",
+        )
+        refreshed = self.client.post('/api/auth/token/refresh/', {
+            'refresh': verified.data['refresh'],
+        }, format='json')
+
+        self.assertEqual(profile.status_code, 200)
+        self.assertEqual(refreshed.status_code, 200)
+        self.assertIn('access', refreshed.data)
 
 
 class SupportChatApiTests(TestCase):

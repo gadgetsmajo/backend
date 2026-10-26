@@ -128,7 +128,7 @@ CORS_PREFLIGHT_MAX_AGE = 86400
 
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
-        'rest_framework_simplejwt.authentication.JWTAuthentication',
+        'users.authentication.MfaJWTAuthentication',
     ),
     'DEFAULT_PERMISSION_CLASSES': (
         'rest_framework.permissions.IsAuthenticatedOrReadOnly',
@@ -143,6 +143,7 @@ SIMPLE_JWT = {
     'ROTATE_REFRESH_TOKENS': True,
     'USER_ID_FIELD': 'id',
     'USER_ID_CLAIM': 'user_id',
+    'TOKEN_REFRESH_SERIALIZER': 'users.authentication.MfaTokenRefreshSerializer',
 }
 
 # Cache

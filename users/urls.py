@@ -1,5 +1,4 @@
 from django.urls import path
-from rest_framework_simplejwt.views import TokenRefreshView
 from .views import (
     LoginView, RegisterView, ProfileView,
     CartView, CartItemView,
@@ -8,6 +7,7 @@ from .views import (
     ForgotPasswordView, ResetPasswordView,
     NotificationsView, NotificationDetailView, NotificationMarkAllReadView,
     GoogleLoginView, CompleteGoogleProfileView,
+    EmailMfaVerifyView, EmailMfaResendView, EmailMfaTokenRefreshView,
     BehaviourTrackView, RecommendedProductsView,
     SupportChatView, SupportEncryptionKeysView, SupportEncryptionBackupView, AdminSupportConversationListView, AdminSupportConversationView,
 )
@@ -17,7 +17,9 @@ urlpatterns = [
     path('login/', LoginView.as_view(), name='login'),
     path('login/google/', GoogleLoginView.as_view(), name='google-login'),
     path('login/google/complete/', CompleteGoogleProfileView.as_view(), name='google-login-complete'),
-    path('token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
+    path('login/email-code/verify/', EmailMfaVerifyView.as_view(), name='email-mfa-verify'),
+    path('login/email-code/resend/', EmailMfaResendView.as_view(), name='email-mfa-resend'),
+    path('token/refresh/', EmailMfaTokenRefreshView.as_view(), name='token_refresh'),
     path('profile/', ProfileView.as_view(), name='profile'),
     path('cart/', CartView.as_view(), name='cart'),
     path('cart/<int:product_id>/', CartItemView.as_view(), name='cart-item'),
