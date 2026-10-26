@@ -531,8 +531,8 @@ class AdminTraderDocumentView(APIView):
             document_url = private_download_url(
                 document.public_id,
                 document.format,
-                resource_type='raw',
-                type='authenticated',
+                resource_type=document.resource_type,
+                type=document.type,
                 expires_at=int(timezone.now().timestamp()) + 60,
             )
             with urlopen(document_url, timeout=20) as upstream:

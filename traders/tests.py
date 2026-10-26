@@ -268,6 +268,28 @@ class TraderApplicationApprovalTests(TestCase):
 		self.assertEqual(download_url.call_args.kwargs['type'], 'authenticated')
 		open_url.assert_called_once_with('https://cloudinary.test/private-download', timeout=20)
 
+	def test_admin_document_preview_uses_stored_cloudinary_delivery_metadata(self):
+		self.application.national_id_document = CloudinaryResource(
+			public_id='legacy-id-copy',
+			version='1',
+			format='pdf',
+			type='upload',
+			resource_type='raw',
+		)
+		self.application.save(update_fields=['national_id_document'])
+		upstream_response = MagicMock()
+		upstream_response.read.return_value = b'%PDF-legacy-id-copy'
+		upstream_response.headers.get.return_value = 'application/pdf'
+
+		with patch('traders.views.private_download_url', return_value='https://cloudinary.test/download') as download_url:
+			with patch('traders.views.urlopen') as open_url:
+				open_url.return_value.__enter__.return_value = upstream_response
+				response = self.client.get(reverse('admin-trader-document', args=[self.application.id, 'national-id']))
+
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(download_url.call_args.kwargs['resource_type'], 'raw')
+		self.assertEqual(download_url.call_args.kwargs['type'], 'upload')
+
 	def test_admin_document_preview_sanitizes_storage_errors(self):
 		url = reverse('admin-trader-document', args=[self.application.id, 'national-id'])
 		with patch('traders.views.private_download_url', side_effect=OSError('Cloudinary unavailable')):
