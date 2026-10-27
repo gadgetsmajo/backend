@@ -14,6 +14,7 @@ ALLOWED_HOSTS = [
     for host in (
         *_configured_allowed_hosts,
         'web-production-b3675.up.railway.app',
+        'api.majogadgets.com',
         *(['*', '.ngrok-free.app', '.ngrok-free.dev'] if DEBUG else []),
     )
     if host.strip()
