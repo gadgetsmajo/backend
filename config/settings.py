@@ -7,7 +7,7 @@ import os
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 SECRET_KEY = config('SECRET_KEY')
-DEBUG = config('DJANGO_DEBUG', default=False, cast=bool)
+DEBUG = config('DJANGO_DEBUG', default=False, cast=bool) and not os.environ.get('RAILWAY_ENVIRONMENT')
 _configured_allowed_hosts = config('ALLOWED_HOSTS', default='').split(',')
 ALLOWED_HOSTS = [
     host.strip()
@@ -118,7 +118,7 @@ CORS_ALLOWED_ORIGINS = [
     )
     if origin.strip()
 ]
-CORS_ALLOW_ALL_ORIGINS = config('DJANGO_DEBUG', default=False, cast=bool)
+CORS_ALLOW_ALL_ORIGINS = DEBUG
 CORS_ALLOW_HEADERS = [
     'accept', 'accept-encoding', 'authorization', 'content-type',
     'dnt', 'origin', 'user-agent', 'x-csrftoken', 'x-requested-with',
