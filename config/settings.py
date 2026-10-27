@@ -8,6 +8,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 SECRET_KEY = config('SECRET_KEY')
 DEBUG = config('DJANGO_DEBUG', default=False, cast=bool) and not os.environ.get('RAILWAY_ENVIRONMENT')
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 _configured_allowed_hosts = config('ALLOWED_HOSTS', default='').split(',')
 ALLOWED_HOSTS = [
     host.strip()
