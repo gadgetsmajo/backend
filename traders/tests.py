@@ -390,6 +390,34 @@ class TraderInventoryStockSyncTests(TestCase):
 		self.assertEqual(response.status_code, 200)
 		self.assertEqual(response.data[0]['public_product_id'], public_product.id)
 
+	def test_trader_can_edit_own_product_details_and_public_product_stays_in_sync(self):
+		public_product = Product.objects.create(
+			name=self.product.name,
+			price=self.product.price,
+			stock=self.product.stock,
+			trader=self.trader,
+			trader_product=self.product,
+		)
+
+		response = self.client.patch(
+			reverse('trader-product-detail', args=[self.trader.uuid, self.product.uuid]),
+			{'name': 'Updated Inventory Product', 'price': '30000.00', 'stock': 6,
+			 'short_description': 'Updated product details'},
+			format='json',
+		)
+
+		self.assertEqual(response.status_code, 200)
+		self.product.refresh_from_db()
+		public_product.refresh_from_db()
+		self.assertEqual(self.product.name, 'Updated Inventory Product')
+		self.assertEqual(self.product.price, Decimal('30000.00'))
+		self.assertEqual(self.product.stock, 6)
+		self.assertEqual(self.product.short_description, 'Updated product details')
+		self.assertEqual(public_product.name, self.product.name)
+		self.assertEqual(public_product.price, self.product.price)
+		self.assertEqual(public_product.stock, self.product.stock)
+		self.assertEqual(public_product.short_description, self.product.short_description)
+
 
 class TraderWalletTests(TestCase):
 	def setUp(self):

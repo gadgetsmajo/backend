@@ -148,14 +148,36 @@ class ProductDetailView(generics.RetrieveUpdateDestroyAPIView):
     def perform_update(self, serializer):
         cover = self.request.FILES.get('image')
         product = serializer.save(**(({'image': cover}) if cover else {}))
+        if product.trader_product_id:
+            trader_product = product.trader_product
+            trader_product.name = product.name
+            trader_product.short_description = product.short_description
+            trader_product.long_description = product.long_description
+            trader_product.description = product.short_description
+            trader_product.price = product.price
+            trader_product.original_price = product.original_price
+            trader_product.delivery_fee = product.delivery_fee
+            trader_product.stock = product.stock
+            trader_product.category = product.category
+            trader_product.image = product.image
+            trader_product.is_featured = product.is_featured
+            trader_product.is_new_deal = product.is_new_deal
+            trader_product.save(update_fields=(
+                'name', 'short_description', 'long_description', 'description',
+                'price', 'original_price', 'delivery_fee', 'stock', 'category',
+                'image', 'is_featured', 'is_new_deal', 'updated_at',
+            ))
         files = self.request.FILES.getlist('images')
         if files:
             start = product.images.count()
             for i, img in enumerate(files):
                 ProductImage.objects.create(product=product, image=img, order=start + i)
+        cache.delete('products:list')
+        cache.delete(f'products:detail:{product.pk}')
 
     def perform_destroy(self, instance):
         instance.delete()
+        cache.delete('products:list')
 
 
 class ProductStockAddView(APIView):

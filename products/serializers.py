@@ -51,8 +51,10 @@ class ProductImageSerializer(serializers.ModelSerializer):
 class ProductSerializer(serializers.ModelSerializer):
     category = CategorySerializer(read_only=True)
     category_id = serializers.PrimaryKeyRelatedField(
-        queryset=Category.objects.all(), source='category', write_only=True
+        queryset=Category.objects.all(), source='category', write_only=True,
+        required=False, allow_null=True,
     )
+    listed_price = serializers.DecimalField(source='price', max_digits=10, decimal_places=2, read_only=True)
     image_url = serializers.SerializerMethodField(read_only=True)
     images = ProductImageSerializer(many=True, read_only=True)
     is_featured = serializers.BooleanField(required=False)
@@ -63,11 +65,17 @@ class ProductSerializer(serializers.ModelSerializer):
     class Meta:
         model = Product
         fields = ('id', 'uuid', 'name', 'slug', 'category', 'category_id',
-                  'price', 'original_price', 'image_url', 'images',
+                  'price', 'listed_price', 'original_price', 'image_url', 'images',
                   'short_description', 'long_description', 'delivery_fee',
                   'rating', 'stock', 'is_active', 'is_featured', 'is_new_deal', 'seller_uuid',
                   'created_at', 'reviews_count')
         read_only_fields = ('id', 'uuid', 'slug', 'rating', 'created_at')
+
+    def to_internal_value(self, data):
+        if data.get('category_id') == '':
+            data = data.copy()
+            data['category_id'] = None
+        return super().to_internal_value(data)
 
     def get_reviews_count(self, obj):
         return obj.reviews.filter(status='published').count()

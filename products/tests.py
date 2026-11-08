@@ -6,7 +6,7 @@ from rest_framework.test import APIClient
 from orders.models import Order, OrderItem
 from products.models import Category, FlashSale, Product, ProductReview
 from settings_app.models import PlatformSettings
-from traders.models import TraderApplication
+from traders.models import TraderApplication, TraderProduct
 
 User = get_user_model()
 
@@ -112,7 +112,9 @@ class ProductCommissionPricingAPITest(TestCase):
             reverse('product-detail', args=[self.existing_product.id])
         )
         self.assertEqual(list_before_setting.data['results'][0]['price'], '100.00')
+        self.assertEqual(list_before_setting.data['results'][0]['listed_price'], '100.00')
         self.assertEqual(detail_before_setting.data['price'], '100.00')
+        self.assertEqual(detail_before_setting.data['listed_price'], '100.00')
 
         settings = PlatformSettings.get()
         settings.commission = '10.00'
@@ -130,12 +132,73 @@ class ProductCommissionPricingAPITest(TestCase):
         prices = {item['id']: item['price'] for item in response.data['results']}
         self.assertEqual(prices[self.existing_product.id], '110.00')
         self.assertEqual(prices[new_product.id], '220.00')
+        self.assertEqual(
+            next(item for item in response.data['results'] if item['id'] == self.existing_product.id)['listed_price'],
+            '100.00',
+        )
         detail_after_setting = self.client.get(
             reverse('product-detail', args=[self.existing_product.id])
         )
         self.assertEqual(detail_after_setting.data['price'], '110.00')
         self.existing_product.refresh_from_db()
         self.assertEqual(self.existing_product.price, 100)
+
+    def test_admin_edits_sync_linked_trader_product_and_keep_listed_price(self):
+        trader_user = User.objects.create_user(email='seller@example.com', name='Seller', password='Password123!')
+        trader = TraderApplication.objects.create(
+            full_name='Seller', email='seller@example.com', phone='0700000000',
+            business_name='Seller Store', business_type='sole_proprietor',
+            location='Kampala', district='Central', product_categories='Phones',
+            status='approved', user=trader_user,
+        )
+        trader_product = TraderProduct.objects.create(
+            trader=trader, name='Original Product', price='100.00',
+            short_description='Old details', stock=2,
+        )
+        product = Product.objects.create(
+            name='Original Product', category=self.category, price='100.00', stock=2,
+            trader=trader, trader_product=trader_product,
+        )
+        settings = PlatformSettings.get()
+        settings.commission = '10.00'
+        settings.save()
+        admin = User.objects.create_user(email='admin@example.com', name='Admin', password='Password123!', is_staff=True)
+        self.client.force_authenticate(user=admin)
+
+        response = self.client.patch(reverse('product-detail', args=[product.id]), {
+            'name': 'Updated Product',
+            'price': '150.00',
+            'stock': 7,
+            'short_description': 'Updated details',
+            'category_id': '',
+        }, format='json')
+
+        self.assertEqual(response.status_code, 200)
+        product.refresh_from_db()
+        trader_product.refresh_from_db()
+        self.assertEqual(product.price, 150)
+        self.assertEqual(product.category, None)
+        self.assertEqual(trader_product.name, 'Updated Product')
+        self.assertEqual(trader_product.price, 150)
+        self.assertEqual(trader_product.stock, 7)
+        self.assertEqual(trader_product.short_description, 'Updated details')
+        self.assertIsNone(trader_product.category)
+        self.assertEqual(response.data['price'], '165.00')
+        self.assertEqual(response.data['listed_price'], '150.00')
+
+    def test_non_admin_cannot_edit_product(self):
+        user = User.objects.create_user(email='buyer@example.com', name='Buyer', password='Password123!')
+        self.client.force_authenticate(user=user)
+
+        response = self.client.patch(
+            reverse('product-detail', args=[self.existing_product.id]),
+            {'name': 'Unauthorized Change'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.existing_product.refresh_from_db()
+        self.assertEqual(self.existing_product.name, 'Existing Product')
 
 
 class FlashSalePermissionAPITest(TestCase):
