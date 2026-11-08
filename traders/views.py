@@ -13,8 +13,10 @@ from django.db import transaction
 from django.db.models import Sum
 from django.http import HttpResponse
 from django.db.models import Avg, Count, F, Q
+from django_redis.exceptions import ConnectionInterrupted
 from orders.models import OrderItem
 from products.models import Product, ProductReview
+from redis.exceptions import RedisError
 from rest_framework import generics, permissions, status
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -340,8 +342,14 @@ def _sync_to_product(trader_product):
             'is_new_deal': trader_product.is_new_deal,
         },
     )
-    cache.delete('products:list')
-    cache.delete(f'products:detail:{product.pk}')
+    try:
+        cache.delete('products:list')
+        cache.delete(f'products:detail:{product.pk}')
+    except (ConnectionInterrupted, RedisError):
+        logger.exception(
+            'Product cache invalidation failed after syncing trader product %s.',
+            trader_product.pk,
+        )
     return product
 
 

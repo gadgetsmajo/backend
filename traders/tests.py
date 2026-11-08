@@ -6,6 +6,7 @@ from urllib.error import HTTPError
 from cloudinary import CloudinaryResource
 from django.core.files.uploadedfile import SimpleUploadedFile
 from cloudinary import CloudinaryResource
+from django_redis.exceptions import ConnectionInterrupted
 from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
@@ -443,6 +444,30 @@ class TraderInventoryStockSyncTests(TestCase):
 		self.assertEqual(public_product.price, self.product.price)
 		self.assertEqual(public_product.stock, self.product.stock)
 		self.assertEqual(public_product.short_description, self.product.short_description)
+
+	@patch('django.core.cache.cache.delete', side_effect=ConnectionInterrupted(connection=None))
+	def test_product_update_succeeds_when_cache_invalidation_fails(self, _delete_cache):
+		public_product = Product.objects.create(
+			name=self.product.name,
+			price=self.product.price,
+			stock=self.product.stock,
+			trader=self.trader,
+			trader_product=self.product,
+		)
+
+		with self.assertLogs('traders.views', level='ERROR'):
+			response = self.client.patch(
+				reverse('trader-product-detail', args=[self.trader.uuid, self.product.uuid]),
+				{'name': 'Updated Despite Cache Failure', 'price': '30000.00', 'stock': '6',
+				 'is_active': 'true', 'is_featured': 'false', 'is_new_deal': 'false'},
+				format='multipart',
+			)
+
+		self.assertEqual(response.status_code, 200)
+		self.product.refresh_from_db()
+		public_product.refresh_from_db()
+		self.assertEqual(self.product.stock, 6)
+		self.assertEqual(public_product.stock, 6)
 
 
 class TraderWalletTests(TestCase):
