@@ -232,14 +232,24 @@ class TraderStockMovementSerializer(serializers.ModelSerializer):
 
 
 class TraderEarningSerializer(serializers.ModelSerializer):
+    return_request_status = serializers.SerializerMethodField()
+
     class Meta:
         model = TraderEarning
         fields = (
             'id', 'order_code', 'product_name', 'quantity', 'listed_unit_price',
             'seller_amount', 'commission_pct', 'commission_amount', 'available_at',
-            'status', 'created_at',
+            'status', 'return_request_status', 'created_at',
         )
         read_only_fields = fields
+
+    def get_return_request_status(self, obj):
+        if not obj.order_id:
+            return None
+        try:
+            return obj.order.return_request.status
+        except ObjectDoesNotExist:
+            return None
 
 
 class TraderWithdrawalSerializer(serializers.ModelSerializer):

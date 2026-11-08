@@ -952,7 +952,9 @@ class TraderWalletView(APIView):
         from settings_app.models import PlatformSettings
         settings = PlatformSettings.get()
         summary = wallet_summary(trader)
-        earnings = TraderEarning.objects.filter(trader=trader).order_by('-created_at')[:100]
+        earnings = TraderEarning.objects.filter(trader=trader).select_related(
+            'order__return_request'
+        ).order_by('-created_at')[:100]
         withdrawals = trader.withdrawals.all()[:50]
         data = {
             key: str(value) if isinstance(value, Decimal) else value

@@ -510,3 +510,13 @@ class TraderWalletTests(TestCase):
 		return_request.save(update_fields=['status'])
 		reverse_order_earnings(self.order)
 		self.assertEqual(wallet_summary(self.trader)['total_earned'], Decimal('0.00'))
+
+	def test_wallet_earnings_include_return_status_for_payment_activity(self):
+		record_paid_order_earnings(self.order)
+		ReturnRequest.objects.create(order=self.order, reason='Return requested', status='pending')
+		self.client.force_authenticate(user=self.user)
+
+		response = self.client.get(reverse('trader-wallet', args=[self.trader.uuid]))
+
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(response.data['earnings'][0]['return_request_status'], 'pending')
