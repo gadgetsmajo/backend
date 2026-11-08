@@ -324,24 +324,49 @@ class TraderDashboardView(APIView):
 def _sync_to_product(trader_product):
     from products.models import Product
     from django.core.cache import cache
-    product, _ = Product.objects.update_or_create(
-        trader_product=trader_product,
-        defaults={
-            'trader': trader_product.trader,
-            'name': trader_product.name,
-            'short_description': trader_product.short_description or trader_product.description,
-            'long_description': trader_product.long_description,
-            'price': trader_product.price,
-            'original_price': trader_product.original_price,
-            'delivery_fee': trader_product.delivery_fee,
-            'stock': trader_product.stock,
-            'category': trader_product.category,
-            'image': trader_product.image,
-            'is_active': trader_product.is_active and trader_product.trader.is_visible,
-            'is_featured': trader_product.is_featured,
-            'is_new_deal': trader_product.is_new_deal,
-        },
-    )
+    defaults = {
+        'trader': trader_product.trader,
+        'name': trader_product.name,
+        'short_description': trader_product.short_description or trader_product.description,
+        'long_description': trader_product.long_description,
+        'price': trader_product.price,
+        'original_price': trader_product.original_price,
+        'delivery_fee': trader_product.delivery_fee,
+        'stock': trader_product.stock,
+        'category': trader_product.category,
+        'image': trader_product.image,
+        'is_active': trader_product.is_active and trader_product.trader.is_visible,
+        'is_featured': trader_product.is_featured,
+        'is_new_deal': trader_product.is_new_deal,
+    }
+    product = Product.objects.filter(trader_product=trader_product).first()
+    if product is None:
+        legacy_products = list(Product.objects.filter(
+            trader=trader_product.trader,
+            trader_product__isnull=True,
+            name__iexact=trader_product.name,
+        ).order_by('pk')[:2])
+        if len(legacy_products) == 1:
+            product = legacy_products[0]
+            logger.info(
+                'Linking legacy public product %s to trader product %s.',
+                product.pk,
+                trader_product.pk,
+            )
+        elif len(legacy_products) > 1:
+            logger.warning(
+                'Multiple unlinked public products match trader product %s; creating a linked product instead.',
+                trader_product.pk,
+            )
+
+    if product is None:
+        product = Product.objects.create(trader_product=trader_product, **defaults)
+    else:
+        product.trader_product = trader_product
+        for field, value in defaults.items():
+            setattr(product, field, value)
+        product.save()
+
     try:
         cache.delete('products:list')
         cache.delete(f'products:detail:{product.pk}')

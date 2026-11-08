@@ -402,6 +402,34 @@ class TraderInventoryStockSyncTests(TestCase):
 		self.assertEqual(self.product.stock, 12)
 		self.assertEqual(public_product.stock, 12)
 
+	def test_stock_movement_reuses_matching_legacy_public_product(self):
+		public_product = Product.objects.create(
+			name=self.product.name,
+			price=self.product.price,
+			stock=0,
+			trader=self.trader,
+		)
+		original_slug = public_product.slug
+		item = TraderInventoryItem.objects.create(
+			trader=self.trader, product=self.product, quantity=0, cost_price=15000,
+		)
+
+		response = self.client.post(
+			reverse('trader-stock-movement', args=[self.trader.uuid, item.id]),
+			{'type': 'in', 'quantity': 12},
+			format='json',
+		)
+
+		self.assertEqual(response.status_code, 200)
+		public_product.refresh_from_db()
+		self.assertEqual(public_product.trader_product, self.product)
+		self.assertEqual(public_product.stock, 12)
+		self.assertEqual(public_product.slug, original_slug)
+		self.assertEqual(
+			Product.objects.filter(trader=self.trader, name__iexact=self.product.name).count(),
+			1,
+		)
+
 	def test_trader_products_expose_the_linked_public_product_id(self):
 		public_product = Product.objects.create(
 			name='Public Inventory Product',
