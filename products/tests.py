@@ -225,6 +225,71 @@ class ProductCommissionPricingAPITest(TestCase):
         self.assertEqual(response.data['price'], '165.00')
         self.assertEqual(response.data['listed_price'], '150.00')
 
+    def test_trader_can_update_own_linked_product_through_product_detail_endpoint(self):
+        trader_user = User.objects.create_user(email='owner@example.com', name='Owner', password='Password123!')
+        trader = TraderApplication.objects.create(
+            full_name='Owner', email='owner@example.com', phone='0700000000',
+            business_name='Owner Store', business_type='sole_proprietor',
+            location='Kampala', district='Central', product_categories='Phones',
+            status='approved', user=trader_user,
+        )
+        trader_product = TraderProduct.objects.create(
+            trader=trader, name='Inactive Product', price='100.00', stock=2,
+            is_active=False,
+        )
+        product = Product.objects.create(
+            name='Inactive Product', category=self.category, price='100.00',
+            stock=2, is_active=False, trader=trader, trader_product=trader_product,
+        )
+        self.client.force_authenticate(user=trader_user)
+
+        response = self.client.patch(
+            reverse('product-detail', args=[product.id]),
+            {'name': 'Updated Product', 'price': '150.00', 'is_active': True},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        product.refresh_from_db()
+        trader_product.refresh_from_db()
+        self.assertEqual(product.name, 'Updated Product')
+        self.assertEqual(product.price, 150)
+        self.assertTrue(product.is_active)
+        self.assertEqual(trader_product.name, product.name)
+        self.assertEqual(trader_product.price, product.price)
+        self.assertTrue(trader_product.is_active)
+
+    def test_trader_cannot_update_another_traders_product_through_product_detail_endpoint(self):
+        owner = User.objects.create_user(email='owner@example.com', name='Owner', password='Password123!')
+        trader = TraderApplication.objects.create(
+            full_name='Owner', email='owner@example.com', phone='0700000000',
+            business_name='Owner Store', business_type='sole_proprietor',
+            location='Kampala', district='Central', product_categories='Phones',
+            status='approved', user=owner,
+        )
+        product = Product.objects.create(
+            name='Other Product', category=self.category, price='100.00',
+            stock=2, trader=trader,
+        )
+        other_owner = User.objects.create_user(email='other@example.com', name='Other', password='Password123!')
+        TraderApplication.objects.create(
+            full_name='Other', email='other@example.com', phone='0700000001',
+            business_name='Other Store', business_type='sole_proprietor',
+            location='Jinja', district='Eastern', product_categories='Phones',
+            status='approved', user=other_owner,
+        )
+        self.client.force_authenticate(user=other_owner)
+
+        response = self.client.patch(
+            reverse('product-detail', args=[product.id]),
+            {'name': 'Unauthorized Change'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 403)
+        product.refresh_from_db()
+        self.assertEqual(product.name, 'Other Product')
+
     def test_non_admin_cannot_edit_product(self):
         user = User.objects.create_user(email='buyer@example.com', name='Buyer', password='Password123!')
         self.client.force_authenticate(user=user)

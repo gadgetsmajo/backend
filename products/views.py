@@ -21,7 +21,7 @@ from .serializers import (
     FlashSaleSerializer,
     ProductReviewSerializer, RatingSummarySerializer,
 )
-from .permissions import IsAdminOrReadOnly
+from .permissions import IsAdminOrProductOwnerOrReadOnly, IsAdminOrReadOnly
 from orders.models import OrderItem
 from users.models import UserBehaviour
 
@@ -158,12 +158,19 @@ class ProductListView(generics.ListCreateAPIView):
 class ProductDetailView(generics.RetrieveUpdateDestroyAPIView):
     queryset = Product.objects.all().select_related('category', 'trader', 'trader_product__trader').prefetch_related('images')
     serializer_class = ProductSerializer
-    permission_classes = (IsAdminOrReadOnly,)
+    permission_classes = (IsAdminOrProductOwnerOrReadOnly,)
 
     def get_queryset(self):
         queryset = super().get_queryset()
         if not self.request.user.is_staff:
-            queryset = queryset.filter(is_active=True)
+            trader = getattr(self.request.user, 'trader_application', None)
+            if trader is None:
+                return queryset.filter(is_active=True)
+            queryset = queryset.filter(
+                Q(is_active=True)
+                | Q(trader_id=trader.pk)
+                | Q(trader_product__trader_id=trader.pk)
+            )
         return queryset
 
     def perform_update(self, serializer):
@@ -183,10 +190,11 @@ class ProductDetailView(generics.RetrieveUpdateDestroyAPIView):
             trader_product.image = product.image
             trader_product.is_featured = product.is_featured
             trader_product.is_new_deal = product.is_new_deal
+            trader_product.is_active = product.is_active
             trader_product.save(update_fields=(
                 'name', 'short_description', 'long_description', 'description',
                 'price', 'original_price', 'delivery_fee', 'stock', 'category',
-                'image', 'is_featured', 'is_new_deal', 'updated_at',
+                'image', 'is_featured', 'is_new_deal', 'is_active', 'updated_at',
             ))
         files = self.request.FILES.getlist('images')
         if files:
