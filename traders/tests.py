@@ -401,9 +401,10 @@ class TraderInventoryStockSyncTests(TestCase):
 
 		response = self.client.patch(
 			reverse('trader-product-detail', args=[self.trader.uuid, self.product.uuid]),
-			{'name': 'Updated Inventory Product', 'price': '30000.00', 'stock': 6,
-			 'short_description': 'Updated product details'},
-			format='json',
+			{'name': 'Updated Inventory Product', 'price': '30000.00', 'stock': '6',
+			 'short_description': 'Updated product details', 'is_active': 'true',
+			 'is_featured': 'false', 'is_new_deal': 'false'},
+			format='multipart',
 		)
 
 		self.assertEqual(response.status_code, 200)
