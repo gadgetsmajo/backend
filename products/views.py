@@ -1,4 +1,5 @@
 import bleach
+import logging
 from html import escape
 from uuid import UUID
 
@@ -7,6 +8,8 @@ from django.db.models import Avg, Count, F, IntegerField, Q, Sum, Value
 from django.db.models.functions import Coalesce
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
+from django_redis.exceptions import ConnectionInterrupted
+from redis.exceptions import RedisError
 from rest_framework import generics, filters, permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -24,6 +27,16 @@ from users.models import UserBehaviour
 
 
 CATEGORY_CACHE_TTL = 60 * 30  # 30 minutes
+logger = logging.getLogger(__name__)
+
+
+def _invalidate_product_cache(product_id=None):
+    try:
+        cache.delete('products:list')
+        if product_id is not None:
+            cache.delete(f'products:detail:{product_id}')
+    except (ConnectionInterrupted, RedisError):
+        logger.exception('Product cache invalidation failed for product %s.', product_id)
 
 
 class IsTraderProductOwner(permissions.BasePermission):
@@ -172,12 +185,12 @@ class ProductDetailView(generics.RetrieveUpdateDestroyAPIView):
             start = product.images.count()
             for i, img in enumerate(files):
                 ProductImage.objects.create(product=product, image=img, order=start + i)
-        cache.delete('products:list')
-        cache.delete(f'products:detail:{product.pk}')
+        _invalidate_product_cache(product.pk)
 
     def perform_destroy(self, instance):
+        product_id = instance.pk
         instance.delete()
-        cache.delete('products:list')
+        _invalidate_product_cache(product_id)
 
 
 class ProductStockAddView(APIView):

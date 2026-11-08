@@ -1,6 +1,8 @@
 from django.contrib.auth import get_user_model
+from django_redis.exceptions import ConnectionInterrupted
 from django.test import TestCase
 from django.urls import reverse
+from unittest.mock import patch
 from rest_framework.test import APIClient
 
 from orders.models import Order, OrderItem
@@ -199,6 +201,46 @@ class ProductCommissionPricingAPITest(TestCase):
         self.assertEqual(response.status_code, 403)
         self.existing_product.refresh_from_db()
         self.assertEqual(self.existing_product.name, 'Existing Product')
+
+    @patch('django.core.cache.cache.delete', side_effect=ConnectionInterrupted(connection=None))
+    def test_admin_can_update_product_when_cache_is_unavailable(self, _delete_cache):
+        admin = User.objects.create_user(
+            email='cache-admin@example.com',
+            name='Cache Admin',
+            password='Password123!',
+            is_staff=True,
+        )
+        self.client.force_authenticate(user=admin)
+
+        with self.assertLogs('products.views', level='ERROR'):
+            response = self.client.patch(
+                reverse('product-detail', args=[self.existing_product.id]),
+                {'name': 'Updated During Cache Outage', 'price': '125.00'},
+                format='json',
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.existing_product.refresh_from_db()
+        self.assertEqual(self.existing_product.name, 'Updated During Cache Outage')
+        self.assertEqual(self.existing_product.price, 125)
+
+    @patch('django.core.cache.cache.delete', side_effect=ConnectionInterrupted(connection=None))
+    def test_admin_can_delete_product_when_cache_is_unavailable(self, _delete_cache):
+        admin = User.objects.create_user(
+            email='cache-admin@example.com',
+            name='Cache Admin',
+            password='Password123!',
+            is_staff=True,
+        )
+        self.client.force_authenticate(user=admin)
+
+        with self.assertLogs('products.views', level='ERROR'):
+            response = self.client.delete(
+                reverse('product-detail', args=[self.existing_product.id]),
+            )
+
+        self.assertEqual(response.status_code, 204)
+        self.assertFalse(Product.objects.filter(pk=self.existing_product.id).exists())
 
 
 class FlashSalePermissionAPITest(TestCase):
