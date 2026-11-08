@@ -504,6 +504,58 @@ class TraderInventoryStockSyncTests(TestCase):
 		self.assertEqual(public_product.stock, self.product.stock)
 		self.assertEqual(public_product.short_description, self.product.short_description)
 
+	def test_renaming_product_updates_unique_public_row_with_same_image(self):
+		self.product.image = 'trader_products/shared-product-image.jpg'
+		self.product.save(update_fields=['image'])
+		public_product = Product.objects.create(
+			name='Old product name',
+			price=self.product.price,
+			stock=0,
+			trader=self.trader,
+			image='trader_products/shared-product-image.jpg',
+		)
+		self.product.refresh_from_db()
+		public_product.refresh_from_db()
+		self.assertEqual(str(self.product.image), str(public_product.image))
+
+		response = self.client.patch(
+			reverse('trader-product-detail', args=[self.trader.uuid, self.product.uuid]),
+			{'name': 'New product name', 'price': '30000.00', 'stock': '6',
+			 'is_active': 'true', 'is_featured': 'false', 'is_new_deal': 'false'},
+			format='multipart',
+		)
+
+		self.assertEqual(response.status_code, 200)
+		public_product.refresh_from_db()
+		self.assertEqual(public_product.trader_product_id, self.product.pk)
+		self.assertEqual(public_product.name, 'New Product Name')
+		self.assertEqual(public_product.stock, 6)
+		self.assertEqual(
+			Product.objects.filter(trader=self.trader).count(),
+			1,
+		)
+
+	def test_delete_deactivates_unique_public_row_even_when_name_changed(self):
+		self.product.image = 'trader_products/shared-product-image.jpg'
+		self.product.save(update_fields=['image'])
+		public_product = Product.objects.create(
+			name='Old product name',
+			price=self.product.price,
+			stock=0,
+			trader=self.trader,
+			image='trader_products/shared-product-image.jpg',
+		)
+		self.product.refresh_from_db()
+		public_product.refresh_from_db()
+
+		response = self.client.delete(
+			reverse('trader-product-detail', args=[self.trader.uuid, self.product.uuid]),
+		)
+
+		self.assertEqual(response.status_code, 204)
+		public_product.refresh_from_db()
+		self.assertFalse(public_product.is_active)
+
 	def test_trader_can_update_and_clear_product_category_and_optional_fields(self):
 		category = Category.objects.create(name='Tools', slug='tools')
 		response = self.client.patch(

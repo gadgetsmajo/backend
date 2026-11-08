@@ -326,21 +326,27 @@ def _find_public_product_for_trader_product(trader_product):
     if product:
         return product
 
-    candidates = list(Product.objects.filter(
+    same_name_candidates = list(Product.objects.filter(
         trader=trader_product.trader,
         trader_product__isnull=True,
         name__iexact=trader_product.name,
     ).order_by('pk')[:2])
-    if not candidates and trader_product.image:
-        candidates = [
-            product for product in Product.objects.filter(
-                trader__isnull=True,
-                trader_product__isnull=True,
-                name__iexact=trader_product.name,
-            ).order_by('pk')[:2]
-            if product.image and str(product.image) == str(trader_product.image)
-        ]
-    return candidates[0] if len(candidates) == 1 else None
+    if len(same_name_candidates) == 1:
+        return same_name_candidates[0]
+    if same_name_candidates or not trader_product.image:
+        return None
+
+    image_matches = []
+    for candidate in Product.objects.filter(
+        trader_product__isnull=True,
+    ).filter(
+        Q(trader=trader_product.trader) | Q(trader__isnull=True)
+    ).order_by('pk').iterator():
+        if candidate.image and str(candidate.image) == str(trader_product.image):
+            image_matches.append(candidate)
+            if len(image_matches) > 1:
+                return None
+    return image_matches[0] if image_matches else None
 
 
 def _invalidate_product_cache(product, trader_product_id):
