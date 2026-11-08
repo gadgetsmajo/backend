@@ -321,9 +321,43 @@ class TraderDashboardView(APIView):
 
 # ── Trader: products ──────────────────────────────────────────────────────────
 
-def _sync_to_product(trader_product):
-    from products.models import Product
+def _find_public_product_for_trader_product(trader_product):
+    product = Product.objects.filter(trader_product=trader_product).first()
+    if product:
+        return product
+
+    candidates = list(Product.objects.filter(
+        trader=trader_product.trader,
+        trader_product__isnull=True,
+        name__iexact=trader_product.name,
+    ).order_by('pk')[:2])
+    if not candidates and trader_product.image:
+        candidates = [
+            product for product in Product.objects.filter(
+                trader__isnull=True,
+                trader_product__isnull=True,
+                name__iexact=trader_product.name,
+            ).order_by('pk')[:2]
+            if product.image and str(product.image) == str(trader_product.image)
+        ]
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _invalidate_product_cache(product, trader_product_id):
     from django.core.cache import cache
+
+    try:
+        cache.delete('products:list')
+        if product:
+            cache.delete(f'products:detail:{product.pk}')
+    except (ConnectionInterrupted, RedisError):
+        logger.exception(
+            'Product cache invalidation failed after syncing trader product %s.',
+            trader_product_id,
+        )
+
+
+def _sync_to_product(trader_product):
     defaults = {
         'trader': trader_product.trader,
         'name': trader_product.name,
@@ -339,31 +373,21 @@ def _sync_to_product(trader_product):
         'is_featured': trader_product.is_featured,
         'is_new_deal': trader_product.is_new_deal,
     }
-    product = Product.objects.filter(trader_product=trader_product).first()
+    product = _find_public_product_for_trader_product(trader_product)
     if product is None:
-        legacy_products = list(Product.objects.filter(
+        candidates = list(Product.objects.filter(
             trader=trader_product.trader,
             trader_product__isnull=True,
             name__iexact=trader_product.name,
         ).order_by('pk')[:2])
-        if not legacy_products and trader_product.image:
-            unowned_products = Product.objects.filter(
-                trader__isnull=True,
-                trader_product__isnull=True,
-                name__iexact=trader_product.name,
-            ).order_by('pk')[:2]
-            legacy_products = [
-                candidate for candidate in unowned_products
-                if candidate.image and str(candidate.image) == str(trader_product.image)
-            ]
-        if len(legacy_products) == 1:
-            product = legacy_products[0]
+        if len(candidates) == 1:
+            product = candidates[0]
             logger.info(
                 'Linking legacy public product %s to trader product %s.',
                 product.pk,
                 trader_product.pk,
             )
-        elif len(legacy_products) > 1:
+        elif len(candidates) > 1:
             logger.warning(
                 'Multiple unlinked public products match trader product %s; creating a linked product instead.',
                 trader_product.pk,
@@ -377,14 +401,7 @@ def _sync_to_product(trader_product):
             setattr(product, field, value)
         product.save()
 
-    try:
-        cache.delete('products:list')
-        cache.delete(f'products:detail:{product.pk}')
-    except (ConnectionInterrupted, RedisError):
-        logger.exception(
-            'Product cache invalidation failed after syncing trader product %s.',
-            trader_product.pk,
-        )
+    _invalidate_product_cache(product, trader_product.pk)
     return product
 
 
@@ -409,14 +426,7 @@ class TraderProductListView(APIView):
         serializer = TraderProductSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         image_file = request.FILES.get('image')
-        category_id = request.data.get('category_id')
         extra = {'image': image_file} if image_file else {}
-        if category_id:
-            from products.models import Category
-            try:
-                extra['category'] = Category.objects.get(pk=category_id)
-            except Category.DoesNotExist:
-                pass
         tp = serializer.save(trader=trader, **extra)
         _sync_to_product(tp)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
@@ -452,14 +462,7 @@ class TraderProductDetailView(APIView):
         serializer = TraderProductSerializer(product, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         image_file = request.FILES.get('image')
-        category_id = request.data.get('category_id')
         extra = {'image': image_file} if image_file else {}
-        if category_id:
-            from products.models import Category
-            try:
-                extra['category'] = Category.objects.get(pk=category_id)
-            except Category.DoesNotExist:
-                pass
         tp = serializer.save(**extra)
         _sync_to_product(tp)
         return Response(serializer.data)
@@ -470,15 +473,13 @@ class TraderProductDetailView(APIView):
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         if trader.email != request.user.email and not request.user.is_staff:
             return Response({'detail': 'Forbidden.'}, status=status.HTTP_403_FORBIDDEN)
-        from products.models import Product
-        from django.core.cache import cache
-        pub = Product.objects.filter(trader_product=product).first()
-        if pub:
-            pub.is_active = False
-            pub.save(update_fields=['is_active'])
-            cache.delete('products:list')
-            cache.delete(f'products:detail:{pub.pk}')
-        product.delete()
+        with transaction.atomic():
+            pub = _find_public_product_for_trader_product(product)
+            if pub:
+                pub.is_active = False
+                pub.save(update_fields=['is_active'])
+            product.delete()
+        _invalidate_product_cache(pub, product.pk)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 

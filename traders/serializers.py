@@ -3,6 +3,7 @@ import re
 
 from rest_framework import serializers
 from django.core.exceptions import ObjectDoesNotExist
+from products.models import Category
 from .models import (
     TraderApplication, TraderProduct, TraderSale, TraderExpense, TraderOrderItem,
     TraderInventoryItem, TraderStockMovement, TraderEarning, TraderWithdrawal,
@@ -161,7 +162,9 @@ class TraderPayoutAccountSerializer(serializers.Serializer):
 class TraderProductSerializer(serializers.ModelSerializer):
     image_url = serializers.SerializerMethodField()
     public_product_id = serializers.SerializerMethodField()
-    category_id = serializers.IntegerField(source='category.id', read_only=True, allow_null=True, default=None)
+    category_id = serializers.PrimaryKeyRelatedField(
+        source='category', queryset=Category.objects.all(), required=False, allow_null=True,
+    )
     category_name = serializers.CharField(source='category.name', read_only=True, default=None)
 
     class Meta:
@@ -173,7 +176,16 @@ class TraderProductSerializer(serializers.ModelSerializer):
             'image_url', 'is_active', 'is_featured', 'is_new_deal',
             'created_at', 'updated_at',
         )
-        read_only_fields = ('id', 'uuid', 'image_url', 'category_id', 'category_name', 'created_at', 'updated_at')
+        read_only_fields = ('id', 'uuid', 'image_url', 'category_name', 'created_at', 'updated_at')
+
+    def to_internal_value(self, data):
+        empty_fields = ('category_id', 'original_price')
+        if any(data.get(field) == '' for field in empty_fields):
+            data = data.copy()
+            for field in empty_fields:
+                if data.get(field) == '':
+                    data[field] = None
+        return super().to_internal_value(data)
 
     def get_image_url(self, obj):
         if obj.image:

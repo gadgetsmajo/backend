@@ -504,6 +504,76 @@ class TraderInventoryStockSyncTests(TestCase):
 		self.assertEqual(public_product.stock, self.product.stock)
 		self.assertEqual(public_product.short_description, self.product.short_description)
 
+	def test_trader_can_update_and_clear_product_category_and_optional_fields(self):
+		category = Category.objects.create(name='Tools', slug='tools')
+		response = self.client.patch(
+			reverse('trader-product-detail', args=[self.trader.uuid, self.product.uuid]),
+			{'name': 'Updated Product', 'price': '30000.00', 'stock': '6',
+			 'category_id': str(category.pk), 'original_price': '45000.00',
+			 'short_description': 'Updated details', 'long_description': 'Long details',
+			 'is_active': 'true', 'is_featured': 'false', 'is_new_deal': 'false'},
+			format='multipart',
+		)
+
+		self.assertEqual(response.status_code, 200)
+		self.product.refresh_from_db()
+		self.assertEqual(self.product.category, category)
+		self.assertEqual(response.data['category_id'], category.pk)
+
+		response = self.client.patch(
+			reverse('trader-product-detail', args=[self.trader.uuid, self.product.uuid]),
+			{'category_id': '', 'original_price': '', 'short_description': '',
+			 'long_description': '', 'is_active': 'true', 'is_featured': 'false',
+			 'is_new_deal': 'false'},
+			format='multipart',
+		)
+
+		self.assertEqual(response.status_code, 200)
+		self.product.refresh_from_db()
+		self.assertIsNone(self.product.category)
+		self.assertIsNone(self.product.original_price)
+		self.assertEqual(self.product.short_description, '')
+		self.assertEqual(self.product.long_description, '')
+		self.assertIsNone(response.data['category_id'])
+
+	@patch('django.core.cache.cache.delete', side_effect=ConnectionInterrupted(connection=None))
+	def test_trader_can_delete_product_when_cache_is_unavailable(self, _delete_cache):
+		public_product = Product.objects.create(
+			name=self.product.name,
+			price=self.product.price,
+			stock=self.product.stock,
+			trader=self.trader,
+			trader_product=self.product,
+		)
+
+		with self.assertLogs('traders.views', level='ERROR'):
+			response = self.client.delete(
+				reverse('trader-product-detail', args=[self.trader.uuid, self.product.uuid]),
+			)
+
+		self.assertEqual(response.status_code, 204)
+		self.assertFalse(TraderProduct.objects.filter(pk=self.product.pk).exists())
+		public_product.refresh_from_db()
+		self.assertFalse(public_product.is_active)
+		self.assertIsNone(public_product.trader_product_id)
+
+	def test_trader_can_delete_matching_unlinked_public_product(self):
+		public_product = Product.objects.create(
+			name=self.product.name,
+			price=self.product.price,
+			stock=self.product.stock,
+			trader=self.trader,
+		)
+
+		response = self.client.delete(
+			reverse('trader-product-detail', args=[self.trader.uuid, self.product.uuid]),
+		)
+
+		self.assertEqual(response.status_code, 204)
+		public_product.refresh_from_db()
+		self.assertFalse(public_product.is_active)
+		self.assertIsNone(public_product.trader_product_id)
+
 	@patch('django.core.cache.cache.delete', side_effect=ConnectionInterrupted(connection=None))
 	def test_product_update_succeeds_when_cache_invalidation_fails(self, _delete_cache):
 		public_product = Product.objects.create(
