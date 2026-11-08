@@ -1,4 +1,5 @@
 from datetime import timedelta
+from decimal import Decimal
 from unittest.mock import MagicMock, patch
 from urllib.error import HTTPError
 
@@ -10,9 +11,14 @@ from django.urls import reverse
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from orders.models import Order, OrderItem
+from orders.models import Order, OrderItem, ReturnRequest
 from products.models import Category, Product, ProductReview
-from traders.models import TraderApplication, TraderFollower, TraderInventoryItem, TraderOrderItem, TraderProduct
+from settings_app.models import PlatformSettings
+from traders.models import (
+	TraderApplication, TraderEarning, TraderFollower, TraderInventoryItem,
+	TraderOrderItem, TraderProduct, TraderWithdrawal,
+)
+from traders.wallet import record_paid_order_earnings, reverse_order_earnings, wallet_summary
 from users.models import User
 
 
@@ -383,3 +389,124 @@ class TraderInventoryStockSyncTests(TestCase):
 
 		self.assertEqual(response.status_code, 200)
 		self.assertEqual(response.data[0]['public_product_id'], public_product.id)
+
+
+class TraderWalletTests(TestCase):
+	def setUp(self):
+		self.user = User.objects.create_user(
+			email='wallet-seller@example.com', name='Wallet Seller', password='Password123!',
+		)
+		self.trader = TraderApplication.objects.create(
+			full_name='Wallet Seller',
+			email=self.user.email,
+			phone='0700000000',
+			business_name='Wallet Test Store',
+			business_type='sole_proprietor',
+			location='Kampala',
+			product_categories='Electronics',
+			status='approved',
+			user=self.user,
+			payout_method='mobile_money',
+			payout_provider='MTN',
+			payout_account_name='Wallet Seller',
+			payout_account_number='256700000000',
+		)
+		self.product = Product.objects.create(
+			name='Wallet Product', price='12000.00', stock=2, trader=self.trader,
+		)
+		self.order = Order.objects.create(user=self.user, status='processing', total='26400.00')
+		self.item = OrderItem.objects.create(
+			order=self.order,
+			product=self.product,
+			quantity=2,
+			price='13200.00',
+			seller_price='12000.00',
+			platform_commission_pct='10.00',
+			platform_commission='2400.00',
+		)
+		self.client = APIClient()
+
+	def test_paid_order_earnings_use_listed_price_and_remain_locked_for_five_days(self):
+		record_paid_order_earnings(self.order)
+
+		earning = TraderEarning.objects.get(order_item=self.item)
+		summary = wallet_summary(self.trader)
+		self.assertEqual(earning.seller_amount, Decimal('24000.00'))
+		self.assertEqual(earning.commission_amount, Decimal('2400.00'))
+		self.assertEqual(summary['locked_balance'], Decimal('24000.00'))
+		self.assertEqual(summary['available_balance'], Decimal('0.00'))
+		self.assertAlmostEqual(
+			(earning.available_at - timezone.now()).total_seconds(),
+			5 * 24 * 60 * 60,
+			delta=5,
+		)
+		record_paid_order_earnings(self.order)
+		self.assertEqual(TraderEarning.objects.filter(order_item=self.item).count(), 1)
+
+	def test_withdrawal_reserves_matured_balance_and_admin_records_transfer(self):
+		PlatformSettings.objects.create(pk=1, withdrawal_minimum='1000.00', withdrawal_fee='100.00')
+		record_paid_order_earnings(self.order)
+		TraderEarning.objects.filter(order_item=self.item).update(available_at=timezone.now() - timedelta(seconds=1))
+		self.client.force_authenticate(user=self.user)
+		url = reverse('trader-wallet', args=[self.trader.uuid])
+
+		response = self.client.post(url, {'amount': '5000.00'}, format='json')
+
+		self.assertEqual(response.status_code, 201, response.data)
+		withdrawal = TraderWithdrawal.objects.get()
+		self.assertEqual(withdrawal.payout_amount, Decimal('4900.00'))
+		self.assertEqual(wallet_summary(self.trader)['available_balance'], Decimal('19000.00'))
+
+		admin = User.objects.create_user(
+			email='wallet-admin@example.com', name='Wallet Admin',
+			password='Password123!', is_staff=True,
+		)
+		self.client.force_authenticate(user=admin)
+		admin_response = self.client.post(
+			reverse('admin-trader-withdrawal-update', args=[withdrawal.pk]),
+			{'status': 'paid', 'transfer_reference': 'BANK-TRANSFER-1'},
+			format='json',
+		)
+		self.assertEqual(admin_response.status_code, 200)
+		withdrawal.refresh_from_db()
+		self.assertEqual(withdrawal.status, 'paid')
+		self.assertEqual(withdrawal.transfer_reference, 'BANK-TRANSFER-1')
+
+	def test_unsigned_trader_cannot_request_withdrawal(self):
+		self.trader.agreement_required = True
+		self.trader.save(update_fields=['agreement_required'])
+		self.client.force_authenticate(user=self.user)
+
+		response = self.client.post(
+			reverse('trader-wallet', args=[self.trader.uuid]),
+			{'amount': '5000.00'},
+			format='json',
+		)
+
+		self.assertEqual(response.status_code, 404)
+		self.assertEqual(TraderWithdrawal.objects.count(), 0)
+
+	def test_return_request_blocks_trader_earnings_until_rejected_or_refunded(self):
+		record_paid_order_earnings(self.order)
+		TraderEarning.objects.filter(order_item=self.item).update(
+			available_at=timezone.now() - timedelta(seconds=1),
+		)
+		return_request = ReturnRequest.objects.create(
+			order=self.order,
+			reason='Product returned by customer',
+			status='pending',
+		)
+
+		summary = wallet_summary(self.trader)
+		self.assertEqual(summary['total_earned'], Decimal('0.00'))
+		self.assertEqual(summary['locked_balance'], Decimal('0.00'))
+		self.assertEqual(summary['available_balance'], Decimal('0.00'))
+
+		return_request.status = 'rejected'
+		return_request.save(update_fields=['status'])
+		self.assertEqual(wallet_summary(self.trader)['available_balance'], Decimal('24000.00'))
+
+		return_request.status = 'refunded'
+		return_request.save(update_fields=['status'])
+		reverse_order_earnings(self.order)
+		self.assertEqual(wallet_summary(self.trader)['total_earned'], Decimal('0.00'))

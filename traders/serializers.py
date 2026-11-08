@@ -3,7 +3,10 @@ import re
 
 from rest_framework import serializers
 from django.core.exceptions import ObjectDoesNotExist
-from .models import TraderApplication, TraderProduct, TraderSale, TraderExpense, TraderOrderItem, TraderInventoryItem, TraderStockMovement
+from .models import (
+    TraderApplication, TraderProduct, TraderSale, TraderExpense, TraderOrderItem,
+    TraderInventoryItem, TraderStockMovement, TraderEarning, TraderWithdrawal,
+)
 
 
 MAX_TRADER_DOCUMENT_SIZE = 10 * 1024 * 1024
@@ -95,6 +98,7 @@ class TraderApplicationAdminSerializer(serializers.ModelSerializer):
             'business_name', 'business_type', 'business_reg_no', 'tin', 'has_ura_certificate_document',
             'location', 'has_business_location_proof', 'district', 'website', 'product_categories',
             'monthly_volume', 'experience', 'logo', 'logo_url', 'bio', 'is_visible', 'is_closed',
+            'payout_method', 'payout_provider', 'payout_account_name', 'payout_account_number', 'payout_branch',
             'agreed_to_terms', 'terms_accepted_at', 'documents_verified', 'agreement_reference',
             'agreement_issued_at', 'agreement_version', 'agreement_required', 'agreement_signed_name',
             'agreement_signed_at', 'has_agreement_signature_image', 'status', 'admin_note', 'reviewed_by', 'reviewed_by_name',
@@ -133,6 +137,25 @@ class TraderAgreementSignatureSerializer(serializers.Serializer):
         if value and value.size > 5 * 1024 * 1024:
             raise serializers.ValidationError('Signature image must be 5 MB or smaller.')
         return value
+
+
+class TraderPayoutAccountSerializer(serializers.Serializer):
+    payout_method = serializers.ChoiceField(
+        choices=TraderApplication.PAYOUT_METHODS,
+        allow_blank=True,
+    )
+    payout_provider = serializers.CharField(max_length=100, allow_blank=True, required=False)
+    payout_account_name = serializers.CharField(max_length=150, allow_blank=True, required=False)
+    payout_account_number = serializers.CharField(max_length=50, allow_blank=True, required=False)
+    payout_branch = serializers.CharField(max_length=150, allow_blank=True, required=False)
+
+    def validate(self, attrs):
+        if not attrs['payout_method']:
+            return attrs
+        for field in ('payout_provider', 'payout_account_name', 'payout_account_number'):
+            if not attrs.get(field, '').strip():
+                raise serializers.ValidationError({field: 'This field is required for payouts.'})
+        return attrs
 
 
 class TraderProductSerializer(serializers.ModelSerializer):
@@ -206,6 +229,36 @@ class TraderStockMovementSerializer(serializers.ModelSerializer):
         model = TraderStockMovement
         fields = ('id', 'item', 'product_name', 'type', 'quantity', 'note', 'created_at')
         read_only_fields = ('id', 'product_name', 'created_at')
+
+
+class TraderEarningSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = TraderEarning
+        fields = (
+            'id', 'order_code', 'product_name', 'quantity', 'listed_unit_price',
+            'seller_amount', 'commission_pct', 'commission_amount', 'available_at',
+            'status', 'created_at',
+        )
+        read_only_fields = fields
+
+
+class TraderWithdrawalSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = TraderWithdrawal
+        fields = (
+            'id', 'amount', 'fee', 'payout_amount', 'payout_method', 'payout_provider',
+            'payout_account_name', 'payout_account_number', 'payout_branch', 'status',
+            'transfer_reference', 'admin_note', 'processed_at', 'created_at',
+        )
+        read_only_fields = fields
+
+
+class AdminTraderWithdrawalSerializer(TraderWithdrawalSerializer):
+    trader_name = serializers.CharField(source='trader.business_name', read_only=True)
+    trader_email = serializers.EmailField(source='trader.email', read_only=True)
+
+    class Meta(TraderWithdrawalSerializer.Meta):
+        fields = TraderWithdrawalSerializer.Meta.fields + ('trader_name', 'trader_email')
 
 
 class TraderOrderItemSerializer(serializers.ModelSerializer):

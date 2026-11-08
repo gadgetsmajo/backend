@@ -6,8 +6,9 @@ from .views import (
     TraderSaleListView, TraderExpenseListView,
     TraderInventoryListView, TraderInventoryItemDetailView, TraderStockMovementView,
     TraderOrderListView, TraderOrderItemUpdateView,
-    TraderAccountView,
+    TraderAccountView, TraderWalletView,
     AdminTraderListView, AdminTraderDetailView,
+    AdminTraderFinanceView, AdminTraderWithdrawalUpdateView,
     AdminTraderApproveView, AdminTraderRejectView,
     AdminTraderDocumentView,
 )
@@ -30,11 +31,14 @@ urlpatterns = [
     path('<uuid:trader_uuid>/inventory/<int:pk>/',                      TraderInventoryItemDetailView.as_view(), name='trader-inventory-item'),
     path('<uuid:trader_uuid>/inventory/<int:pk>/movements/',            TraderStockMovementView.as_view(),     name='trader-stock-movement'),
     path('<uuid:trader_uuid>/account/',                                 TraderAccountView.as_view(),           name='trader-account'),
+    path('<uuid:trader_uuid>/wallet/',                                  TraderWalletView.as_view(),            name='trader-wallet'),
     path('<uuid:trader_uuid>/orders/',                                  TraderOrderListView.as_view(),         name='trader-orders'),
     path('<uuid:trader_uuid>/orders/<int:pk>/',                         TraderOrderItemUpdateView.as_view(),   name='trader-order-item-update'),
 
     # Admin
     path('admin/',                                                      AdminTraderListView.as_view(),         name='admin-trader-list'),
+    path('admin/finance/',                                              AdminTraderFinanceView.as_view(),      name='admin-trader-finance'),
+    path('admin/withdrawals/<int:pk>/',                                 AdminTraderWithdrawalUpdateView.as_view(), name='admin-trader-withdrawal-update'),
     path('admin/<int:pk>/documents/<str:document_type>/',              AdminTraderDocumentView.as_view(),      name='admin-trader-document'),
     path('admin/<int:pk>/',                                             AdminTraderDetailView.as_view(),       name='admin-trader-detail'),
     path('admin/<int:pk>/approve/',                                     AdminTraderApproveView.as_view(),      name='admin-trader-approve'),

@@ -54,6 +54,12 @@ class TraderApplication(models.Model):
     bio          = models.TextField(blank=True, help_text='Short business description shown on store')
     is_visible   = models.BooleanField(default=True, help_text='If False, all trader products are hidden from store')
     is_closed    = models.BooleanField(default=False, help_text='Trader has closed their shop (soft close)')
+    PAYOUT_METHODS = [('mobile_money', 'Mobile Money'), ('bank', 'Bank')]
+    payout_method = models.CharField(max_length=20, choices=PAYOUT_METHODS, blank=True)
+    payout_provider = models.CharField(max_length=100, blank=True)
+    payout_account_name = models.CharField(max_length=150, blank=True)
+    payout_account_number = models.CharField(max_length=50, blank=True)
+    payout_branch = models.CharField(max_length=150, blank=True)
 
     # Agreement
     agreed_to_terms = models.BooleanField(default=False)
@@ -232,3 +238,68 @@ class TraderOrderItem(models.Model):
 
     def __str__(self):
         return f'{self.trader.business_name} — item {self.order_item_id} [{self.status}]'
+
+
+class TraderEarning(models.Model):
+    STATUS_CHOICES = [('active', 'Active'), ('reversed', 'Reversed')]
+    trader = models.ForeignKey(TraderApplication, on_delete=models.PROTECT, related_name='earnings')
+    order = models.ForeignKey('orders.Order', on_delete=models.SET_NULL, null=True, blank=True, related_name='trader_earnings')
+    order_item = models.OneToOneField(
+        'orders.OrderItem',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='trader_earning',
+    )
+    order_code = models.CharField(max_length=20)
+    product_name = models.CharField(max_length=255)
+    quantity = models.PositiveIntegerField()
+    listed_unit_price = models.DecimalField(max_digits=12, decimal_places=2)
+    seller_amount = models.DecimalField(max_digits=14, decimal_places=2)
+    commission_pct = models.DecimalField(max_digits=5, decimal_places=2, default=0)
+    commission_amount = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    available_at = models.DateTimeField()
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='active')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f'{self.trader.business_name} — {self.order_code}: {self.seller_amount}'
+
+
+class TraderWithdrawal(models.Model):
+    STATUS_CHOICES = [
+        ('requested', 'Requested'),
+        ('processing', 'Processing'),
+        ('paid', 'Paid'),
+        ('rejected', 'Rejected'),
+    ]
+    trader = models.ForeignKey(TraderApplication, on_delete=models.PROTECT, related_name='withdrawals')
+    amount = models.DecimalField(max_digits=14, decimal_places=2)
+    fee = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    payout_amount = models.DecimalField(max_digits=14, decimal_places=2)
+    payout_method = models.CharField(max_length=20, choices=TraderApplication.PAYOUT_METHODS)
+    payout_provider = models.CharField(max_length=100)
+    payout_account_name = models.CharField(max_length=150)
+    payout_account_number = models.CharField(max_length=50)
+    payout_branch = models.CharField(max_length=150, blank=True)
+    status = models.CharField(max_length=12, choices=STATUS_CHOICES, default='requested')
+    transfer_reference = models.CharField(max_length=100, blank=True)
+    admin_note = models.TextField(blank=True)
+    processed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='processed_trader_withdrawals',
+    )
+    processed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f'{self.trader.business_name} — {self.payout_amount} ({self.status})'

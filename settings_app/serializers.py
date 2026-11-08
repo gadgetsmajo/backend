@@ -8,7 +8,7 @@ class PlatformSettingsSerializer(serializers.ModelSerializer):
         fields = (
             'ui_active', 'allow_selling',
             'initial_charge', 'commission',
-            'withdrawal_minimum', 'withdrawal_fee',
+            'withdrawal_minimum', 'withdrawal_fee', 'payout_hold_days',
             'vat', 'free_delivery_threshold',
         )
 

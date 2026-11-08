@@ -9,6 +9,7 @@ class PlatformSettings(models.Model):
     commission = models.DecimalField(max_digits=5, decimal_places=2, default=0)
     withdrawal_minimum = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     withdrawal_fee = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    payout_hold_days = models.PositiveSmallIntegerField(default=5)
     vat = models.DecimalField(max_digits=5, decimal_places=2, default=0)
     free_delivery_threshold = models.DecimalField(max_digits=12, decimal_places=2, default=0)
 

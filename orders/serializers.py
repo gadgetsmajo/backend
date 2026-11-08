@@ -3,7 +3,7 @@ from .models import Order, OrderItem, ServiceRating, Payment, ReturnRequest
 from products.models import Product
 from products.serializers import ProductSerializer
 from settings_app.models import District, PlatformSettings
-from settings_app.pricing import price_with_platform_charges
+from settings_app.pricing import platform_commission_amount, price_with_platform_charges
 from users.models import CartItem
 
 
@@ -131,6 +131,12 @@ class OrderSerializer(serializers.ModelSerializer):
                     product=product,
                     quantity=cart_item.quantity,
                     price=item_prices[product.pk],
+                    seller_price=product.price,
+                    platform_commission_pct=platform_settings.commission,
+                    platform_commission=platform_commission_amount(
+                        product.price,
+                        platform_settings,
+                    ) * cart_item.quantity,
                 )
             CartItem.objects.filter(pk__in=[item.pk for item in cart_items]).delete()
 

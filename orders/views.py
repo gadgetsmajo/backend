@@ -399,6 +399,8 @@ class AdminReturnRequestRefundedView(APIView):
                 return_request.status = 'refunded'
                 return_request.admin_note = 'Refund confirmed as processed to the original payment method.'
                 return_request.save(update_fields=['status', 'admin_note', 'updated_at'])
+                from traders.wallet import reverse_order_earnings
+                reverse_order_earnings(return_request.order)
         except ReturnRequest.DoesNotExist:
             return Response({'detail': 'Return request not found.'}, status=status.HTTP_404_NOT_FOUND)
         _notify(
@@ -832,6 +834,8 @@ class PesapalIPNView(APIView):
                 if order:
                     if mapped == 'completed' and order.status in ('pending', 'processing'):
                         # This is the first completed transition because completed payments return above.
+                        from traders.wallet import record_paid_order_earnings
+                        record_paid_order_earnings(order)
                         for item in order.items.select_related('product').all():
                             if item.product:
                                 Product.objects.filter(pk=item.product.pk).update(

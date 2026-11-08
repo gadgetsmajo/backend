@@ -1,4 +1,5 @@
 from datetime import timedelta
+from decimal import Decimal, InvalidOperation
 from urllib.request import urlopen
 import json
 import logging
@@ -8,6 +9,8 @@ import os
 from cloudinary.utils import cloudinary_url, private_download_url
 from django.conf import settings
 from django.core.serializers.json import DjangoJSONEncoder
+from django.db import transaction
+from django.db.models import Sum
 from django.http import HttpResponse
 from django.db.models import Avg, Count, F, Q
 from orders.models import OrderItem
@@ -16,14 +19,21 @@ from rest_framework import generics, permissions, status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from django.utils import timezone
-from .models import TraderApplication, TraderFollower, TraderProduct, TraderSale, TraderExpense, TraderOrderItem, TraderInventoryItem, TraderStockMovement
+from .models import (
+    TraderApplication, TraderFollower, TraderProduct, TraderSale, TraderExpense,
+    TraderOrderItem, TraderInventoryItem, TraderStockMovement, TraderEarning,
+    TraderWithdrawal,
+)
 from .agreement import AGREEMENT_VERSION, build_agreement_document
 from .serializers import (
     TraderApplicationSerializer, TraderApplicationAdminSerializer,
     TraderAgreementSignatureSerializer,
+    TraderPayoutAccountSerializer,
     TraderProductSerializer, TraderSaleSerializer, TraderExpenseSerializer,
     TraderOrderItemSerializer, TraderInventoryItemSerializer, TraderStockMovementSerializer,
+    TraderEarningSerializer, TraderWithdrawalSerializer, AdminTraderWithdrawalSerializer,
 )
+from .wallet import eligible_earnings, wallet_summary
 
 MAX_TRADER_DOCUMENT_SIZE = 10 * 1024 * 1024
 logger = logging.getLogger(__name__)
@@ -506,6 +516,84 @@ class AdminTraderDetailView(generics.RetrieveAPIView):
     permission_classes = (permissions.IsAdminUser,)
 
 
+class AdminTraderFinanceView(APIView):
+    permission_classes = (permissions.IsAdminUser,)
+
+    def get(self, request):
+        now = timezone.now()
+        commission_items = OrderItem.objects.filter(
+            order__payment__status='completed',
+        ).exclude(
+            order__status='cancelled',
+        ).exclude(
+            order__return_request__status='refunded',
+        )
+        total_commission = commission_items.aggregate(total=Sum('platform_commission'))['total'] or Decimal('0.00')
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        month_commission = commission_items.filter(
+            order__created_at__gte=month_start,
+        ).aggregate(total=Sum('platform_commission'))['total'] or Decimal('0.00')
+
+        total_earned = Decimal('0.00')
+        locked_balance = Decimal('0.00')
+        available_balance = Decimal('0.00')
+        for trader in TraderApplication.objects.all():
+            summary = wallet_summary(trader, now)
+            total_earned += summary['total_earned']
+            locked_balance += summary['locked_balance']
+            available_balance += summary['available_balance']
+
+        withdrawals = TraderWithdrawal.objects.filter(
+            status__in=('requested', 'processing'),
+        ).select_related('trader')
+        return Response({
+            'total_commission': str(total_commission),
+            'commission_this_month': str(month_commission),
+            'trader_earnings': str(total_earned),
+            'locked_balance': str(locked_balance),
+            'available_balance': str(available_balance),
+            'withdrawals': AdminTraderWithdrawalSerializer(withdrawals, many=True).data,
+        })
+
+
+class AdminTraderWithdrawalUpdateView(APIView):
+    permission_classes = (permissions.IsAdminUser,)
+
+    def post(self, request, pk):
+        new_status = request.data.get('status')
+        if new_status not in ('processing', 'paid', 'rejected'):
+            return Response(
+                {'detail': 'Status must be processing, paid, or rejected.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if new_status == 'paid' and not str(request.data.get('transfer_reference', '')).strip():
+            return Response(
+                {'transfer_reference': 'Enter the bank or mobile money transfer reference.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            with transaction.atomic():
+                withdrawal = TraderWithdrawal.objects.select_for_update().select_related('trader').get(pk=pk)
+                if withdrawal.status not in ('requested', 'processing'):
+                    return Response(
+                        {'detail': 'Only requested or processing withdrawals can be updated.'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                withdrawal.status = new_status
+                withdrawal.admin_note = str(request.data.get('admin_note', '')).strip()[:1000]
+                withdrawal.processed_by = request.user
+                withdrawal.processed_at = timezone.now()
+                if new_status == 'paid':
+                    withdrawal.transfer_reference = str(request.data['transfer_reference']).strip()[:100]
+                withdrawal.save(update_fields=(
+                    'status', 'admin_note', 'processed_by', 'processed_at',
+                    'transfer_reference',
+                ))
+        except TraderWithdrawal.DoesNotExist:
+            return Response({'detail': 'Withdrawal not found.'}, status=status.HTTP_404_NOT_FOUND)
+        return Response(AdminTraderWithdrawalSerializer(withdrawal).data)
+
+
 class AdminTraderDocumentView(APIView):
     permission_classes = (permissions.IsAdminUser,)
 
@@ -798,6 +886,20 @@ class TraderAccountView(APIView):
         if not trader:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
 
+        payout_fields = (
+            'payout_method', 'payout_provider', 'payout_account_name',
+            'payout_account_number', 'payout_branch',
+        )
+        if any(field in request.data for field in payout_fields):
+            payout_data = {
+                field: request.data.get(field, getattr(trader, field))
+                for field in payout_fields
+            }
+            payout_serializer = TraderPayoutAccountSerializer(data=payout_data)
+            payout_serializer.is_valid(raise_exception=True)
+            for field, value in payout_serializer.validated_data.items():
+                setattr(trader, field, value.strip() if isinstance(value, str) else value)
+
         allowed = ('business_name', 'bio', 'phone', 'location', 'district', 'website', 'is_visible', 'is_closed')
         for field in allowed:
             if field in request.data:
@@ -831,6 +933,108 @@ class TraderAccountView(APIView):
         Product.objects.filter(trader=trader).update(is_active=False)
         trader.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class TraderWalletView(APIView):
+    permission_classes = (permissions.IsAuthenticated,)
+
+    def _get_trader(self, trader_uuid, user):
+        trader = _get_trader_by_uuid(trader_uuid)
+        if not trader or (trader.email != user.email and not user.is_staff):
+            return None
+        return trader
+
+    def get(self, request, trader_uuid):
+        trader = self._get_trader(trader_uuid, request.user)
+        if not trader:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        from settings_app.models import PlatformSettings
+        settings = PlatformSettings.get()
+        summary = wallet_summary(trader)
+        earnings = TraderEarning.objects.filter(trader=trader).order_by('-created_at')[:100]
+        withdrawals = trader.withdrawals.all()[:50]
+        data = {
+            key: str(value) if isinstance(value, Decimal) else value
+            for key, value in summary.items()
+        }
+        data.update({
+            'payout_minimum': str(settings.withdrawal_minimum),
+            'withdrawal_fee': str(settings.withdrawal_fee),
+            'payout_hold_days': settings.payout_hold_days,
+            'payout_account': {
+                'method': trader.payout_method,
+                'provider': trader.payout_provider,
+                'account_name': trader.payout_account_name,
+                'account_number': trader.payout_account_number,
+                'branch': trader.payout_branch,
+            },
+            'earnings': TraderEarningSerializer(earnings, many=True).data,
+            'withdrawals': TraderWithdrawalSerializer(withdrawals, many=True).data,
+        })
+        return Response(data)
+
+    def post(self, request, trader_uuid):
+        with transaction.atomic():
+            trader = TraderApplication.objects.select_for_update().filter(
+                uuid=trader_uuid,
+                status='approved',
+            ).filter(
+                Q(agreement_required=False) | Q(agreement_signed_at__isnull=False)
+            ).first()
+            if not trader:
+                return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+            if trader.email != request.user.email and not request.user.is_staff:
+                return Response({'detail': 'Forbidden.'}, status=status.HTTP_403_FORBIDDEN)
+            if not all((
+                trader.payout_method,
+                trader.payout_provider,
+                trader.payout_account_name,
+                trader.payout_account_number,
+            )):
+                return Response(
+                    {'detail': 'Save a complete bank or mobile money payout account first.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            try:
+                amount = Decimal(str(request.data.get('amount', ''))).quantize(Decimal('0.01'))
+            except (InvalidOperation, TypeError, ValueError):
+                return Response({'amount': 'Enter a valid withdrawal amount.'}, status=status.HTTP_400_BAD_REQUEST)
+            if not amount.is_finite() or amount <= 0:
+                return Response({'amount': 'Withdrawal amount must be greater than zero.'}, status=status.HTTP_400_BAD_REQUEST)
+
+            from settings_app.models import PlatformSettings
+            settings = PlatformSettings.get()
+            if amount < settings.withdrawal_minimum:
+                return Response(
+                    {'amount': f'Minimum withdrawal is UGX {settings.withdrawal_minimum:,.2f}.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            fee = settings.withdrawal_fee
+            if fee >= amount:
+                return Response(
+                    {'amount': 'Withdrawal must be greater than the configured withdrawal fee.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            available = wallet_summary(trader)['available_balance']
+            if amount > available:
+                return Response(
+                    {'amount': f'Only UGX {available:,.2f} is currently available to withdraw.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            withdrawal = TraderWithdrawal.objects.create(
+                trader=trader,
+                amount=amount,
+                fee=fee,
+                payout_amount=amount - fee,
+                payout_method=trader.payout_method,
+                payout_provider=trader.payout_provider,
+                payout_account_name=trader.payout_account_name,
+                payout_account_number=trader.payout_account_number,
+                payout_branch=trader.payout_branch,
+            )
+        return Response(TraderWithdrawalSerializer(withdrawal).data, status=status.HTTP_201_CREATED)
 
 
 # ── Trader: orders ────────────────────────────────────────────────────────────
