@@ -96,6 +96,43 @@ class ProductRecommendationsAPITest(TestCase):
         self.assertEqual(second_page.status_code, 200)
         self.assertEqual(len(second_page.data['results']), 2)
 
+    def test_inactive_products_are_hidden_from_public_catalog_but_visible_to_staff(self):
+        client = APIClient()
+        inactive_product = Product.objects.create(
+            name='Inactive Product',
+            slug='inactive-product',
+            category=self.phone_category,
+            price=10000,
+            stock=5,
+            is_active=False,
+        )
+
+        public_list = client.get(reverse('product-list'))
+        public_detail = client.get(
+            reverse('product-detail-by-slug', kwargs={'slug': inactive_product.slug})
+        )
+
+        self.assertEqual(public_list.status_code, 200)
+        self.assertNotIn(inactive_product.id, [item['id'] for item in public_list.data['results']])
+        self.assertEqual(public_detail.status_code, 404)
+
+        staff = User.objects.create_user(
+            email='catalog-admin@example.com',
+            password='strong-pass-123',
+            name='Catalog Admin',
+            is_staff=True,
+        )
+        client.force_authenticate(user=staff)
+
+        staff_list = client.get(reverse('product-list'))
+        staff_detail = client.get(
+            reverse('product-detail-by-slug', kwargs={'slug': inactive_product.slug})
+        )
+
+        self.assertEqual(staff_list.status_code, 200)
+        self.assertIn(inactive_product.id, [item['id'] for item in staff_list.data['results']])
+        self.assertEqual(staff_detail.status_code, 200)
+
 
 class ProductCommissionPricingAPITest(TestCase):
     def setUp(self):

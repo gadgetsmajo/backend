@@ -122,6 +122,8 @@ class ProductListView(generics.ListCreateAPIView):
 
     def get_queryset(self):
         qs = Product.objects.all().select_related('category', 'trader', 'trader_product__trader').prefetch_related('images')
+        if not self.request.user.is_staff:
+            qs = qs.filter(is_active=True)
         category = self.request.query_params.get('category')
         if category:
             qs = qs.filter(category__slug=category)
@@ -157,6 +159,12 @@ class ProductDetailView(generics.RetrieveUpdateDestroyAPIView):
     queryset = Product.objects.all().select_related('category', 'trader', 'trader_product__trader').prefetch_related('images')
     serializer_class = ProductSerializer
     permission_classes = (IsAdminOrReadOnly,)
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        if not self.request.user.is_staff:
+            queryset = queryset.filter(is_active=True)
+        return queryset
 
     def perform_update(self, serializer):
         cover = self.request.FILES.get('image')
@@ -230,6 +238,12 @@ class ProductSlugDetailView(generics.RetrieveAPIView):
     permission_classes = (IsAdminOrReadOnly,)
     lookup_field = 'slug'
     lookup_url_kwarg = 'slug'
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        if not self.request.user.is_staff:
+            queryset = queryset.filter(is_active=True)
+        return queryset
 
     def retrieve(self, request, *args, **kwargs):
         instance = self.get_object()
