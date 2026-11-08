@@ -429,6 +429,9 @@ class TraderInventoryStockSyncTests(TestCase):
 			Product.objects.filter(trader=self.trader, name__iexact=self.product.name).count(),
 			1,
 		)
+		public_response = self.client.get(reverse('product-detail', args=[public_product.id]))
+		self.assertEqual(public_response.status_code, 200)
+		self.assertEqual(public_response.data['stock'], 12)
 
 	def test_trader_products_expose_the_linked_public_product_id(self):
 		public_product = Product.objects.create(
