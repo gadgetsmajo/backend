@@ -11,7 +11,8 @@ from .models import Order, ServiceRating, Payment, ReturnRequest
 from .serializers import OrderSerializer, ServiceRatingSerializer, PaymentSerializer, ReturnRequestSerializer, AdminReturnRequestSerializer
 from .tasks import send_product_rating_notifications
 from users.models import CartItem, Notification
-from settings_app.models import District
+from settings_app.models import District, PlatformSettings
+from settings_app.pricing import price_with_platform_charges
 from products.models import Product
 from users.emails import (
     send_admin_new_order_email,
@@ -131,6 +132,7 @@ class CartQuoteView(APIView):
         items = []
         subtotal = 0
         product_delivery_total = 0
+        platform_settings = PlatformSettings.get()
         for product_id, quantity, cart_item_id in requested_items:
             product = products[product_id]
             if quantity > product.stock:
@@ -138,14 +140,15 @@ class CartQuoteView(APIView):
                     {'detail': f'Not enough stock for "{product.name}". Available: {product.stock}.'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-            line_total = product.price * quantity
+            product_price = price_with_platform_charges(product.price, platform_settings)
+            line_total = product_price * quantity
             subtotal += line_total
             product_delivery_total += product.delivery_fee
             items.append({
                 'id': cart_item_id or product_id,
                 'product_id': product_id,
                 'product_name': product.name,
-                'product_price': product.price,
+                'product_price': product_price,
                 'product_image': product.image.url if product.image else None,
                 'product_slug': product.slug,
                 'product_category': product.category.name if product.category else '',

@@ -16,6 +16,7 @@ from rest_framework.test import APIClient
 from users import emails
 from users.models import CartItem, EmailMfaChallenge, EmailMfaTrustedDevice, SupportConversation, SupportMessage
 from products.models import Product
+from settings_app.models import PlatformSettings
 
 User = get_user_model()
 
@@ -258,6 +259,60 @@ class CartApiPriceIntegrityTests(TestCase):
         self.assertEqual(response.data['product_price'], '7500.00')
         self.assertEqual(response.data['product_slug'], product.slug)
         self.assertEqual(response.data['quantity'], 2)
+
+    def test_commission_updates_existing_cart_items(self):
+        user = User.objects.create_user(
+            email='cart-commission@example.com',
+            name='Cart Commission',
+            password='secure-password',
+        )
+        product = Product.objects.create(name='Existing Cart Product', price='100.00', stock=4)
+        item = CartItem.objects.create(
+            user=user,
+            product_id=product.id,
+            product_name=product.name,
+            product_price='100.00',
+            product_slug=product.slug,
+            quantity=1,
+        )
+        settings = PlatformSettings.get()
+        settings.commission = '10.00'
+        settings.save()
+        client = APIClient()
+        client.force_authenticate(user=user)
+
+        response = client.get('/api/auth/cart/')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data[0]['product_price'], '110.00')
+        item.refresh_from_db()
+        self.assertEqual(item.product_price, Decimal('100.00'))
+
+    def test_commission_updates_existing_wishlist_items(self):
+        user = User.objects.create_user(
+            email='wishlist-commission@example.com',
+            name='Wishlist Commission',
+            password='secure-password',
+        )
+        product = Product.objects.create(name='Wishlisted Product', price='100.00', stock=4)
+        client = APIClient()
+        client.force_authenticate(user=user)
+        added = client.post('/api/auth/wishlist/', {
+            'product_id': product.id,
+            'product_name': product.name,
+            'product_price': '100.00',
+            'product_slug': product.slug,
+        }, format='json')
+        self.assertEqual(added.status_code, 201)
+
+        settings = PlatformSettings.get()
+        settings.commission = '10.00'
+        settings.save()
+
+        response = client.get('/api/auth/wishlist/')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data[0]['product_price'], '110.00')
 
 
 class ProfilePasswordFlowTests(TestCase):

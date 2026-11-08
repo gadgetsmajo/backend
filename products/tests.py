@@ -5,6 +5,7 @@ from rest_framework.test import APIClient
 
 from orders.models import Order, OrderItem
 from products.models import Category, FlashSale, Product, ProductReview
+from settings_app.models import PlatformSettings
 from traders.models import TraderApplication
 
 User = get_user_model()
@@ -74,6 +75,7 @@ class ProductRecommendationsAPITest(TestCase):
         self.assertEqual(product_ids[:2], [self.purchased_product.id, self.related_product.id])
         self.assertNotIn(self.other_product.id, product_ids)
 
+
     def test_product_list_honors_page_size_and_returns_next_page(self):
         for index in range(3):
             Product.objects.create(
@@ -91,6 +93,49 @@ class ProductRecommendationsAPITest(TestCase):
         second_page = self.client.get(reverse('product-list'), {'page': 2, 'page_size': 2})
         self.assertEqual(second_page.status_code, 200)
         self.assertEqual(len(second_page.data['results']), 2)
+
+
+class ProductCommissionPricingAPITest(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.category = Category.objects.create(name='Accessories', slug='accessories')
+        self.existing_product = Product.objects.create(
+            name='Existing Product',
+            category=self.category,
+            price='100.00',
+            stock=5,
+        )
+
+    def test_current_commission_applies_to_products_added_before_and_after_setting(self):
+        list_before_setting = self.client.get(reverse('product-list'))
+        detail_before_setting = self.client.get(
+            reverse('product-detail', args=[self.existing_product.id])
+        )
+        self.assertEqual(list_before_setting.data['results'][0]['price'], '100.00')
+        self.assertEqual(detail_before_setting.data['price'], '100.00')
+
+        settings = PlatformSettings.get()
+        settings.commission = '10.00'
+        settings.save()
+        new_product = Product.objects.create(
+            name='New Product',
+            category=self.category,
+            price='200.00',
+            stock=5,
+        )
+
+        response = self.client.get(reverse('product-list'))
+
+        self.assertEqual(response.status_code, 200)
+        prices = {item['id']: item['price'] for item in response.data['results']}
+        self.assertEqual(prices[self.existing_product.id], '110.00')
+        self.assertEqual(prices[new_product.id], '220.00')
+        detail_after_setting = self.client.get(
+            reverse('product-detail', args=[self.existing_product.id])
+        )
+        self.assertEqual(detail_after_setting.data['price'], '110.00')
+        self.existing_product.refresh_from_db()
+        self.assertEqual(self.existing_product.price, 100)
 
 
 class FlashSalePermissionAPITest(TestCase):

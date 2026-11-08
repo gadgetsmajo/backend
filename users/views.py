@@ -25,6 +25,8 @@ from .emails import send_cart_reminder_email
 from .sms import send_welcome_sms
 from .authentication import requires_email_mfa
 from products.models import Product
+from settings_app.models import PlatformSettings
+from settings_app.pricing import price_with_platform_charges
 
 User = get_user_model()
 logger = logging.getLogger(__name__)
@@ -907,7 +909,7 @@ class CartView(APIView):
 
             canonical_values = {
                 'product_name': product.name,
-                'product_price': product.price,
+                'product_price': price_with_platform_charges(product.price),
                 'product_image': product.image.url if product.image else None,
                 'product_slug': product.slug,
                 'product_category': product.category.name if product.category else '',
@@ -951,7 +953,7 @@ class CartItemView(APIView):
                 )
             item.quantity = quantity
             item.product_name = product.name
-            item.product_price = product.price
+            item.product_price = price_with_platform_charges(product.price)
             item.product_image = product.image.url if product.image else None
             item.product_slug = product.slug
             item.product_category = product.category.name if product.category else ''
@@ -980,25 +982,32 @@ class CartReminderView(APIView):
             if not cart_items:
                 return Response({'sent': False, 'reason': 'empty_cart'})
 
-            delivery_fees = dict(
-                Product.objects.filter(
+            products = {
+                product.pk: product
+                for product in Product.objects.filter(
                     id__in=[item.product_id for item in cart_items]
-                ).values_list('id', 'delivery_fee')
-            )
+                )
+            }
             items = []
             fingerprint_data = []
             subtotal = 0
             delivery = 0
+            platform_settings = PlatformSettings.get()
             for item in cart_items:
-                item_delivery = delivery_fees.get(item.product_id, 0)
-                subtotal += item.product_price * item.quantity
+                product = products.get(item.product_id)
+                item_price = price_with_platform_charges(
+                    product.price if product else item.product_price,
+                    platform_settings,
+                )
+                item_delivery = product.delivery_fee if product else 0
+                subtotal += item_price * item.quantity
                 delivery += item_delivery
                 items.append({
                     'name': item.product_name,
                     'image': item.product_image or '',
                     'slug': item.product_slug,
                     'quantity': item.quantity,
-                    'price': item.product_price,
+                    'price': item_price,
                     'delivery_fee': item_delivery,
                 })
                 fingerprint_data.append({
@@ -1007,7 +1016,7 @@ class CartReminderView(APIView):
                     'image': item.product_image or '',
                     'slug': item.product_slug,
                     'quantity': item.quantity,
-                    'price': str(item.product_price),
+                    'price': str(item_price),
                     'delivery_fee': str(item_delivery),
                     'added_at': item.added_at.isoformat(),
                 })

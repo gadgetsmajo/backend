@@ -24,7 +24,6 @@ from users.models import UserBehaviour
 
 
 CATEGORY_CACHE_TTL = 60 * 30  # 30 minutes
-FLASH_SALE_CACHE_TTL = 60 * 5  # 5 minutes
 
 
 class IsTraderProductOwner(permissions.BasePermission):
@@ -100,9 +99,6 @@ class CategoryDetailView(generics.RetrieveUpdateDestroyAPIView):
         cache.delete('categories:list')
 
 
-PRODUCT_CACHE_TTL = 60 * 15  # 15 minutes
-
-
 class ProductListView(generics.ListCreateAPIView):
     serializer_class = ProductSerializer
     permission_classes = (IsAdminOrReadOnly,)
@@ -137,38 +133,17 @@ class ProductListView(generics.ListCreateAPIView):
             qs = qs.order_by('-created_at')
         return qs
 
-    def list(self, request, *args, **kwargs):
-        if request.method != 'GET' or request.query_params:
-            return super().list(request, *args, **kwargs)
-        cached = cache.get('products:list')
-        if cached is not None:
-            return Response(cached)
-        response = super().list(request, *args, **kwargs)
-        cache.set('products:list', response.data, PRODUCT_CACHE_TTL)
-        return response
-
     def perform_create(self, serializer):
         cover = self.request.FILES.get('image')
         product = serializer.save(**(({'image': cover}) if cover else {}))
         for i, img in enumerate(self.request.FILES.getlist('images')):
             ProductImage.objects.create(product=product, image=img, order=i)
-        cache.delete('products:list')
 
 
 class ProductDetailView(generics.RetrieveUpdateDestroyAPIView):
     queryset = Product.objects.all().select_related('category', 'trader', 'trader_product__trader').prefetch_related('images')
     serializer_class = ProductSerializer
     permission_classes = (IsAdminOrReadOnly,)
-
-    def retrieve(self, request, *args, **kwargs):
-        pk = kwargs.get('pk')
-        cache_key = f'products:detail:{pk}'
-        cached = cache.get(cache_key)
-        if cached is not None:
-            return Response(cached)
-        response = super().retrieve(request, *args, **kwargs)
-        cache.set(cache_key, response.data, PRODUCT_CACHE_TTL)
-        return response
 
     def perform_update(self, serializer):
         cover = self.request.FILES.get('image')
@@ -178,12 +153,8 @@ class ProductDetailView(generics.RetrieveUpdateDestroyAPIView):
             start = product.images.count()
             for i, img in enumerate(files):
                 ProductImage.objects.create(product=product, image=img, order=start + i)
-        cache.delete(f'products:detail:{product.pk}')
-        cache.delete('products:list')
 
     def perform_destroy(self, instance):
-        cache.delete(f'products:detail:{instance.pk}')
-        cache.delete('products:list')
         instance.delete()
 
 
@@ -306,25 +277,8 @@ class FlashSaleListCreateView(generics.ListCreateAPIView):
             qs = qs.filter(is_active=True, ends_at__gt=timezone.now())
         return qs
 
-    def list(self, request, *args, **kwargs):
-        active = request.query_params.get('active')
-        trader = None
-        if request.user.is_authenticated and not request.user.is_staff:
-            trader = getattr(request.user, 'trader_application', None)
-        if trader:
-            cache_key = f"flashsales:trader:{trader.pk}:{'active' if active == '1' else 'all'}"
-        else:
-            cache_key = 'flashsales:active' if active == '1' else 'flashsales:all'
-        cached = cache.get(cache_key)
-        if cached is not None:
-            return Response(cached)
-        response = super().list(request, *args, **kwargs)
-        cache.set(cache_key, response.data, FLASH_SALE_CACHE_TTL)
-        return response
-
     def perform_create(self, serializer):
         serializer.save()
-        cache.delete_many(['flashsales:active', 'flashsales:all'])
 
 
 class FlashSaleDetailView(generics.RetrieveUpdateDestroyAPIView):
@@ -338,11 +292,9 @@ class FlashSaleDetailView(generics.RetrieveUpdateDestroyAPIView):
 
     def perform_update(self, serializer):
         serializer.save()
-        cache.delete_many(['flashsales:active', 'flashsales:all'])
 
     def perform_destroy(self, instance):
         instance.delete()
-        cache.delete_many(['flashsales:active', 'flashsales:all'])
 
 
 # ── Product Reviews ──────────────────────────────────────────────────────────

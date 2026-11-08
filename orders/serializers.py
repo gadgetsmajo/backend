@@ -2,7 +2,8 @@ from rest_framework import serializers
 from .models import Order, OrderItem, ServiceRating, Payment, ReturnRequest
 from products.models import Product
 from products.serializers import ProductSerializer
-from settings_app.models import District
+from settings_app.models import District, PlatformSettings
+from settings_app.pricing import price_with_platform_charges
 from users.models import CartItem
 
 
@@ -99,8 +100,16 @@ class OrderSerializer(serializers.ModelSerializer):
                         {'detail': f'Not enough stock for "{product.name}". Available: {product.stock}.'}
                     )
 
+            platform_settings = PlatformSettings.get()
+            item_prices = {
+                product_id: price_with_platform_charges(
+                    locked[product_id].price,
+                    platform_settings,
+                )
+                for product_id in product_ids
+            }
             subtotal = sum(
-                locked[item.product_id].price * item.quantity
+                item_prices[item.product_id] * item.quantity
                 for item in cart_items
             )
             delivery_fee = district.price
@@ -121,7 +130,7 @@ class OrderSerializer(serializers.ModelSerializer):
                     order=order,
                     product=product,
                     quantity=cart_item.quantity,
-                    price=product.price,
+                    price=item_prices[product.pk],
                 )
             CartItem.objects.filter(pk__in=[item.pk for item in cart_items]).delete()
 

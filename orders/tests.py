@@ -9,7 +9,7 @@ from rest_framework.test import APIClient
 from accounting.models import Refund as AccountingRefund
 from orders.models import Order, OrderItem, Payment, ReturnRequest
 from products.models import Product
-from settings_app.models import District
+from settings_app.models import District, PlatformSettings
 from users.models import CartItem, Notification
 
 User = get_user_model()
@@ -160,6 +160,33 @@ class OrderPricingSecurityTests(TestCase):
         self.assertEqual(response.data['subtotal'], Decimal('24000.00'))
         self.assertEqual(response.data['delivery_fee'], Decimal('2000.00'))
         self.assertEqual(response.data['total'], Decimal('26000.00'))
+
+    def test_current_commission_is_used_for_quotes_and_order_price_snapshots(self):
+        settings = PlatformSettings.get()
+        settings.commission = '10.00'
+        settings.save()
+
+        quote = self.client.post('/api/orders/quote/', {
+            'district_id': self.district.id,
+            'items': [{'product_id': self.product.id, 'quantity': 2}],
+        }, format='json')
+
+        self.assertEqual(quote.status_code, 200)
+        self.assertEqual(quote.data['items'][0]['product_price'], Decimal('13200.00'))
+        self.assertEqual(quote.data['subtotal'], Decimal('26400.00'))
+
+        response = self.client.post('/api/orders/', {
+            'district_id': self.district.id,
+            'phone': '+256700000000',
+        }, format='json')
+
+        self.assertEqual(response.status_code, 201, response.data)
+        order = Order.objects.get(pk=response.data['id'])
+        self.assertEqual(order.subtotal, Decimal('26400.00'))
+        self.assertEqual(order.total, Decimal('36400.00'))
+        self.assertEqual(order.items.get().price, Decimal('13200.00'))
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.price, Decimal('12000.00'))
 
     def test_order_ignores_client_items_address_and_delivery_amount(self):
         response = self.client.post('/api/orders/', {
