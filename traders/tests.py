@@ -433,6 +433,34 @@ class TraderInventoryStockSyncTests(TestCase):
 		self.assertEqual(public_response.status_code, 200)
 		self.assertEqual(public_response.data['stock'], 12)
 
+	def test_stock_movement_links_unowned_product_when_name_and_trader_image_match(self):
+		self.product.image = 'trader_products/soldering-iron.jpg'
+		self.product.save(update_fields=['image'])
+		public_product = Product.objects.create(
+			name=self.product.name,
+			price=self.product.price,
+			stock=0,
+			image='trader_products/soldering-iron.jpg',
+		)
+		self.product.refresh_from_db()
+		public_product.refresh_from_db()
+		self.assertEqual(str(self.product.image), str(public_product.image))
+		self.assertEqual(public_product.name.lower(), self.product.name.lower())
+		item = TraderInventoryItem.objects.create(
+			trader=self.trader, product=self.product, quantity=0, cost_price=15000,
+		)
+
+		response = self.client.post(
+			reverse('trader-stock-movement', args=[self.trader.uuid, item.id]),
+			{'type': 'in', 'quantity': 12},
+			format='json',
+		)
+
+		self.assertEqual(response.status_code, 200)
+		public_product.refresh_from_db()
+		self.assertEqual(public_product.trader_product, self.product)
+		self.assertEqual(public_product.stock, 12)
+
 	def test_trader_products_expose_the_linked_public_product_id(self):
 		public_product = Product.objects.create(
 			name='Public Inventory Product',

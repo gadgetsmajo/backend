@@ -346,6 +346,16 @@ def _sync_to_product(trader_product):
             trader_product__isnull=True,
             name__iexact=trader_product.name,
         ).order_by('pk')[:2])
+        if not legacy_products and trader_product.image:
+            unowned_products = Product.objects.filter(
+                trader__isnull=True,
+                trader_product__isnull=True,
+                name__iexact=trader_product.name,
+            ).order_by('pk')[:2]
+            legacy_products = [
+                candidate for candidate in unowned_products
+                if candidate.image and str(candidate.image) == str(trader_product.image)
+            ]
         if len(legacy_products) == 1:
             product = legacy_products[0]
             logger.info(
