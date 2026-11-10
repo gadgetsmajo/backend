@@ -709,6 +709,10 @@ class InitiatePaymentView(APIView):
             return Response({'detail': f'Pesapal setup failed: {str(e)}'}, status=status.HTTP_502_BAD_GATEWAY)
 
         try:
+            name_parts = request.user.name.split()
+            first_name = name_parts[0] if name_parts else 'Customer'
+            middle_name = ' '.join(name_parts[1:-1]) or 'N/A'
+            last_name = name_parts[-1] if len(name_parts) > 1 else first_name
             payload = {
                 'id': order.code,
                 'currency': 'UGX',
@@ -719,8 +723,9 @@ class InitiatePaymentView(APIView):
                 'billing_address': {
                     'email_address': request.user.email,
                     'phone_number': order.phone or request.user.phone,
-                    'first_name': request.user.name.split()[0],
-                    'last_name': ' '.join(request.user.name.split()[1:]) or request.user.name,
+                    'first_name': first_name,
+                    'middle_name': middle_name,
+                    'last_name': last_name,
                 },
             }
             resp = http_requests.post(
