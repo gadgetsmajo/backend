@@ -7,6 +7,7 @@ from rest_framework.test import APIClient
 
 from orders.models import Order, OrderItem
 from products.models import Category, FlashSale, Product, ProductReview
+from products.serializers import FlashSaleSerializer
 from settings_app.models import PlatformSettings
 from traders.models import TraderApplication, TraderProduct
 
@@ -504,3 +505,34 @@ class ProductReviewEligibilityAPITest(TestCase):
 
         self.assertEqual(response.status_code, 403)
         self.assertEqual(ProductReview.objects.count(), 1)
+
+
+class FlashSaleBasePricingSerializerTest(TestCase):
+    def test_base_prices_are_stored_and_responses_apply_platform_charges(self):
+        settings = PlatformSettings.get()
+        settings.commission = 10
+        settings.vat = 0
+        settings.save()
+
+        category = Category.objects.create(name='Accessories', slug='accessories')
+        product = Product.objects.create(
+            name='Headphones', category=category, price=100000, original_price=120000,
+            stock=5, is_active=True,
+        )
+        sale = FlashSale.objects.create(
+            product=product, flash_price=80000,
+            ends_at='2099-01-01T12:00:00Z', stock_limit=5,
+        )
+
+        data = FlashSaleSerializer(sale).data
+        self.assertEqual(data['product']['listed_price'], '100000.00')
+        self.assertEqual(data['product']['price'], '110000.00')
+        self.assertEqual(data['base_flash_price'], '80000.00')
+        self.assertEqual(data['flash_price'], '88000.00')
+
+        update = FlashSaleSerializer(sale, data={'flash_price': '90000.00'}, partial=True)
+        self.assertTrue(update.is_valid(), update.errors)
+        updated_sale = update.save()
+        self.assertEqual(updated_sale.flash_price, 90000)
+        self.assertEqual(update.data['base_flash_price'], '90000.00')
+        self.assertEqual(update.data['flash_price'], '99000.00')

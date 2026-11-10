@@ -184,6 +184,7 @@ class RatingSummarySerializer(serializers.Serializer):
 
 class FlashSaleSerializer(serializers.ModelSerializer):
     product = ProductSerializer(read_only=True)
+    base_flash_price = serializers.DecimalField(source='flash_price', max_digits=10, decimal_places=2, read_only=True)
     product_id = serializers.PrimaryKeyRelatedField(
         queryset=Product.objects.all(), source='product', write_only=True
     )
@@ -193,7 +194,7 @@ class FlashSaleSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = FlashSale
-        fields = ('id', 'product', 'product_id', 'flash_price', 'ends_at',
+        fields = ('id', 'product', 'product_id', 'flash_price', 'base_flash_price', 'ends_at',
                   'stock_limit', 'stock_sold', 'stock_left', 'is_active',
                   'is_expired', 'discount_pct', 'created_at')
         read_only_fields = ('id', 'stock_sold', 'created_at')
