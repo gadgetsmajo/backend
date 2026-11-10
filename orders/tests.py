@@ -51,8 +51,44 @@ class PesapalBillingNameTests(TestCase):
         self.assertEqual(response.status_code, 200)
         billing_address = mock_submit.call_args.kwargs['json']['billing_address']
         self.assertEqual(billing_address['first_name'], 'Jane')
-        self.assertEqual(billing_address['middle_name'], 'N/A')
+        self.assertEqual(billing_address['middle_name'], 'NA')
         self.assertEqual(billing_address['last_name'], 'Doe')
+
+    @override_settings(
+        PESAPAL_CONSUMER_KEY='test-key',
+        PESAPAL_CONSUMER_SECRET='test-secret',
+        PESAPAL_IPN_URL='https://example.com/ipn',
+        PESAPAL_CALLBACK_URL='https://example.com/callback',
+    )
+    def test_submit_payload_strips_disallowed_middle_name_characters(self):
+        user = User.objects.create_user(
+            email='mary@example.com', name='Jane Mary Ann/Lee Doe', password='Password123!',
+        )
+        order = Order.objects.create(
+            user=user,
+            code='PAYMENT-NAME-002',
+            status='pending',
+            total=25000,
+            delivery_address='Kampala, Uganda',
+            phone='+256700000000',
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=user)
+
+        with (
+            patch('orders.views._pesapal_token', return_value='pesapal-token'),
+            patch('orders.views._register_ipn', return_value='ipn-id'),
+            patch('orders.views.http_requests.post') as mock_submit,
+        ):
+            mock_submit.return_value.json.return_value = {
+                'redirect_url': 'https://pesapal.example/checkout',
+                'order_tracking_id': 'tracking-id',
+            }
+            response = self.client.post(f'/api/orders/{order.code}/pay/')
+
+        self.assertEqual(response.status_code, 200)
+        billing_address = mock_submit.call_args.kwargs['json']['billing_address']
+        self.assertEqual(billing_address['middle_name'], 'MaryAnnLee')
 
 
 class OrderDeliveryEmailTests(TestCase):

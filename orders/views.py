@@ -711,7 +711,11 @@ class InitiatePaymentView(APIView):
         try:
             name_parts = request.user.name.split()
             first_name = name_parts[0] if name_parts else 'Customer'
-            middle_name = ' '.join(name_parts[1:-1]) or 'N/A'
+            middle_name = ''.join(
+                character
+                for character in ' '.join(name_parts[1:-1])
+                if character.isascii() and (character.isalnum() or character in '-_.:')
+            ) or 'NA'
             last_name = name_parts[-1] if len(name_parts) > 1 else first_name
             payload = {
                 'id': order.code,
