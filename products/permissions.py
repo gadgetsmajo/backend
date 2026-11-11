@@ -11,7 +11,7 @@ class IsAdminOrReadOnly(BasePermission):
 
 
 class IsAdminOrProductOwnerOrReadOnly(BasePermission):
-    """Allow traders to update their own products while keeping other writes admin-only."""
+    """Allow traders to mutate their own products while keeping other writes admin-only."""
 
     def has_permission(self, request, view):
         if request.method in SAFE_METHODS:
@@ -23,7 +23,7 @@ class IsAdminOrProductOwnerOrReadOnly(BasePermission):
             return True
         if request.user.is_staff:
             return True
-        if request.method not in ('PUT', 'PATCH'):
+        if request.method not in ('PUT', 'PATCH', 'DELETE'):
             return False
 
         trader = getattr(request.user, 'trader_application', None)
