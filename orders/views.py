@@ -50,6 +50,16 @@ def _order_item_name(item) -> str:
     return f'{product_name} ({details})'
 
 
+def _pesapal_address_field(value, fallback='Kampala'):
+    normalized = ''.join(
+        character
+        if character.isascii() and (character.isalnum() or character in '-_.:')
+        else '_'
+        for character in value.strip()
+    )
+    return '_'.join(filter(None, normalized.split('_'))) or fallback
+
+
 def _notify(user, ntype: str, title: str, body: str):
     try:
         Notification.objects.create(user=user, type=ntype, title=title, body=body)
@@ -787,13 +797,7 @@ class InitiatePaymentView(APIView):
                     )
                     if part
                 ) or 'Kampala'
-            delivery_address = ''.join(
-                character
-                if character.isascii() and (character.isalnum() or character in '-_.:')
-                else '_'
-                for character in delivery_address
-            )
-            delivery_address = '_'.join(filter(None, delivery_address.split('_'))) or 'Kampala'
+            delivery_address = _pesapal_address_field(delivery_address)
             payload = {
                 'id': order.code,
                 'currency': 'UGX',
@@ -810,8 +814,8 @@ class InitiatePaymentView(APIView):
                     'last_name': last_name,
                     'line_1': delivery_address,
                     'line_2': 'NA',
-                    'city': request.user.district.strip() or 'Kampala',
-                    'state': request.user.region.strip(),
+                    'city': _pesapal_address_field(request.user.district),
+                    'state': _pesapal_address_field(request.user.region),
                     'postal_code': '',
                     'zip_code': '',
                 },

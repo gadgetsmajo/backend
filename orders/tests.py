@@ -67,7 +67,11 @@ class PesapalBillingNameTests(TestCase):
     )
     def test_submit_payload_sanitizes_address_line_1(self):
         user = User.objects.create_user(
-            email='address@example.com', name='Address Customer', password='Password123!',
+            email='address@example.com',
+            name='Address Customer',
+            password='Password123!',
+            region='Central Region',
+            district='Kampala / Central',
         )
         order = Order.objects.create(
             user=user,
@@ -95,7 +99,11 @@ class PesapalBillingNameTests(TestCase):
         billing_address = mock_submit.call_args.kwargs['json']['billing_address']
         self.assertEqual(billing_address['line_1'], 'Plot_12_O_Connell_Rd_Kampala')
         self.assertTrue(billing_address['line_2'])
+        self.assertEqual(billing_address['city'], 'Kampala_Central')
+        self.assertEqual(billing_address['state'], 'Central_Region')
         self.assertRegex(billing_address['line_1'], r'^[A-Za-z0-9._:-]+$')
+        self.assertRegex(billing_address['city'], r'^[A-Za-z0-9._:-]+$')
+        self.assertRegex(billing_address['state'], r'^[A-Za-z0-9._:-]+$')
 
     @override_settings(
         PESAPAL_CONSUMER_KEY='test-key',
