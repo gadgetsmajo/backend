@@ -67,9 +67,9 @@ class ExportOrdersView(APIView):
         ]
         orders = (
             Order.objects
+            .filter(payment__status='completed')
             .select_related('user')
             .prefetch_related('items')
-            .all()
         )
         rows = []
         for o in orders:

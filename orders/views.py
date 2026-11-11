@@ -24,6 +24,7 @@ from users.emails import (
     send_order_rating_email,
     send_payment_successful_email,
     send_payment_failed_email,
+    send_trader_paid_order_email,
     send_return_approved_email,
     send_refund_processed_email,
 )
@@ -82,6 +83,108 @@ def _restore_stock(order):
             ProductVariant.objects.filter(pk=item.variant_id).update(
                 stock=models.F('stock') + item.quantity
             )
+
+
+def _send_paid_order_followups(order_id, payment_method):
+    try:
+        order = Order.objects.select_related('user').prefetch_related(
+            'items__product__trader__user',
+            'items__product__trader_product__trader__user',
+        ).get(pk=order_id)
+    except Order.DoesNotExist:
+        logger.error('Cannot send paid-order notifications: order %s no longer exists', order_id)
+        return
+
+    order_items = list(order.items.all())
+    items = [
+        {
+            'name': _order_item_name(item),
+            'qty': item.quantity,
+            'price': f'{item.price:,.0f}',
+            'image': _product_image(item.product),
+        }
+        for item in order_items
+    ]
+
+    try:
+        send_admin_new_order_email(
+            order.code, order.user.name, order.user.email,
+            f'{order.total:,.0f}', items, order.delivery_address,
+        )
+    except Exception:
+        logger.exception('Failed to send paid order email for order %s', order.code)
+
+    _notify(
+        order.user, 'order', f'Payment Confirmed - Order #{order.code}',
+        f'Payment received! UGX {order.total:,.0f}. Your order is being prepared.',
+    )
+
+    from users.models import User as UserModel
+    item_summary = ', '.join(f'{item["qty"]}x {item["name"]}' for item in items)
+    for admin in UserModel.objects.filter(is_staff=True):
+        _notify(
+            admin, 'order', f'New Paid Order #{order.code}',
+            f'{order.user.name} paid for an order. Items: {item_summary}. Total: UGX {order.total:,.0f}.',
+        )
+
+    traders = {}
+    for item in order_items:
+        product = item.product
+        if not product:
+            continue
+        trader = product.trader
+        if trader is None and product.trader_product_id:
+            trader = product.trader_product.trader
+        if trader is None:
+            continue
+        entry = traders.setdefault(trader.pk, {'trader': trader, 'items': []})
+        entry['items'].append({
+            'name': _order_item_name(item),
+            'qty': item.quantity,
+            'price': f'{item.price:,.0f}',
+            'image': _product_image(product),
+        })
+
+    for entry in traders.values():
+        trader = entry['trader']
+        product_list = ', '.join(
+            f'{item["name"]} x{item["qty"]}' for item in entry['items']
+        )
+        if trader.user_id:
+            _notify(
+                trader.user, 'order', 'New Paid Order for Your Product!',
+                f'A customer paid for: {product_list}. Order #{order.code}.',
+            )
+        if trader.email:
+            try:
+                send_trader_paid_order_email(
+                    trader.business_name,
+                    trader.email,
+                    order.code,
+                    entry['items'],
+                    order.delivery_address,
+                    f'{settings.FRONTEND_URL.rstrip("/")}/trader/{trader.uuid}/orders',
+                )
+            except Exception:
+                logger.exception(
+                    'Failed to send paid order preparation email to trader %s for order %s',
+                    trader.pk, order.code,
+                )
+
+    try:
+        send_payment_successful_email(
+            order.user.name, order.user.email, order.code,
+            f'{order.total:,.0f}', items, payment_method,
+        )
+    except Exception:
+        logger.exception('Failed to send payment success email for order %s', order.code)
+
+
+def _get_paid_admin_order(code):
+    return Order.objects.filter(
+        code=code,
+        payment__status='completed',
+    ).select_related('user').first()
 
 
 PAYMENT_RATE_WINDOW = 60
@@ -521,7 +624,7 @@ class AdminOrderDetailView(generics.RetrieveAPIView):
     lookup_field = 'code'
 
     def get_queryset(self):
-        return Order.objects.prefetch_related('items__product')
+        return Order.objects.filter(payment__status='completed').prefetch_related('items__product')
 
 
 class AdminOrderListView(generics.ListAPIView):
@@ -529,7 +632,7 @@ class AdminOrderListView(generics.ListAPIView):
     permission_classes = (permissions.IsAdminUser,)
 
     def get_queryset(self):
-        qs = Order.objects.prefetch_related('items__product').exclude(
+        qs = Order.objects.filter(payment__status='completed').prefetch_related('items__product').exclude(
             return_request__status='refunded'
         ).order_by('-created_at')
         status_filter = self.request.query_params.get('status')
@@ -542,10 +645,9 @@ class AdminOrderConfirmView(APIView):
     permission_classes = (permissions.IsAdminUser,)
 
     def post(self, request, code):
-        try:
-            order = Order.objects.select_related('user').get(code=code)
-        except Order.DoesNotExist:
-            return Response({'detail': 'Order not found.'}, status=status.HTTP_404_NOT_FOUND)
+        order = _get_paid_admin_order(code)
+        if not order:
+            return Response({'detail': 'Paid order not found.'}, status=status.HTTP_404_NOT_FOUND)
 
         if order.status != 'pending':
             return Response({'detail': 'Only pending orders can be confirmed.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -566,10 +668,9 @@ class AdminOrderCancelView(APIView):
     permission_classes = (permissions.IsAdminUser,)
 
     def post(self, request, code):
-        try:
-            order = Order.objects.select_related('user').get(code=code)
-        except Order.DoesNotExist:
-            return Response({'detail': 'Order not found.'}, status=status.HTTP_404_NOT_FOUND)
+        order = _get_paid_admin_order(code)
+        if not order:
+            return Response({'detail': 'Paid order not found.'}, status=status.HTTP_404_NOT_FOUND)
 
         if order.status == 'delivered':
             return Response({'detail': 'Delivered orders cannot be cancelled.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -598,10 +699,9 @@ class AdminOrderShipView(APIView):
     permission_classes = (permissions.IsAdminUser,)
 
     def post(self, request, code):
-        try:
-            order = Order.objects.select_related('user').get(code=code)
-        except Order.DoesNotExist:
-            return Response({'detail': 'Order not found.'}, status=status.HTTP_404_NOT_FOUND)
+        order = _get_paid_admin_order(code)
+        if not order:
+            return Response({'detail': 'Paid order not found.'}, status=status.HTTP_404_NOT_FOUND)
 
         if order.status != 'processing':
             return Response({'detail': 'Only confirmed orders can be marked as shipped.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -621,10 +721,9 @@ class AdminOrderReadyForPickupView(APIView):
     permission_classes = (permissions.IsAdminUser,)
 
     def post(self, request, code):
-        try:
-            order = Order.objects.select_related('user').get(code=code)
-        except Order.DoesNotExist:
-            return Response({'detail': 'Order not found.'}, status=status.HTTP_404_NOT_FOUND)
+        order = _get_paid_admin_order(code)
+        if not order:
+            return Response({'detail': 'Paid order not found.'}, status=status.HTTP_404_NOT_FOUND)
 
         if order.status != 'shipped':
             return Response({'detail': 'Only shipped orders can be marked as ready for pickup.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -643,10 +742,9 @@ class AdminOrderDeliverView(APIView):
     permission_classes = (permissions.IsAdminUser,)
 
     def post(self, request, code):
-        try:
-            order = Order.objects.select_related('user').get(code=code)
-        except Order.DoesNotExist:
-            return Response({'detail': 'Order not found.'}, status=status.HTTP_404_NOT_FOUND)
+        order = _get_paid_admin_order(code)
+        if not order:
+            return Response({'detail': 'Paid order not found.'}, status=status.HTTP_404_NOT_FOUND)
 
         if order.status != 'ready_for_pickup':
             return Response({'detail': 'Only ready-for-pickup orders can be marked as delivered.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -945,45 +1043,10 @@ class PesapalIPNView(APIView):
                             order.status = 'processing'
                             order.save(update_fields=['status', 'updated_at'])
 
-                        items = [{'name': _order_item_name(i), 'qty': i.quantity, 'price': f'{i.price:,.0f}', 'image': _product_image(i.product)} for i in order.items.select_related('product').all()]
-                        try:
-                            send_admin_new_order_email(order.code, order.user.name, order.user.email, f'{order.total:,.0f}', items, order.delivery_address)
-                        except Exception:
-                            logger.exception('Failed to send paid order email for order %s', order.code)
-
-                        _notify(order.user, 'order', f'Payment Confirmed - Order #{order.code}',
-                                f'Payment received! UGX {order.total:,.0f}. Your order is being prepared.')
-
-                        from users.models import User as UserModel
-                        item_summary = ', '.join(f'{i["qty"]}x {i["name"]}' for i in items)
-                        for admin in UserModel.objects.filter(is_staff=True):
-                            _notify(admin, 'order', f'New Paid Order #{order.code}',
-                                    f'{order.user.name} paid for an order. Items: {item_summary}. Total: UGX {order.total:,.0f}.')
-
-                        order_items = order.items.select_related('product__trader__user').all()
-                        notified_traders: dict = {}
-                        for item in order_items:
-                            trader_app = getattr(item.product, 'trader', None)
-                            if not trader_app or not trader_app.user:
-                                continue
-                            tid = trader_app.id
-                            if tid not in notified_traders:
-                                notified_traders[tid] = {'user': trader_app.user, 'lines': []}
-                            notified_traders[tid]['lines'].append(f'{_order_item_name(item)} x{item.quantity}')
-                        for entry in notified_traders.values():
-                            product_list = ', '.join(entry['lines'])
-                            _notify(entry['user'], 'order', 'New Paid Order for Your Product!',
-                                    f'A customer paid for: {product_list}. Order #{order.code}.')
-
-                        try:
-                            items = [{'name': _order_item_name(i), 'qty': i.quantity, 'price': f'{i.price:,.0f}', 'image': _product_image(i.product)} for i in order.items.select_related('product').all()]
-                            send_payment_successful_email(
-                                order.user.name, order.user.email, order.code,
-                                f'{order.total:,.0f}', items,
-                                data.get('payment_method', ''),
-                            )
-                        except Exception:
-                            logger.exception('Failed to send payment success email for order %s', order.code)
+                        transaction.on_commit(
+                            lambda order_id=order.pk, method=data.get('payment_method', ''):
+                                _send_paid_order_followups(order_id, method)
+                        )
                     elif mapped in ('failed', 'invalid', 'cancelled') and order.status == 'pending':
                         order.status = 'cancelled'
                         order.cancel_reason = f'Payment {mapped}.'

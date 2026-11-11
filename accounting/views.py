@@ -5,7 +5,7 @@ from django.db.models import Sum, Count, Q
 from django.db.models.functions import TruncMonth
 from django.utils import timezone
 from datetime import date, timedelta
-from orders.models import Order, Payment
+from orders.models import Payment
 from products.models import Product
 from .models import (
     Supplier, Purchase, ExpenseCategory, Expense, Account, AccountTransfer,
@@ -35,10 +35,10 @@ class AccountingDashboardView(APIView):
         today = date.today()
         month_start = today.replace(day=1)
 
-        # Revenue — delivered orders total (source of truth for a COD business)
-        delivered_orders = Order.objects.filter(status='delivered')
-        total_revenue = delivered_orders.aggregate(t=Sum('total'))['t'] or 0
-        today_revenue = delivered_orders.filter(created_at__date=today).aggregate(t=Sum('total'))['t'] or 0
+        completed_payments = Payment.objects.filter(status='completed')
+        total_revenue = completed_payments.aggregate(t=Sum('amount'))['t'] or 0
+        today_payments = completed_payments.filter(updated_at__date=today)
+        today_revenue = today_payments.aggregate(t=Sum('amount'))['t'] or 0
 
         # COGS from purchases
         purchases = Purchase.objects.all()
@@ -66,7 +66,7 @@ class AccountingDashboardView(APIView):
         payables = Payable.objects.exclude(status='paid').aggregate(t=Sum('amount'))['t'] or 0
 
         # Orders
-        today_orders = Order.objects.filter(created_at__date=today).count()
+        today_orders = today_payments.count()
         completed_refunds = Refund.objects.filter(status='completed')
         total_refunds = completed_refunds.aggregate(t=Sum('refund_amount'))['t'] or 0
         today_refunds = completed_refunds.filter(created_at__date=today).aggregate(t=Sum('refund_amount'))['t'] or 0
@@ -76,12 +76,12 @@ class AccountingDashboardView(APIView):
         gross_margin = (gross_profit / float(total_revenue) * 100) if total_revenue else 0
         net_margin = (net_profit / float(total_revenue) * 100) if total_revenue else 0
 
-        # Monthly revenue (last 6 months)
+        # Record revenue when payment is confirmed rather than when an order is delivered.
         monthly = (
-            Order.objects.filter(status='delivered')
-            .annotate(month=TruncMonth('created_at'))
+            completed_payments
+            .annotate(month=TruncMonth('updated_at'))
             .values('month')
-            .annotate(revenue=Sum('total'), count=Count('id'))
+            .annotate(revenue=Sum('amount'), count=Count('id'))
             .order_by('month')
         )
 

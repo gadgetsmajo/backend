@@ -4,12 +4,14 @@ from decimal import Decimal
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 from accounting.models import Refund as AccountingRefund
 from orders.models import Order, OrderItem, Payment, ReturnRequest
 from products.models import Product, ProductVariant
 from settings_app.models import District, PlatformSettings
+from traders.models import TraderApplication, TraderEarning
 from users.models import CartItem, Notification
 
 User = get_user_model()
@@ -186,6 +188,209 @@ class PesapalBillingNameTests(TestCase):
         self.assertEqual(billing_address['middle_name'], 'MaryAnnLee')
 
 
+class PaidOrderVisibilityTests(TestCase):
+    def setUp(self):
+        self.admin = User.objects.create_superuser(
+            email='paid-orders-admin@example.com',
+            name='Paid Orders Admin',
+            password='Password123!',
+        )
+        self.customer = User.objects.create_user(
+            email='paid-orders-customer@example.com',
+            name='Paid Orders Customer',
+            password='Password123!',
+        )
+        self.unpaid_order = Order.objects.create(
+            user=self.customer,
+            code='UNPAID-001',
+            status='pending',
+            total=1000,
+        )
+        self.pending_order = Order.objects.create(
+            user=self.customer,
+            code='PENDING-001',
+            status='pending',
+            total=2000,
+        )
+        Payment.objects.create(
+            order=self.pending_order,
+            pesapal_order_tracking_id='pending-order-tracking',
+            merchant_reference=self.pending_order.code,
+            amount=self.pending_order.total,
+            status='pending',
+        )
+        self.paid_order = Order.objects.create(
+            user=self.customer,
+            code='PAID-001',
+            status='processing',
+            total=3000,
+        )
+        Payment.objects.create(
+            order=self.paid_order,
+            pesapal_order_tracking_id='paid-order-tracking',
+            merchant_reference=self.paid_order.code,
+            amount=self.paid_order.total,
+            status='completed',
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.admin)
+
+    def test_admin_lists_and_exports_only_completed_payments(self):
+        response = self.client.get('/api/orders/admin/')
+
+        self.assertEqual(response.status_code, 200)
+        order_codes = {order['code'] for order in response.data['results']}
+        self.assertEqual(order_codes, {self.paid_order.code})
+
+        export_response = self.client.get('/api/orders/export/orders/')
+        self.assertEqual(export_response.status_code, 200)
+        self.assertIn(self.paid_order.code, str(export_response.content))
+        self.assertNotIn(self.unpaid_order.code, str(export_response.content))
+        self.assertNotIn(self.pending_order.code, str(export_response.content))
+
+    def test_admin_cannot_retrieve_or_confirm_unpaid_order(self):
+        detail_response = self.client.get(f'/api/orders/admin/{self.unpaid_order.code}/')
+        confirm_response = self.client.post(f'/api/orders/admin/{self.unpaid_order.code}/confirm/')
+        pending_confirm_response = self.client.post(f'/api/orders/admin/{self.pending_order.code}/confirm/')
+
+        self.assertEqual(detail_response.status_code, 404)
+        self.assertEqual(confirm_response.status_code, 404)
+        self.assertEqual(pending_confirm_response.status_code, 404)
+        self.unpaid_order.refresh_from_db()
+        self.assertEqual(self.unpaid_order.status, 'pending')
+
+
+class PesapalSuccessfulPaymentTests(TestCase):
+    def setUp(self):
+        self.customer = User.objects.create_user(
+            email='paid-customer@example.com',
+            name='Paid Customer',
+            password='Password123!',
+        )
+        self.admin = User.objects.create_superuser(
+            email='paid-admin@example.com',
+            name='Paid Admin',
+            password='Password123!',
+        )
+        self.trader_user = User.objects.create_user(
+            email='paid-trader@example.com',
+            name='Paid Trader',
+            password='Password123!',
+        )
+        self.trader = TraderApplication.objects.create(
+            full_name='Paid Trader',
+            email=self.trader_user.email,
+            phone='0700000000',
+            business_name='Paid Trader Shop',
+            business_type='sole_proprietor',
+            location='Kampala',
+            product_categories='Electronics',
+            status='approved',
+            user=self.trader_user,
+        )
+        self.product = Product.objects.create(
+            name='Paid Order Product',
+            price='25000.00',
+            stock=5,
+            trader=self.trader,
+        )
+        self.order = Order.objects.create(
+            user=self.customer,
+            code='PAID-ORDER-01',
+            status='pending',
+            total='25000.00',
+            delivery_address='Central, Kampala',
+        )
+        self.item = OrderItem.objects.create(
+            order=self.order,
+            product=self.product,
+            quantity=1,
+            price='25000.00',
+            seller_price='20000.00',
+            platform_commission_pct='20.00',
+            platform_commission='5000.00',
+        )
+        self.payment = Payment.objects.create(
+            order=self.order,
+            pesapal_order_tracking_id='paid-ipn-tracking',
+            merchant_reference=self.order.code,
+            amount=self.order.total,
+            currency='UGX',
+            status='pending',
+        )
+        self.client = APIClient()
+
+    @patch('users.emails._send')
+    @patch('orders.views.http_requests.get')
+    @patch('orders.views._pesapal_token', return_value='pesapal-token')
+    def test_successful_ipn_records_payment_wallet_and_notifications(
+        self, mock_token, mock_get, mock_email_send,
+    ):
+        trader_client = APIClient()
+        trader_client.force_authenticate(user=self.trader_user)
+        unpaid_orders_response = trader_client.get(f'/api/traders/{self.trader.uuid}/orders/')
+        self.assertEqual(unpaid_orders_response.status_code, 200)
+        self.assertEqual(unpaid_orders_response.data, [])
+
+        mock_get.return_value.json.return_value = {
+            'amount': '25000.00',
+            'currency_code': 'UGX',
+            'merchant_reference': self.order.code,
+            'order_tracking_id': self.payment.pesapal_order_tracking_id,
+            'payment_status_description': 'Completed',
+            'payment_method': 'Mobile Money',
+            'confirmation_code': 'CONFIRMED-123',
+        }
+        mock_get.return_value.raise_for_status.return_value = None
+        url = (
+            f'/api/orders/pesapal/ipn/?OrderTrackingId={self.payment.pesapal_order_tracking_id}'
+            f'&OrderMerchantReference={self.order.code}'
+        )
+
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 200)
+        self.payment.refresh_from_db()
+        self.order.refresh_from_db()
+        self.product.refresh_from_db()
+        self.assertEqual(self.payment.status, 'completed')
+        self.assertEqual(self.payment.confirmation_code, 'CONFIRMED-123')
+        self.assertEqual(self.order.status, 'processing')
+        self.assertEqual(self.product.stock, 4)
+
+        earning = TraderEarning.objects.get(order_item=self.item)
+        self.assertEqual(earning.seller_amount, Decimal('20000.00'))
+        self.assertGreater(earning.available_at, timezone.now())
+        wallet_client = APIClient()
+        wallet_client.force_authenticate(user=self.trader_user)
+        wallet_response = wallet_client.get(f'/api/traders/{self.trader.uuid}/wallet/')
+        self.assertEqual(wallet_response.status_code, 200)
+        self.assertEqual(Decimal(wallet_response.data['locked_balance']), Decimal('20000.00'))
+        self.assertEqual(Decimal(wallet_response.data['available_balance']), Decimal('0.00'))
+        paid_orders_response = trader_client.get(f'/api/traders/{self.trader.uuid}/orders/')
+        self.assertEqual(paid_orders_response.status_code, 200)
+        self.assertEqual(len(paid_orders_response.data), 1)
+        self.assertEqual(paid_orders_response.data[0]['order_code'], self.order.code)
+
+        admin_client = APIClient()
+        admin_client.force_authenticate(user=self.admin)
+        payments_response = admin_client.get('/api/orders/admin/payments/')
+        self.assertEqual(payments_response.status_code, 200)
+        self.assertEqual(payments_response.data['results'][0]['status'], 'completed')
+        accounting_response = admin_client.get('/api/accounting/dashboard/')
+        self.assertEqual(accounting_response.status_code, 200)
+        self.assertEqual(accounting_response.data['total_revenue'], 25000.0)
+
+        self.assertTrue(Notification.objects.filter(user=self.customer, title__contains='Payment Confirmed').exists())
+        self.assertTrue(Notification.objects.filter(user=self.admin, title__contains='New Paid Order').exists())
+        self.assertTrue(Notification.objects.filter(user=self.trader_user, title__contains='New Paid Order').exists())
+        sent_emails = [call.args[0] for call in mock_email_send.call_args_list]
+        trader_email = next(email for email in sent_emails if email['to'] == self.trader.email)
+        self.assertIn('Prepare paid order', trader_email['subject'])
+        self.assertIn('View and prepare order', trader_email['html'])
+
+
 class OrderDeliveryEmailTests(TestCase):
     def setUp(self):
         self.client = APIClient()
@@ -215,6 +420,12 @@ class OrderDeliveryEmailTests(TestCase):
         self.client.force_authenticate(user=self.admin)
         self.order.status = 'ready_for_pickup'
         self.order.save(update_fields=['status'])
+        Payment.objects.create(
+            order=self.order,
+            pesapal_order_tracking_id='track-delivery',
+            amount=self.order.total,
+            status='completed',
+        )
 
         response = self.client.post(f'/api/orders/admin/{self.order.code}/deliver/')
 
@@ -254,6 +465,12 @@ class OrderDeliveryEmailTests(TestCase):
     def test_admin_lists_handle_null_related_fields(self):
         self.client.force_authenticate(user=self.admin)
         Payment.objects.create(
+            order=self.order,
+            pesapal_order_tracking_id='track-order-with-null-status-user',
+            amount=self.order.total,
+            status='completed',
+        )
+        Payment.objects.create(
             order=None,
             pesapal_order_tracking_id='track-null-order',
             amount=25000,
@@ -269,7 +486,7 @@ class OrderDeliveryEmailTests(TestCase):
         self.assertEqual(orders_response.status_code, 200)
         self.assertEqual(payments_response.status_code, 200)
         self.assertIsNone(orders_response.json()['results'][0]['status_changed_by_name'])
-        self.assertIsNone(payments_response.json()['results'][-1]['order_code'])
+        self.assertTrue(any(payment['order_code'] is None for payment in payments_response.json()['results']))
 
 
 class OrderPricingSecurityTests(TestCase):

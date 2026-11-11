@@ -207,12 +207,54 @@ def send_admin_new_order_email(order_code: str, customer_name: str, customer_ema
 
       <div style="text-align:center">
         <a href="{admin_url}" style="display:inline-block;padding:14px 32px;background:#071A2B !important;background-color:#071A2B !important;color:#ffffff !important;border:1px solid #071A2B;border-radius:0;font-weight:700;font-size:15px;text-decoration:none !important">
-          View &amp; Confirm Order &rarr;
+          View Order &amp; Prepare Items &rarr;
         </a>
       </div>
       <p style="margin:16px 0 0;font-size:13px;color:#333333">Or track it at: <a href="{settings.FRONTEND_URL}/orders/{order_code}" style="color:#1E3A8A !important">{settings.FRONTEND_URL}/orders/{order_code}</a></p>
     '''
     _send({'from': FROM, 'to': settings.ADMIN_EMAIL, 'reply_to': settings.ADMIN_EMAIL, 'subject': f'New Order #{order_code} — UGX {total}', 'html': _wrap(body)})
+
+
+def send_trader_paid_order_email(
+    trader_name: str,
+    email: str,
+    order_code: str,
+    items: list,
+    delivery_address: str,
+    orders_url: str,
+):
+    safe_items = [
+        {
+            **item,
+            'name': escape(str(item['name'])),
+            'qty': escape(str(item['qty'])),
+            'price': escape(str(item['price'])),
+            'image': escape(str(item.get('image') or ''), quote=True),
+        }
+        for item in items
+    ]
+    body = f'''
+      <div style="text-align:center;margin-bottom:24px">
+        <h2 style="margin:0 0 6px;font-size:22px;color:#0F172A">Paid order — prepare your items</h2>
+        <p style="margin:0;font-size:14px;color:#64748B">Hi <strong>{escape(trader_name)}</strong>, payment is confirmed for order #{escape(order_code)}.</p>
+      </div>
+      <p style="margin:0 0 12px;font-size:13px;color:#334155"><strong>Delivery address:</strong> {escape(delivery_address)}</p>
+      <table width="100%" cellpadding="0" cellspacing="0">{_item_rows(safe_items)}</table>
+      <div style="text-align:center;margin-top:24px">
+        <a href="{escape(orders_url, quote=True)}" style="display:inline-block;padding:14px 32px;background:#071A2B;color:#ffffff;border-radius:6px;font-size:14px;font-weight:700;text-decoration:none">
+          View and prepare order
+        </a>
+      </div>
+      <p style="margin:20px 0 0;font-size:12px;color:#64748B">
+        Your earnings are visible in your trader wallet and remain locked during the payout hold period.
+      </p>
+    '''
+    _send({
+        'from': FROM,
+        'to': email,
+        'subject': f'Prepare paid order #{order_code}',
+        'html': _wrap(body, hero=_status_hero('processing')),
+    })
 
 
 def send_admin_new_support_message_email(customer_name: str, customer_email: str):

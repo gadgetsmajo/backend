@@ -1149,6 +1149,7 @@ class TraderOrderListView(APIView):
         ).values_list('id', flat=True)
         order_items = OrderItem.objects.filter(
             product_id__in=trader_product_ids,
+            order__payment__status='completed',
             order__status__in=['pending', 'processing', 'shipped', 'delivered'],
         ).select_related('order', 'product')
 
@@ -1161,7 +1162,10 @@ class TraderOrderListView(APIView):
         if new_records:
             TraderOrderItem.objects.bulk_create(new_records, ignore_conflicts=True)
 
-        qs = TraderOrderItem.objects.filter(trader=trader).select_related(
+        qs = TraderOrderItem.objects.filter(
+            trader=trader,
+            order_item__order__payment__status='completed',
+        ).select_related(
             'order_item__order', 'order_item__product'
         ).order_by('-order_item__order__created_at')
 
@@ -1189,7 +1193,11 @@ class TraderOrderItemUpdateView(APIView):
         try:
             item = TraderOrderItem.objects.select_related(
                 'order_item__order', 'order_item__product'
-            ).get(pk=pk, trader=trader)
+            ).get(
+                pk=pk,
+                trader=trader,
+                order_item__order__payment__status='completed',
+            )
         except TraderOrderItem.DoesNotExist:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
 
