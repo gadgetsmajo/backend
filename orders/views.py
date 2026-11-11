@@ -787,6 +787,13 @@ class InitiatePaymentView(APIView):
                     )
                     if part
                 ) or 'Kampala'
+            delivery_address = ''.join(
+                character
+                if character.isascii() and (character.isalnum() or character in '-_.:')
+                else '_'
+                for character in delivery_address
+            )
+            delivery_address = '_'.join(filter(None, delivery_address.split('_'))) or 'Kampala'
             payload = {
                 'id': order.code,
                 'currency': 'UGX',

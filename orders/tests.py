@@ -53,10 +53,47 @@ class PesapalBillingNameTests(TestCase):
         self.assertEqual(billing_address['first_name'], 'Jane')
         self.assertEqual(billing_address['middle_name'], 'NA')
         self.assertEqual(billing_address['last_name'], 'Doe')
-        self.assertEqual(billing_address['line_1'], 'Kampala, Uganda')
+        self.assertEqual(billing_address['line_1'], 'Kampala_Uganda')
         self.assertEqual(billing_address['country_code'], 'UG')
         self.assertEqual(billing_address['city'], 'Kampala')
         self.assertNotIn('address_line_1', billing_address)
+
+    @override_settings(
+        PESAPAL_CONSUMER_KEY='test-key',
+        PESAPAL_CONSUMER_SECRET='test-secret',
+        PESAPAL_IPN_URL='https://example.com/ipn',
+        PESAPAL_CALLBACK_URL='https://example.com/callback',
+    )
+    def test_submit_payload_sanitizes_address_line_1(self):
+        user = User.objects.create_user(
+            email='address@example.com', name='Address Customer', password='Password123!',
+        )
+        order = Order.objects.create(
+            user=user,
+            code='PAYMENT-ADDRESS-002',
+            status='pending',
+            total=25000,
+            delivery_address=' Plot #12, O’Connell Rd / Kampala! ',
+            phone='+256700000000',
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=user)
+
+        with (
+            patch('orders.views._pesapal_token', return_value='pesapal-token'),
+            patch('orders.views._register_ipn', return_value='ipn-id'),
+            patch('orders.views.http_requests.post') as mock_submit,
+        ):
+            mock_submit.return_value.json.return_value = {
+                'redirect_url': 'https://pesapal.example/checkout',
+                'order_tracking_id': 'tracking-id',
+            }
+            response = self.client.post(f'/api/orders/{order.code}/pay/')
+
+        self.assertEqual(response.status_code, 200)
+        billing_address = mock_submit.call_args.kwargs['json']['billing_address']
+        self.assertEqual(billing_address['line_1'], 'Plot_12_O_Connell_Rd_Kampala')
+        self.assertRegex(billing_address['line_1'], r'^[A-Za-z0-9._:-]+$')
 
     @override_settings(
         PESAPAL_CONSUMER_KEY='test-key',
