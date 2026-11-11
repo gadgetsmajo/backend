@@ -1,9 +1,12 @@
+import json
 import os
 import re
 
 from rest_framework import serializers
 from django.core.exceptions import ObjectDoesNotExist
 from products.models import Category
+from products.models import ProductVariant
+from products.serializers import ProductVariantSerializer
 from .models import (
     TraderApplication, TraderProduct, TraderSale, TraderExpense, TraderOrderItem,
     TraderInventoryItem, TraderStockMovement, TraderEarning, TraderWithdrawal,
@@ -162,6 +165,11 @@ class TraderPayoutAccountSerializer(serializers.Serializer):
 class TraderProductSerializer(serializers.ModelSerializer):
     image_url = serializers.SerializerMethodField()
     public_product_id = serializers.SerializerMethodField()
+    review_status = serializers.SerializerMethodField()
+    review_note = serializers.SerializerMethodField()
+    variant_list = serializers.SerializerMethodField()
+    variants = ProductVariantSerializer(many=True, required=False, write_only=True)
+    submit_for_review = serializers.BooleanField(required=False, default=True, write_only=True)
     category_id = serializers.PrimaryKeyRelatedField(
         source='category', queryset=Category.objects.all(), required=False, allow_null=True,
     )
@@ -171,21 +179,86 @@ class TraderProductSerializer(serializers.ModelSerializer):
         model = TraderProduct
         fields = (
             'id', 'uuid', 'name', 'short_description', 'long_description', 'description',
+            'brand', 'condition', 'tags', 'specifications',
             'price', 'original_price', 'delivery_fee', 'stock',
             'category_id', 'category_name', 'public_product_id',
             'image_url', 'is_active', 'is_featured', 'is_new_deal',
+            'review_status', 'review_note', 'variants', 'variant_list', 'submit_for_review',
             'created_at', 'updated_at',
         )
-        read_only_fields = ('id', 'uuid', 'image_url', 'category_name', 'created_at', 'updated_at')
+        read_only_fields = (
+            'id', 'uuid', 'image_url', 'category_name', 'created_at', 'updated_at',
+            'review_status', 'review_note', 'variant_list',
+        )
 
     def to_internal_value(self, data):
+        data = data.copy()
+        for field in ('tags', 'specifications', 'variants'):
+            value = data.get(field)
+            if isinstance(value, str):
+                try:
+                    data[field] = json.loads(value)
+                except json.JSONDecodeError as exc:
+                    raise serializers.ValidationError({field: 'Enter valid JSON.'}) from exc
         empty_fields = ('category_id', 'original_price')
         if any(data.get(field) == '' for field in empty_fields):
-            data = data.copy()
             for field in empty_fields:
                 if data.get(field) == '':
                     data[field] = None
         return super().to_internal_value(data)
+
+    def create(self, validated_data):
+        variants = validated_data.pop('variants', None)
+        submit_for_review = validated_data.pop('submit_for_review', True)
+        product = super().create(validated_data)
+        product._submitted_variants = variants
+        product._submit_for_review = submit_for_review
+        return product
+
+    def update(self, instance, validated_data):
+        variants = validated_data.pop('variants', None)
+        submit_for_review = validated_data.pop('submit_for_review', None)
+        product = super().update(instance, validated_data)
+        product._submitted_variants = variants
+        product._submit_for_review = submit_for_review
+        return product
+
+    def validate(self, attrs):
+        category = attrs.get('category', getattr(self.instance, 'category', None))
+        specifications = attrs.get('specifications', getattr(self.instance, 'specifications', {}))
+        variants = attrs.get('variants')
+        if not isinstance(specifications, dict):
+            raise serializers.ValidationError({'specifications': 'Specifications must be an object.'})
+        tags = attrs.get('tags', getattr(self.instance, 'tags', []))
+        if not isinstance(tags, list) or any(not isinstance(tag, str) or not tag.strip() for tag in tags):
+            raise serializers.ValidationError({'tags': 'Tags must be a list of non-empty strings.'})
+        if len(variants or []) > 100:
+            raise serializers.ValidationError({'variants': 'A product cannot have more than 100 variants.'})
+        if variants is not None:
+            skus = [variant.get('sku', '').strip().casefold() for variant in variants if variant.get('sku', '').strip()]
+            if len(skus) != len(set(skus)):
+                raise serializers.ValidationError({'variants': 'Each variant SKU must be unique.'})
+            option_sets = [
+                tuple(sorted((key, str(value)) for key, value in variant.get('options', {}).items()))
+                for variant in variants
+            ]
+            if len(option_sets) != len(set(option_sets)):
+                raise serializers.ValidationError({'variants': 'Variant option combinations must be unique.'})
+        if category:
+            errors = {}
+            for attribute in category.attributes.filter(is_required=True):
+                if attribute.is_variant:
+                    if variants is not None and (
+                        not variants or any(attribute.key not in variant.get('options', {}) for variant in variants)
+                    ):
+                        errors.setdefault('variants', []).append(f'Each variant must include {attribute.name}.')
+                    elif variants is None and self.instance is None:
+                        errors.setdefault('variants', []).append(f'At least one variant with {attribute.name} is required.')
+                elif attribute.key not in specifications or specifications[attribute.key] in (None, '', []):
+                    errors.setdefault('specifications', []).append(f'{attribute.name} is required.')
+            if errors:
+                raise serializers.ValidationError(errors)
+        return attrs
 
     def get_image_url(self, obj):
         if obj.image:
@@ -197,6 +270,24 @@ class TraderProductSerializer(serializers.ModelSerializer):
             return obj.public_product.pk
         except ObjectDoesNotExist:
             return None
+
+    def get_review_status(self, obj):
+        try:
+            return obj.public_product.review_status
+        except ObjectDoesNotExist:
+            return 'pending_review'
+
+    def get_review_note(self, obj):
+        try:
+            return obj.public_product.review_note
+        except ObjectDoesNotExist:
+            return ''
+
+    def get_variant_list(self, obj):
+        try:
+            return ProductVariantSerializer(obj.public_product.variants.all(), many=True).data
+        except ObjectDoesNotExist:
+            return []
 
 
 class TraderSaleSerializer(serializers.ModelSerializer):

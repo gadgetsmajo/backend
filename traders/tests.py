@@ -13,7 +13,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from orders.models import Order, OrderItem, ReturnRequest
-from products.models import Category, Product, ProductReview
+from products.models import Category, CategoryAttribute, Product, ProductReview
 from settings_app.models import PlatformSettings
 from traders.models import (
 	TraderApplication, TraderEarning, TraderFollower, TraderInventoryItem,
@@ -362,6 +362,40 @@ class TraderInventoryStockSyncTests(TestCase):
 		)
 		self.client = APIClient()
 		self.client.force_authenticate(user=self.user)
+
+	def test_new_trader_product_and_variants_wait_for_admin_approval(self):
+		category = Category.objects.create(name='Color Goods', slug='color-goods')
+		CategoryAttribute.objects.create(
+			category=category, name='Color', key='color', input_type='color', is_variant=True,
+		)
+		response = self.client.post(
+			reverse('trader-products', args=[self.trader.uuid]),
+			{
+				'name': 'Colorful Gadget',
+				'price': '1000.00',
+				'stock': 3,
+				'category_id': category.pk,
+				'variants': [{
+					'sku': 'COLOR-GADGET-BLACK',
+					'options': {'color': 'Black'},
+					'price': '1200.00',
+					'stock': 2,
+				}],
+				'submit_for_review': True,
+			},
+			format='json',
+		)
+
+		self.assertEqual(response.status_code, 201, response.data)
+		self.assertEqual(response.data['review_status'], 'pending_review')
+		trader_product = TraderProduct.objects.get(uuid=response.data['uuid'])
+		public_product = Product.objects.get(trader_product=trader_product)
+		self.assertFalse(public_product.is_active)
+		self.assertEqual(public_product.review_status, 'pending_review')
+		self.assertEqual(public_product.stock, 2)
+		self.assertEqual(public_product.variants.count(), 1)
+		public_list = APIClient().get(reverse('product-list'))
+		self.assertNotIn(public_product.pk, [item['id'] for item in public_list.data['results']])
 
 	def test_adding_inventory_quantity_updates_product_stock(self):
 		response = self.client.post(

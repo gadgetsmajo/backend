@@ -1,17 +1,61 @@
+import json
+
 from rest_framework import serializers
 from django.utils.text import slugify
+from django.db import transaction
 from django.db.models import Avg, Count
-from .models import Category, Product, ProductImage, FlashSale, ProductReview, ReviewImage
+from .models import Category, CategoryAttribute, Product, ProductImage, ProductVariant, FlashSale, ProductReview, ReviewImage
 from settings_app.pricing import price_with_platform_charges
+
+
+class CategoryAttributeSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CategoryAttribute
+        fields = (
+            'id', 'name', 'key', 'input_type', 'choices', 'is_required',
+            'is_variant', 'is_filterable', 'position',
+        )
+        read_only_fields = ('id',)
+        extra_kwargs = {'key': {'required': False}}
+
+    def validate(self, attrs):
+        key = attrs.get('key') or slugify(attrs.get('name', ''))
+        if not key:
+            raise serializers.ValidationError({'key': 'Provide a name for this attribute.'})
+        attrs['key'] = key
+        choices = attrs.get('choices', [])
+        if not isinstance(choices, list) or any(not isinstance(choice, str) or not choice.strip() for choice in choices):
+            raise serializers.ValidationError({'choices': 'Choices must be a list of non-empty strings.'})
+        if attrs.get('input_type') not in ('dropdown', 'multi_select') and choices:
+            raise serializers.ValidationError({'choices': 'Choices are supported only for dropdown and multi-select attributes.'})
+        if attrs.get('input_type') in ('dropdown', 'multi_select') and not choices:
+            raise serializers.ValidationError({'choices': 'Add at least one choice for this attribute type.'})
+        return attrs
 
 
 class CategorySerializer(serializers.ModelSerializer):
     image = serializers.ImageField(required=False, allow_null=True)
+    parent_id = serializers.PrimaryKeyRelatedField(
+        source='parent', queryset=Category.objects.all(), required=False, allow_null=True,
+    )
+    attributes = CategoryAttributeSerializer(many=True, required=False)
 
     class Meta:
         model = Category
-        fields = ('id', 'uuid', 'name', 'slug', 'image')
+        fields = ('id', 'uuid', 'name', 'slug', 'image', 'parent_id', 'attributes')
         extra_kwargs = {'slug': {'required': False}}
+
+    def to_internal_value(self, data):
+        data = data.copy()
+        if data.get('parent_id') == '':
+            data['parent_id'] = None
+        attributes = data.get('attributes')
+        if isinstance(attributes, str):
+            try:
+                data['attributes'] = json.loads(attributes)
+            except json.JSONDecodeError as exc:
+                raise serializers.ValidationError({'attributes': 'Enter valid JSON.'}) from exc
+        return super().to_internal_value(data)
 
     def validate(self, attrs):
         slug = attrs.get('slug') or slugify(attrs.get('name', ''))
@@ -22,7 +66,42 @@ class CategorySerializer(serializers.ModelSerializer):
                 slug = f'{original}-{counter}'
                 counter += 1
         attrs['slug'] = slug
+        parent = attrs.get('parent', getattr(self.instance, 'parent', None))
+        current_parent = parent
+        while current_parent:
+            if self.instance and current_parent.pk == self.instance.pk:
+                raise serializers.ValidationError({'parent_id': 'A category cannot be its own ancestor.'})
+            current_parent = current_parent.parent
         return attrs
+
+    @transaction.atomic
+    def create(self, validated_data):
+        attributes = validated_data.pop('attributes', None)
+        category = super().create(validated_data)
+        if attributes is not None:
+            self._save_attributes(category, attributes)
+        return category
+
+    @transaction.atomic
+    def update(self, instance, validated_data):
+        attributes = validated_data.pop('attributes', None)
+        category = super().update(instance, validated_data)
+        if attributes is not None:
+            self._save_attributes(category, attributes)
+        return category
+
+    @staticmethod
+    def _save_attributes(category, attributes):
+        submitted_keys = set()
+        for attribute in attributes:
+            key = attribute['key']
+            if key in submitted_keys:
+                raise serializers.ValidationError({'attributes': f'Duplicate attribute key: {key}.'})
+            submitted_keys.add(key)
+            CategoryAttribute.objects.update_or_create(
+                category=category, key=key, defaults=attribute,
+            )
+        category.attributes.exclude(key__in=submitted_keys).delete()
 
     def to_representation(self, instance):
         rep = super().to_representation(instance)
@@ -31,6 +110,62 @@ class CategorySerializer(serializers.ModelSerializer):
                 rep['image'] = instance.image.url
             except Exception:
                 rep['image'] = None
+        return rep
+
+
+class ProductVariantSerializer(serializers.ModelSerializer):
+    image_url = serializers.SerializerMethodField()
+    listed_price = serializers.DecimalField(source='price', max_digits=10, decimal_places=2, read_only=True)
+    compare_at_listed_price = serializers.DecimalField(
+        source='compare_at_price', max_digits=10, decimal_places=2, read_only=True,
+    )
+
+    class Meta:
+        model = ProductVariant
+        fields = (
+            'id', 'sku', 'options', 'price', 'listed_price',
+            'compare_at_price', 'compare_at_listed_price', 'stock',
+            'weight', 'image', 'image_url', 'is_active',
+        )
+        read_only_fields = ('id', 'image_url')
+        extra_kwargs = {'sku': {'validators': []}}
+
+    def validate_options(self, value):
+        if not isinstance(value, dict) or not value:
+            raise serializers.ValidationError('Each variant must have at least one option value.')
+        if any(not isinstance(key, str) or not key.strip() for key in value):
+            raise serializers.ValidationError('Variant option names must be non-empty strings.')
+        if any(not isinstance(option, (str, int, float, bool)) for option in value.values()):
+            raise serializers.ValidationError('Variant option values must be simple values.')
+        return value
+
+    def validate(self, attrs):
+        sku = attrs.get('sku', getattr(self.instance, 'sku', '')).strip()
+        if sku:
+            existing = ProductVariant.objects.filter(sku__iexact=sku)
+            if self.instance:
+                existing = existing.exclude(pk=self.instance.pk)
+            if existing.exists():
+                raise serializers.ValidationError({'sku': 'This SKU is already in use.'})
+        price = attrs.get('price', getattr(self.instance, 'price', None))
+        compare_at_price = attrs.get('compare_at_price', getattr(self.instance, 'compare_at_price', None))
+        if price is not None and price <= 0:
+            raise serializers.ValidationError({'price': 'Variant price must be greater than zero.'})
+        if compare_at_price is not None and price is not None and compare_at_price < price:
+            raise serializers.ValidationError({'compare_at_price': 'Compare-at price must be at least the variant price.'})
+        return attrs
+
+    def get_image_url(self, obj):
+        try:
+            return obj.image.url if obj.image else None
+        except Exception:
+            return None
+
+    def to_representation(self, instance):
+        rep = super().to_representation(instance)
+        rep['price'] = str(price_with_platform_charges(instance.price))
+        if instance.compare_at_price:
+            rep['compare_at_price'] = str(price_with_platform_charges(instance.compare_at_price))
         return rep
 
 
@@ -61,19 +196,32 @@ class ProductSerializer(serializers.ModelSerializer):
     is_new_deal = serializers.BooleanField(required=False)
     reviews_count = serializers.SerializerMethodField()
     seller_uuid = serializers.SerializerMethodField()
+    seller_name = serializers.SerializerMethodField()
+    variants = ProductVariantSerializer(many=True, required=False)
 
     class Meta:
         model = Product
         fields = ('id', 'uuid', 'name', 'slug', 'category', 'category_id',
+                  'brand', 'condition', 'tags', 'specifications', 'review_status', 'review_note', 'variants',
                   'price', 'listed_price', 'original_price', 'image_url', 'images',
                   'short_description', 'long_description', 'delivery_fee',
-                  'rating', 'stock', 'is_active', 'is_featured', 'is_new_deal', 'seller_uuid',
+                  'rating', 'stock', 'is_active', 'is_featured', 'is_new_deal', 'seller_uuid', 'seller_name',
                   'created_at', 'reviews_count')
-        read_only_fields = ('id', 'uuid', 'slug', 'rating', 'created_at')
+        read_only_fields = (
+            'id', 'uuid', 'slug', 'rating', 'created_at',
+            'review_status', 'review_note',
+        )
 
     def to_internal_value(self, data):
+        data = data.copy()
+        for field in ('tags', 'specifications', 'variants'):
+            value = data.get(field)
+            if isinstance(value, str):
+                try:
+                    data[field] = json.loads(value)
+                except json.JSONDecodeError as exc:
+                    raise serializers.ValidationError({field: 'Enter valid JSON.'}) from exc
         if data.get('category_id') == '':
-            data = data.copy()
             data['category_id'] = None
         return super().to_internal_value(data)
 
@@ -86,6 +234,57 @@ class ProductSerializer(serializers.ModelSerializer):
             return None
         return str(trader.uuid)
 
+    def get_seller_name(self, obj):
+        request = self.context.get('request')
+        if not request or not request.user.is_staff:
+            return None
+        trader = obj.trader or (obj.trader_product.trader if obj.trader_product_id else None)
+        return trader.business_name if trader else None
+
+    def validate_specifications(self, value):
+        if not isinstance(value, dict):
+            raise serializers.ValidationError('Specifications must be an object of attribute names and values.')
+        if any(not isinstance(key, str) or not key.strip() for key in value):
+            raise serializers.ValidationError('Specification names must be non-empty strings.')
+        return value
+
+    def validate_tags(self, value):
+        if not isinstance(value, list) or any(not isinstance(tag, str) or not tag.strip() for tag in value):
+            raise serializers.ValidationError('Tags must be a list of non-empty strings.')
+        return value
+
+    def validate(self, attrs):
+        category = attrs.get('category', getattr(self.instance, 'category', None))
+        specifications = attrs.get('specifications', getattr(self.instance, 'specifications', {}))
+        variants = attrs.get('variants')
+        if variants is not None:
+            if len(variants) > 100:
+                raise serializers.ValidationError({'variants': 'A product cannot have more than 100 variants.'})
+            skus = [variant.get('sku', '').strip().casefold() for variant in variants if variant.get('sku', '').strip()]
+            if len(skus) != len(set(skus)):
+                raise serializers.ValidationError({'variants': 'Each variant SKU must be unique.'})
+            option_sets = [
+                tuple(sorted((key, str(value)) for key, value in variant.get('options', {}).items()))
+                for variant in variants
+            ]
+            if len(option_sets) != len(set(option_sets)):
+                raise serializers.ValidationError({'variants': 'Variant option combinations must be unique.'})
+        if category:
+            errors = {}
+            for attribute in category.attributes.filter(is_required=True):
+                if attribute.is_variant:
+                    if variants is not None and (
+                        not variants or any(attribute.key not in variant.get('options', {}) for variant in variants)
+                    ):
+                        errors.setdefault('variants', []).append(f'Each variant must include {attribute.name}.')
+                    elif variants is None and self.instance is None:
+                        errors.setdefault('variants', []).append(f'At least one variant with {attribute.name} is required.')
+                elif attribute.key not in specifications or specifications[attribute.key] in (None, '', []):
+                    errors.setdefault('specifications', []).append(f'{attribute.name} is required.')
+            if errors:
+                raise serializers.ValidationError(errors)
+        return attrs
+
     def get_image_url(self, obj):
         if obj.image:
             try:
@@ -94,9 +293,33 @@ class ProductSerializer(serializers.ModelSerializer):
                 pass
         return None
 
+    @transaction.atomic
     def create(self, validated_data):
+        variants = validated_data.pop('variants', [])
         validated_data['is_active'] = True
-        return super().create(validated_data)
+        product = super().create(validated_data)
+        for variant in variants:
+            ProductVariant.objects.create(product=product, **variant)
+        if variants:
+            product.price = min(variant['price'] for variant in variants)
+            product.stock = sum(variant['stock'] for variant in variants)
+            product.save(update_fields=('price', 'stock'))
+        return product
+
+    @transaction.atomic
+    def update(self, instance, validated_data):
+        variants = validated_data.pop('variants', None)
+        product = super().update(instance, validated_data)
+        if variants is not None:
+            product.variants.all().delete()
+            ProductVariant.objects.bulk_create(
+                [ProductVariant(product=product, **variant) for variant in variants]
+            )
+            if variants:
+                product.price = min(variant['price'] for variant in variants)
+                product.stock = sum(variant['stock'] for variant in variants)
+                product.save(update_fields=('price', 'stock'))
+        return product
 
     def to_representation(self, instance):
         rep = super().to_representation(instance)

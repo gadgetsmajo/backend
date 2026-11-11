@@ -1,4 +1,5 @@
 from django.db import models
+from django.db.models import Q
 from django.utils.text import slugify
 import uuid
 import cloudinary.models
@@ -10,6 +11,9 @@ class Category(models.Model):
     name = models.CharField(max_length=100)
     slug = models.SlugField(unique=True)
     image = cloudinary.models.CloudinaryField('image', folder='categories/', blank=True, null=True)
+    parent = models.ForeignKey(
+        'self', on_delete=models.SET_NULL, null=True, blank=True, related_name='children',
+    )
 
     def __str__(self):
         return self.name
@@ -18,11 +22,62 @@ class Category(models.Model):
         verbose_name_plural = 'categories'
 
 
+class CategoryAttribute(models.Model):
+    INPUT_TYPES = (
+        ('text', 'Text'),
+        ('number', 'Number'),
+        ('dropdown', 'Dropdown'),
+        ('multi_select', 'Multi-select'),
+        ('boolean', 'Boolean'),
+        ('measurement', 'Measurement'),
+        ('color', 'Color'),
+        ('size', 'Size'),
+    )
+
+    category = models.ForeignKey(Category, on_delete=models.CASCADE, related_name='attributes')
+    name = models.CharField(max_length=100)
+    key = models.SlugField(max_length=100)
+    input_type = models.CharField(max_length=20, choices=INPUT_TYPES, default='text')
+    choices = models.JSONField(default=list, blank=True)
+    is_required = models.BooleanField(default=False)
+    is_variant = models.BooleanField(default=False)
+    is_filterable = models.BooleanField(default=False)
+    position = models.PositiveSmallIntegerField(default=0)
+
+    class Meta:
+        ordering = ('position', 'name')
+        constraints = [
+            models.UniqueConstraint(fields=('category', 'key'), name='unique_category_attribute_key'),
+        ]
+
+    def __str__(self):
+        return f'{self.category.name}: {self.name}'
+
+
 class Product(models.Model):
+    CONDITION_CHOICES = (
+        ('new', 'New'),
+        ('used', 'Used'),
+        ('refurbished', 'Refurbished'),
+    )
+    REVIEW_STATUSES = (
+        ('draft', 'Draft'),
+        ('pending_review', 'Pending review'),
+        ('approved', 'Approved'),
+        ('rejected', 'Rejected'),
+        ('changes_required', 'Changes required'),
+        ('disabled', 'Disabled'),
+        ('archived', 'Archived'),
+    )
+
     uuid = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
     name = models.CharField(max_length=255)
     slug = models.SlugField(max_length=320, unique=True, blank=True)
     category = models.ForeignKey(Category, on_delete=models.SET_NULL, null=True, related_name='products')
+    brand = models.CharField(max_length=120, blank=True, default='')
+    condition = models.CharField(max_length=20, choices=CONDITION_CHOICES, default='new')
+    tags = models.JSONField(default=list, blank=True)
+    specifications = models.JSONField(default=dict, blank=True)
     price = models.DecimalField(max_digits=10, decimal_places=2)
     original_price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     short_description = models.CharField(max_length=300, blank=True, default='')
@@ -32,6 +87,8 @@ class Product(models.Model):
     rating = models.DecimalField(max_digits=3, decimal_places=1, default=0)
     stock = models.PositiveIntegerField(default=0)
     is_active = models.BooleanField(default=True)
+    review_status = models.CharField(max_length=20, choices=REVIEW_STATUSES, default='approved')
+    review_note = models.TextField(blank=True, default='')
     trader = models.ForeignKey(
         'traders.TraderApplication', on_delete=models.SET_NULL,
         null=True, blank=True, related_name='store_products'
@@ -51,6 +108,34 @@ class Product(models.Model):
         self.name = self.name.strip().title()
         self.slug = f'{slugify(self.name)}-{uuid.UUID(str(self.uuid)).hex[:12]}'
         super().save(*args, **kwargs)
+
+
+class ProductVariant(models.Model):
+    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='variants')
+    sku = models.CharField(max_length=100, blank=True, default='')
+    options = models.JSONField(default=dict)
+    price = models.DecimalField(max_digits=10, decimal_places=2)
+    compare_at_price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    stock = models.PositiveIntegerField(default=0)
+    weight = models.DecimalField(max_digits=8, decimal_places=3, null=True, blank=True)
+    image = cloudinary.models.CloudinaryField('image', folder='product_variants/', blank=True, null=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ('id',)
+        constraints = [
+            models.UniqueConstraint(
+                fields=('sku',),
+                condition=~Q(sku=''),
+                name='unique_nonempty_product_variant_sku',
+            ),
+        ]
+
+    def __str__(self):
+        values = ' / '.join(str(value) for value in self.options.values())
+        return f'{self.product.name} — {values or self.sku or self.pk}'
 
 
 class FlashSale(models.Model):

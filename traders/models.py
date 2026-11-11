@@ -119,6 +119,14 @@ class TraderProduct(models.Model):
     short_description = models.CharField(max_length=300, blank=True, default='')
     long_description  = models.TextField(blank=True, default='')
     description = models.TextField(blank=True)  # legacy
+    brand = models.CharField(max_length=120, blank=True, default='')
+    condition = models.CharField(
+        max_length=20,
+        choices=(('new', 'New'), ('used', 'Used'), ('refurbished', 'Refurbished')),
+        default='new',
+    )
+    tags = models.JSONField(default=list, blank=True)
+    specifications = models.JSONField(default=dict, blank=True)
     price       = models.DecimalField(max_digits=12, decimal_places=2)
     original_price = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
     delivery_fee   = models.DecimalField(max_digits=12, decimal_places=2, default=0)

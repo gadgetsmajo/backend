@@ -15,7 +15,7 @@ from django.http import HttpResponse
 from django.db.models import Avg, Count, F, Q
 from django_redis.exceptions import ConnectionInterrupted
 from orders.models import OrderItem
-from products.models import Product, ProductReview
+from products.models import Product, ProductReview, ProductVariant
 from redis.exceptions import RedisError
 from rest_framework import generics, permissions, status
 from rest_framework.views import APIView
@@ -375,6 +375,10 @@ def _sync_to_product(trader_product):
     defaults = {
         'trader': trader_product.trader,
         'name': trader_product.name,
+        'brand': trader_product.brand,
+        'condition': trader_product.condition,
+        'tags': trader_product.tags,
+        'specifications': trader_product.specifications,
         'short_description': trader_product.short_description or trader_product.description,
         'long_description': trader_product.long_description,
         'price': trader_product.price,
@@ -408,12 +412,35 @@ def _sync_to_product(trader_product):
             )
 
     if product is None:
+        submit_for_review = getattr(trader_product, '_submit_for_review', True)
+        defaults['review_status'] = 'pending_review' if submit_for_review else 'draft'
+        defaults['is_active'] = False
         product = Product.objects.create(trader_product=trader_product, **defaults)
     else:
         product.trader_product = trader_product
         for field, value in defaults.items():
             setattr(product, field, value)
+        submit_for_review = getattr(trader_product, '_submit_for_review', None)
+        if product.review_status in ('draft', 'rejected', 'changes_required') and submit_for_review is not None:
+            product.review_status = 'pending_review' if submit_for_review else 'draft'
+            product.review_note = ''
+            product.is_active = False
         product.save()
+
+    submitted_variants = getattr(trader_product, '_submitted_variants', None)
+    if submitted_variants is not None:
+        product.variants.all().delete()
+        ProductVariant.objects.bulk_create(
+            [ProductVariant(product=product, **variant) for variant in submitted_variants]
+        )
+        if submitted_variants:
+            product.price = min(variant['price'] for variant in submitted_variants)
+            product.stock = sum(variant['stock'] for variant in submitted_variants)
+            product.save(update_fields=('price', 'stock'))
+            if trader_product.price != product.price or trader_product.stock != product.stock:
+                trader_product.price = product.price
+                trader_product.stock = product.stock
+                trader_product.save(update_fields=('price', 'stock', 'updated_at'))
 
     _invalidate_product_cache(product, trader_product.pk)
     return product

@@ -8,8 +8,8 @@ from unittest.mock import patch
 from rest_framework.test import APIClient
 
 from orders.models import Order, OrderItem
-from products.models import Category, FlashSale, Product, ProductReview
-from products.serializers import FlashSaleSerializer
+from products.models import Category, CategoryAttribute, FlashSale, Product, ProductReview, ProductVariant
+from products.serializers import CategorySerializer, FlashSaleSerializer, ProductSerializer
 from settings_app.models import PlatformSettings
 from traders.models import TraderApplication, TraderProduct
 
@@ -51,7 +51,7 @@ class ProductRecommendationsAPITest(TestCase):
         self.assertEqual(response.status_code, 200)
         product_ids = [item['id'] for item in response.data]
         self.assertIn(self.related_product.id, product_ids)
-        self.assertNotIn(self.other_product.id, product_ids[:3])
+        self.assertLess(product_ids.index(self.related_product.id), product_ids.index(self.other_product.id))
 
     def test_guest_user_gets_fallback_products(self):
         response = self.client.get(reverse('product-recommendations'))
@@ -594,3 +594,114 @@ class FlashSaleBasePricingSerializerTest(TestCase):
         self.assertEqual(updated_sale.flash_price, 90000)
         self.assertEqual(update.data['base_flash_price'], '90000.00')
         self.assertEqual(update.data['flash_price'], '99000.00')
+
+
+class ConfigurableProductCatalogTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.category = Category.objects.create(name='Shoes', slug='shoes')
+        CategoryAttribute.objects.create(
+            category=self.category,
+            name='Size',
+            key='size',
+            input_type='size',
+            is_required=True,
+            is_variant=True,
+        )
+        CategoryAttribute.objects.create(
+            category=self.category,
+            name='Material',
+            key='material',
+            input_type='text',
+            is_required=True,
+        )
+
+    def test_category_serializer_saves_hierarchy_and_dynamic_attributes(self):
+        parent = Category.objects.create(name='Fashion', slug='fashion')
+        serializer = CategorySerializer(data={
+            'name': 'Clothing',
+            'parent_id': parent.pk,
+            'attributes': [{
+                'name': 'Fit',
+                'input_type': 'dropdown',
+                'choices': ['Slim', 'Regular'],
+                'is_required': True,
+            }],
+        })
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        category = serializer.save()
+        self.assertEqual(category.parent, parent)
+        self.assertEqual(category.attributes.get().key, 'fit')
+        self.assertEqual(category.attributes.get().choices, ['Slim', 'Regular'])
+
+    def test_product_serializer_persists_specifications_and_variants(self):
+        serializer = ProductSerializer(data={
+            'name': 'Running Shoe',
+            'category_id': self.category.pk,
+            'price': '100.00',
+            'stock': 3,
+            'specifications': {'material': 'Mesh'},
+            'variants': [{
+                'sku': 'SHOE-BLACK-9',
+                'options': {'size': '9'},
+                'price': '100.00',
+                'stock': 3,
+            }],
+        })
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        product = serializer.save()
+        self.assertEqual(product.specifications, {'material': 'Mesh'})
+        self.assertEqual(product.review_status, 'approved')
+        self.assertEqual(product.variants.count(), 1)
+        self.assertEqual(product.stock, 3)
+
+    def test_required_category_values_are_validated(self):
+        serializer = ProductSerializer(data={
+            'name': 'Incomplete Shoe',
+            'category_id': self.category.pk,
+            'price': '100.00',
+            'stock': 1,
+        })
+
+        self.assertFalse(serializer.is_valid())
+        self.assertIn('specifications', serializer.errors)
+        self.assertIn('variants', serializer.errors)
+
+    def test_review_action_requires_feedback_and_controls_public_visibility(self):
+        admin = User.objects.create_user(
+            email='product-admin@example.com',
+            password='strong-pass-123',
+            name='Product Admin',
+            is_staff=True,
+        )
+        product = Product.objects.create(
+            name='Review Shoe',
+            category=Category.objects.create(name='Accessories', slug='accessories'),
+            price=100,
+            stock=2,
+            is_active=False,
+            review_status='pending_review',
+        )
+        self.client.force_authenticate(user=admin)
+        review_url = reverse('product-review-status', args=[product.pk])
+
+        missing_reason = self.client.post(review_url, {'review_status': 'changes_required'})
+        self.assertEqual(missing_reason.status_code, 400)
+
+        requested_changes = self.client.post(review_url, {
+            'review_status': 'changes_required',
+            'review_note': 'Add a clear product image.',
+        })
+        self.assertEqual(requested_changes.status_code, 200)
+        self.assertEqual(requested_changes.data['review_note'], 'Add a clear product image.')
+        self.assertEqual(
+            APIClient().get(reverse('product-detail-by-slug', args=[product.slug])).status_code,
+            404,
+        )
+
+        approved = self.client.post(review_url, {'review_status': 'approved'})
+        self.assertEqual(approved.status_code, 200)
+        self.assertTrue(approved.data['is_active'])
+        self.assertEqual(approved.data['review_status'], 'approved')

@@ -86,16 +86,16 @@ class CategoryListView(generics.ListCreateAPIView):
     permission_classes = (IsAdminOrReadOnly,)
 
     def list(self, request, *args, **kwargs):
-        cached = cache.get('categories:list')
+        cached = cache.get('categories:list:v3')
         if cached is not None:
             return Response(cached)
         response = super().list(request, *args, **kwargs)
-        cache.set('categories:list', response.data, CATEGORY_CACHE_TTL)
+        cache.set('categories:list:v3', response.data, CATEGORY_CACHE_TTL)
         return response
 
     def perform_create(self, serializer):
         serializer.save()
-        cache.delete('categories:list')
+        cache.delete('categories:list:v3')
 
 
 class CategoryDetailView(generics.RetrieveUpdateDestroyAPIView):
@@ -105,11 +105,11 @@ class CategoryDetailView(generics.RetrieveUpdateDestroyAPIView):
 
     def perform_update(self, serializer):
         serializer.save()
-        cache.delete('categories:list')
+        cache.delete('categories:list:v3')
 
     def perform_destroy(self, instance):
         instance.delete()
-        cache.delete('categories:list')
+        cache.delete('categories:list:v3')
 
 
 class ProductListView(generics.ListCreateAPIView):
@@ -121,9 +121,9 @@ class ProductListView(generics.ListCreateAPIView):
     ordering_fields = ('price', 'rating', 'created_at')
 
     def get_queryset(self):
-        qs = Product.objects.all().select_related('category', 'trader', 'trader_product__trader').prefetch_related('images')
+        qs = Product.objects.all().select_related('category', 'trader', 'trader_product__trader').prefetch_related('images', 'variants')
         if not self.request.user.is_staff:
-            qs = qs.filter(is_active=True)
+            qs = qs.filter(is_active=True, review_status='approved')
         category = self.request.query_params.get('category')
         if category:
             qs = qs.filter(category__slug=category)
@@ -156,7 +156,7 @@ class ProductListView(generics.ListCreateAPIView):
 
 
 class ProductDetailView(generics.RetrieveUpdateDestroyAPIView):
-    queryset = Product.objects.all().select_related('category', 'trader', 'trader_product__trader').prefetch_related('images')
+    queryset = Product.objects.all().select_related('category', 'trader', 'trader_product__trader').prefetch_related('images', 'variants')
     serializer_class = ProductSerializer
     permission_classes = (IsAdminOrProductOwnerOrReadOnly,)
 
@@ -165,9 +165,9 @@ class ProductDetailView(generics.RetrieveUpdateDestroyAPIView):
         if not self.request.user.is_staff:
             trader = getattr(self.request.user, 'trader_application', None)
             if trader is None:
-                return queryset.filter(is_active=True)
+                return queryset.filter(is_active=True, review_status='approved')
             queryset = queryset.filter(
-                Q(is_active=True)
+                Q(is_active=True, review_status='approved')
                 | Q(trader_id=trader.pk)
                 | Q(trader_product__trader_id=trader.pk)
             )
@@ -176,9 +176,20 @@ class ProductDetailView(generics.RetrieveUpdateDestroyAPIView):
     def perform_update(self, serializer):
         cover = self.request.FILES.get('image')
         product = serializer.save(**(({'image': cover}) if cover else {}))
+        submit_for_review = self.request.data.get('submit_for_review')
+        if product.review_status in ('draft', 'rejected', 'changes_required') and submit_for_review is not None:
+            is_submitting = str(submit_for_review).strip().lower() in {'true', '1', 'yes'}
+            product.review_status = 'pending_review' if is_submitting else 'draft'
+            product.review_note = ''
+            product.is_active = False
+            product.save(update_fields=('review_status', 'review_note', 'is_active'))
         if product.trader_product_id:
             trader_product = product.trader_product
             trader_product.name = product.name
+            trader_product.brand = product.brand
+            trader_product.condition = product.condition
+            trader_product.tags = product.tags
+            trader_product.specifications = product.specifications
             trader_product.short_description = product.short_description
             trader_product.long_description = product.long_description
             trader_product.description = product.short_description
@@ -192,7 +203,8 @@ class ProductDetailView(generics.RetrieveUpdateDestroyAPIView):
             trader_product.is_new_deal = product.is_new_deal
             trader_product.is_active = product.is_active
             trader_product.save(update_fields=(
-                'name', 'short_description', 'long_description', 'description',
+                'name', 'brand', 'condition', 'tags', 'specifications',
+                'short_description', 'long_description', 'description',
                 'price', 'original_price', 'delivery_fee', 'stock', 'category',
                 'image', 'is_featured', 'is_new_deal', 'is_active', 'updated_at',
             ))
@@ -207,6 +219,50 @@ class ProductDetailView(generics.RetrieveUpdateDestroyAPIView):
         product_id = instance.pk
         instance.delete()
         _invalidate_product_cache(product_id)
+
+
+class ProductReviewStatusView(APIView):
+    permission_classes = (permissions.IsAdminUser,)
+
+    def post(self, request, pk):
+        product = get_object_or_404(
+            Product.objects.select_related('trader', 'trader_product__trader'),
+            pk=pk,
+        )
+        review_status = request.data.get('review_status')
+        allowed_statuses = {'approved', 'rejected', 'changes_required', 'disabled', 'archived'}
+        if review_status not in allowed_statuses:
+            return Response(
+                {'review_status': 'Choose an allowed review status.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        review_note = str(request.data.get('review_note', '')).strip()
+        if review_status in {'rejected', 'changes_required'} and not review_note:
+            return Response(
+                {'review_note': 'Provide a reason for this decision.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        product.review_status = review_status
+        product.review_note = review_note if review_status in {'rejected', 'changes_required'} else ''
+        if review_status == 'approved':
+            trader = product.trader or (
+                product.trader_product.trader if product.trader_product_id else None
+            )
+            trader_product_active = (
+                product.trader_product.is_active if product.trader_product_id else True
+            )
+            product.is_active = bool(
+                trader_product_active
+                and (not trader or (trader.is_visible and not trader.is_closed))
+            )
+        else:
+            product.is_active = False
+
+        product.save(update_fields=('review_status', 'review_note', 'is_active'))
+        _invalidate_product_cache(product.pk)
+        return Response(ProductSerializer(product, context={'request': request}).data)
 
 
 class ProductStockAddView(APIView):
@@ -241,7 +297,7 @@ class ProductImageDeleteView(APIView):
 
 
 class ProductSlugDetailView(generics.RetrieveAPIView):
-    queryset = Product.objects.all().select_related('category', 'trader', 'trader_product__trader')
+    queryset = Product.objects.all().select_related('category', 'trader', 'trader_product__trader').prefetch_related('variants')
     serializer_class = ProductSerializer
     permission_classes = (IsAdminOrReadOnly,)
     lookup_field = 'slug'
@@ -250,7 +306,7 @@ class ProductSlugDetailView(generics.RetrieveAPIView):
     def get_queryset(self):
         queryset = super().get_queryset()
         if not self.request.user.is_staff:
-            queryset = queryset.filter(is_active=True)
+            queryset = queryset.filter(is_active=True, review_status='approved')
         return queryset
 
     def retrieve(self, request, *args, **kwargs):
@@ -272,7 +328,10 @@ class RecommendedProductsView(APIView):
 
 
 def _get_recommended_products_for_user(user, limit=12):
-    qs = Product.objects.filter(is_active=True).select_related('category').prefetch_related('images').order_by('-rating', '-created_at')
+    qs = Product.objects.filter(
+        is_active=True,
+        review_status='approved',
+    ).select_related('category').prefetch_related('images', 'variants').order_by('-rating', '-created_at')
 
     if not user or not user.is_authenticated:
         return list(qs[:limit])
