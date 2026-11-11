@@ -149,6 +149,22 @@ class ProductRecommendationsAPITest(TestCase):
                 self.assertNotIn(self.linked_seller_product.id, [item['id'] for item in listing.data['results']])
                 self.assertEqual(detail.status_code, 404)
 
+    def test_existing_unsigned_agreement_does_not_hide_approved_trader_products(self):
+        self.trader.agreement_required = True
+        self.trader.agreement_signed_at = None
+        self.trader.save(update_fields=['agreement_required', 'agreement_signed_at'])
+
+        listing = self.client.get(reverse('product-list'))
+        detail = self.client.get(
+            reverse('product-detail-by-slug', kwargs={'slug': self.seller_product.slug})
+        )
+
+        product_ids = [item['id'] for item in listing.data['results']]
+        self.assertIn(self.seller_product.id, product_ids)
+        self.assertIn(self.linked_seller_product.id, product_ids)
+        self.assertEqual(detail.status_code, 200)
+        self.assertEqual(detail.data['seller_uuid'], str(self.trader.uuid))
+
 
     def test_product_list_honors_page_size_and_returns_next_page(self):
         for index in range(3):

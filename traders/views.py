@@ -1002,8 +1002,19 @@ class TraderAccountView(APIView):
         if 'is_visible' in request.data or 'is_closed' in request.data:
             from django.core.cache import cache
             from products.models import Product
+            from .models import TraderProduct
 
             try:
+                if trader.is_visible and not trader.is_closed:
+                    for trader_product in TraderProduct.objects.filter(trader=trader).select_related('public_product'):
+                        try:
+                            public_product = trader_product.public_product
+                        except Product.DoesNotExist:
+                            continue
+                        if public_product.is_active != trader_product.is_active:
+                            public_product.is_active = trader_product.is_active
+                            public_product.save(update_fields=['is_active'])
+
                 cache.delete('products:list')
                 for product_id in Product.objects.filter(
                     Q(trader=trader) | Q(trader_product__trader=trader)

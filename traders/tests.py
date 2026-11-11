@@ -400,6 +400,34 @@ class TraderInventoryStockSyncTests(TestCase):
 		self.assertEqual(reopened.status_code, 200)
 		self.assertIn(public_product.id, [item['id'] for item in public_list.data['results']])
 
+	def test_reopening_shop_restores_products_disabled_by_previous_visibility_sync(self):
+		public_product = Product.objects.create(
+			name='Previously Hidden Product',
+			price=25000,
+			stock=4,
+			is_active=False,
+			review_status='approved',
+			trader=self.trader,
+		)
+		trader_product = TraderProduct.objects.create(
+			trader=self.trader,
+			name='Previously Hidden Product',
+			price=25000,
+			stock=4,
+			is_active=True,
+		)
+		public_product.trader_product = trader_product
+		public_product.save(update_fields=['trader_product'])
+		account_url = reverse('trader-account', args=[self.trader.uuid])
+
+		response = self.client.patch(account_url, {'is_visible': True}, format='json')
+		public_list = APIClient().get(reverse('product-list'))
+		public_product.refresh_from_db()
+
+		self.assertEqual(response.status_code, 200)
+		self.assertTrue(public_product.is_active)
+		self.assertIn(public_product.id, [item['id'] for item in public_list.data['results']])
+
 	def test_new_trader_product_and_variants_wait_for_admin_approval(self):
 		category = Category.objects.create(name='Color Goods', slug='color-goods')
 		CategoryAttribute.objects.create(

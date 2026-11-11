@@ -16,10 +16,6 @@ def public_marketplace_product_filter(product_prefix=''):
                 f'{trader_path}__is_visible': True,
                 f'{trader_path}__is_closed': False,
             })
-            & (
-                Q(**{f'{trader_path}__agreement_required': False})
-                | Q(**{f'{trader_path}__agreement_signed_at__isnull': False})
-            )
         )
         | (
             Q(**{
@@ -27,9 +23,5 @@ def public_marketplace_product_filter(product_prefix=''):
                 f'{linked_trader_path}__is_visible': True,
                 f'{linked_trader_path}__is_closed': False,
             })
-            & (
-                Q(**{f'{linked_trader_path}__agreement_required': False})
-                | Q(**{f'{linked_trader_path}__agreement_signed_at__isnull': False})
-            )
         )
     )

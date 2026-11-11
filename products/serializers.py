@@ -235,7 +235,6 @@ class ProductSerializer(serializers.ModelSerializer):
             or trader.status != 'approved'
             or not trader.is_visible
             or trader.is_closed
-            or (trader.agreement_required and not trader.agreement_signed_at)
         ):
             return None
         return str(trader.uuid)
