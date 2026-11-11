@@ -127,6 +127,7 @@ CORS_ALLOW_HEADERS = [
     'dnt', 'origin', 'user-agent', 'x-csrftoken', 'x-requested-with',
     'ngrok-skip-browser-warning',
 ]
+CORS_EXPOSE_HEADERS = ['x-railway-request-id', 'x-hikari-trace']
 CORS_PREFLIGHT_MAX_AGE = 86400
 
 REST_FRAMEWORK = {
