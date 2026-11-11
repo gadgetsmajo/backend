@@ -387,7 +387,7 @@ def _sync_to_product(trader_product):
         'stock': trader_product.stock,
         'category': trader_product.category,
         'image': trader_product.image,
-        'is_active': trader_product.is_active and trader_product.trader.is_visible,
+        'is_active': trader_product.is_active,
         'is_featured': trader_product.is_featured,
         'is_new_deal': trader_product.is_new_deal,
     }
@@ -999,10 +999,18 @@ class TraderAccountView(APIView):
 
         trader.save()
 
-        # Sync product visibility when is_visible changes
-        if 'is_visible' in request.data:
+        if 'is_visible' in request.data or 'is_closed' in request.data:
+            from django.core.cache import cache
             from products.models import Product
-            Product.objects.filter(trader=trader).update(is_active=trader.is_visible)
+
+            try:
+                cache.delete('products:list')
+                for product_id in Product.objects.filter(
+                    Q(trader=trader) | Q(trader_product__trader=trader)
+                ).values_list('pk', flat=True):
+                    cache.delete(f'products:detail:{product_id}')
+            except (ConnectionInterrupted, RedisError):
+                logger.exception('Product cache invalidation failed after changing trader visibility for %s.', trader.pk)
 
         return Response(TraderApplicationAdminSerializer(trader).data)
 

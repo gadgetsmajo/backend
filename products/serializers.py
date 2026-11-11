@@ -230,7 +230,13 @@ class ProductSerializer(serializers.ModelSerializer):
 
     def get_seller_uuid(self, obj):
         trader = obj.trader or (obj.trader_product.trader if obj.trader_product_id else None)
-        if not trader or trader.status != 'approved' or not trader.is_visible or trader.is_closed:
+        if (
+            not trader
+            or trader.status != 'approved'
+            or not trader.is_visible
+            or trader.is_closed
+            or (trader.agreement_required and not trader.agreement_signed_at)
+        ):
             return None
         return str(trader.uuid)
 

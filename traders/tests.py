@@ -363,6 +363,43 @@ class TraderInventoryStockSyncTests(TestCase):
 		self.client = APIClient()
 		self.client.force_authenticate(user=self.user)
 
+	def test_shop_visibility_hides_and_restores_products_without_overwriting_product_state(self):
+		public_product = Product.objects.create(
+			name='Visibility Test Product',
+			price=25000,
+			stock=4,
+			is_active=True,
+			review_status='approved',
+			trader=self.trader,
+		)
+		account_url = reverse('trader-account', args=[self.trader.uuid])
+
+		hidden = self.client.patch(account_url, {'is_visible': False}, format='json')
+		public_list = APIClient().get(reverse('product-list'))
+		public_product.refresh_from_db()
+		self.assertEqual(hidden.status_code, 200)
+		self.assertNotIn(public_product.id, [item['id'] for item in public_list.data['results']])
+		self.assertTrue(public_product.is_active)
+
+		visible = self.client.patch(account_url, {'is_visible': True}, format='json')
+		public_list = APIClient().get(reverse('product-list'))
+		public_product.refresh_from_db()
+		self.assertEqual(visible.status_code, 200)
+		self.assertIn(public_product.id, [item['id'] for item in public_list.data['results']])
+		self.assertTrue(public_product.is_active)
+
+		closed = self.client.patch(account_url, {'is_closed': True}, format='json')
+		public_list = APIClient().get(reverse('product-list'))
+		public_product.refresh_from_db()
+		self.assertEqual(closed.status_code, 200)
+		self.assertNotIn(public_product.id, [item['id'] for item in public_list.data['results']])
+		self.assertTrue(public_product.is_active)
+
+		reopened = self.client.patch(account_url, {'is_closed': False}, format='json')
+		public_list = APIClient().get(reverse('product-list'))
+		self.assertEqual(reopened.status_code, 200)
+		self.assertIn(public_product.id, [item['id'] for item in public_list.data['results']])
+
 	def test_new_trader_product_and_variants_wait_for_admin_approval(self):
 		category = Category.objects.create(name='Color Goods', slug='color-goods')
 		CategoryAttribute.objects.create(

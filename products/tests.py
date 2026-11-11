@@ -43,6 +43,41 @@ class ProductRecommendationsAPITest(TestCase):
             phone='0770000000',
         )
         OrderItem.objects.create(order=self.order, product=self.purchased_product, quantity=1, price=self.purchased_product.price)
+        self.trader = TraderApplication.objects.create(
+            full_name='Seller Owner',
+            email='seller-visibility@example.com',
+            phone='0700000000',
+            business_name='Visible Seller Shop',
+            business_type='sole_proprietor',
+            location='Kampala',
+            product_categories='Seller Goods',
+            status='approved',
+        )
+        self.seller_product = Product.objects.create(
+            name='Seller Product',
+            category=self.phone_category,
+            price=15000,
+            stock=3,
+            is_active=True,
+            review_status='approved',
+            trader=self.trader,
+        )
+        self.trader_product = TraderProduct.objects.create(
+            trader=self.trader,
+            name='Linked Seller Product',
+            price=18000,
+            stock=2,
+            category=self.phone_category,
+        )
+        self.linked_seller_product = Product.objects.create(
+            name='Linked Seller Product',
+            category=self.phone_category,
+            price=18000,
+            stock=2,
+            is_active=True,
+            review_status='approved',
+            trader_product=self.trader_product,
+        )
 
     def test_authenticated_user_gets_category_based_recommendations(self):
         self.client.force_login(self.user)
@@ -79,6 +114,40 @@ class ProductRecommendationsAPITest(TestCase):
         product_ids = [item['id'] for item in response.data['results']]
         self.assertEqual(product_ids[:2], [self.purchased_product.id, self.related_product.id])
         self.assertNotIn(self.other_product.id, product_ids)
+
+
+    def test_public_catalog_and_product_page_return_the_real_trader(self):
+        listing = self.client.get(reverse('product-list'))
+        detail = self.client.get(
+            reverse('product-detail-by-slug', kwargs={'slug': self.seller_product.slug})
+        )
+
+        self.assertIn(self.seller_product.id, [item['id'] for item in listing.data['results']])
+        self.assertIn(self.linked_seller_product.id, [item['id'] for item in listing.data['results']])
+        self.assertEqual(detail.status_code, 200)
+        self.assertEqual(detail.data['seller_uuid'], str(self.trader.uuid))
+        linked_detail = self.client.get(
+            reverse('product-detail-by-slug', kwargs={'slug': self.linked_seller_product.slug})
+        )
+        self.assertEqual(linked_detail.status_code, 200)
+        self.assertEqual(linked_detail.data['seller_uuid'], str(self.trader.uuid))
+
+    def test_closed_or_hidden_trader_products_are_not_listed_as_majo_products(self):
+        for field in ('is_closed', 'is_visible'):
+            with self.subTest(field=field):
+                self.trader.is_closed = False
+                self.trader.is_visible = True
+                setattr(self.trader, field, field == 'is_closed')
+                self.trader.save(update_fields=['is_closed', 'is_visible'])
+
+                listing = self.client.get(reverse('product-list'))
+                detail = self.client.get(
+                    reverse('product-detail-by-slug', kwargs={'slug': self.seller_product.slug})
+                )
+
+                self.assertNotIn(self.seller_product.id, [item['id'] for item in listing.data['results']])
+                self.assertNotIn(self.linked_seller_product.id, [item['id'] for item in listing.data['results']])
+                self.assertEqual(detail.status_code, 404)
 
 
     def test_product_list_honors_page_size_and_returns_next_page(self):

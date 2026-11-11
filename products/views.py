@@ -22,6 +22,7 @@ from .serializers import (
     ProductReviewSerializer, RatingSummarySerializer,
 )
 from .permissions import IsAdminOrProductOwnerOrReadOnly, IsAdminOrReadOnly
+from .visibility import public_marketplace_product_filter
 from orders.models import OrderItem
 from users.models import UserBehaviour
 
@@ -123,7 +124,10 @@ class ProductListView(generics.ListCreateAPIView):
     def get_queryset(self):
         qs = Product.objects.all().select_related('category', 'trader', 'trader_product__trader').prefetch_related('images', 'variants')
         if not self.request.user.is_staff:
-            qs = qs.filter(is_active=True, review_status='approved')
+            qs = qs.filter(
+                is_active=True,
+                review_status='approved',
+            ).filter(public_marketplace_product_filter())
         category = self.request.query_params.get('category')
         if category:
             qs = qs.filter(category__slug=category)
@@ -165,7 +169,10 @@ class ProductDetailView(generics.RetrieveUpdateDestroyAPIView):
         if not self.request.user.is_staff:
             trader = getattr(self.request.user, 'trader_application', None)
             if trader is None:
-                return queryset.filter(is_active=True, review_status='approved')
+                return queryset.filter(
+                    is_active=True,
+                    review_status='approved',
+                ).filter(public_marketplace_product_filter())
             queryset = queryset.filter(
                 Q(is_active=True, review_status='approved')
                 | Q(trader_id=trader.pk)
@@ -306,7 +313,10 @@ class ProductSlugDetailView(generics.RetrieveAPIView):
     def get_queryset(self):
         queryset = super().get_queryset()
         if not self.request.user.is_staff:
-            queryset = queryset.filter(is_active=True, review_status='approved')
+            queryset = queryset.filter(
+                is_active=True,
+                review_status='approved',
+            ).filter(public_marketplace_product_filter())
         return queryset
 
     def retrieve(self, request, *args, **kwargs):
@@ -331,6 +341,8 @@ def _get_recommended_products_for_user(user, limit=12):
     qs = Product.objects.filter(
         is_active=True,
         review_status='approved',
+    ).filter(
+        public_marketplace_product_filter(),
     ).select_related('category').prefetch_related('images', 'variants').order_by('-rating', '-created_at')
 
     if not user or not user.is_authenticated:
@@ -385,6 +397,11 @@ class FlashSaleListCreateView(generics.ListCreateAPIView):
     def get_queryset(self):
         from django.utils import timezone
         qs = FlashSale.objects.select_related('product__category').prefetch_related('product__images')
+        if self.request.method == 'GET':
+            qs = qs.filter(
+                product__is_active=True,
+                product__review_status='approved',
+            ).filter(public_marketplace_product_filter('product__'))
         if self.request.user.is_authenticated and not self.request.user.is_staff:
             trader = getattr(self.request.user, 'trader_application', None)
             if trader:
@@ -608,9 +625,15 @@ def _update_product_rating(product):
 # ── Share view ───────────────────────────────────────────────────────────────
 
 def ProductShareView(request, slug):
-    product = get_object_or_404(Product.objects.select_related('category'), slug=slug)
+    product = get_object_or_404(
+        Product.objects.select_related('category').filter(
+            is_active=True,
+            review_status='approved',
+        ).filter(public_marketplace_product_filter()),
+        slug=slug,
+    )
     image_url = product.image.url if product.image else ''
-    description = f'Buy {product.name} from Majo Gadgets for UGX {product.price:,.0f}. Quality gadgets, great value.'
+    description = f'Shop {product.name} on Majo Gadgets for UGX {product.price:,.0f}.'
     app_url = f'shopmajo://shop/{product.slug}'
     title = escape(f'{product.name} | Majo Gadgets')
     safe_description = escape(description)
