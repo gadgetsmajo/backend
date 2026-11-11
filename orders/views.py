@@ -790,6 +790,7 @@ class InitiatePaymentView(APIView):
                     'first_name': first_name,
                     'middle_name': middle_name,
                     'last_name': last_name,
+                    'address_line_1': order.delivery_address.strip() or 'Not provided',
                 },
             }
             resp = http_requests.post(
