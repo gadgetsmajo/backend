@@ -335,8 +335,6 @@ class PesapalSuccessfulPaymentTests(TestCase):
         mock_get.return_value.json.return_value = {
             'amount': '25000.00',
             'currency_code': 'UGX',
-            'merchant_reference': self.order.code,
-            'order_tracking_id': self.payment.pesapal_order_tracking_id,
             'payment_status_description': 'Completed',
             'payment_method': 'Mobile Money',
             'confirmation_code': 'CONFIRMED-123',
@@ -389,6 +387,30 @@ class PesapalSuccessfulPaymentTests(TestCase):
         trader_email = next(email for email in sent_emails if email['to'] == self.trader.email)
         self.assertIn('Prepare paid order', trader_email['subject'])
         self.assertIn('View and prepare order', trader_email['html'])
+
+    @patch('orders.views._get_pesapal_transaction_status')
+    @patch('users.emails._send')
+    def test_payment_status_refresh_completes_order_without_ipn(self, mock_email_send, mock_gateway_status):
+        self.client.force_authenticate(user=self.customer)
+        mock_gateway_status.return_value = {
+            'amount': '25000.00',
+            'currency_code': 'UGX',
+            'payment_status_description': 'Completed',
+            'payment_method': 'Visa',
+            'confirmation_code': 'SANDBOX-CARD-123',
+        }
+
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(f'/api/orders/{self.order.code}/payment-status/')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data, {'status': 'completed', 'order_status': 'processing'})
+        self.payment.refresh_from_db()
+        self.order.refresh_from_db()
+        self.assertEqual(self.payment.status, 'completed')
+        self.assertEqual(self.payment.confirmation_code, 'SANDBOX-CARD-123')
+        self.assertEqual(self.order.status, 'processing')
+        mock_gateway_status.assert_called_once_with(self.payment.pesapal_order_tracking_id)
 
 
 class OrderDeliveryEmailTests(TestCase):

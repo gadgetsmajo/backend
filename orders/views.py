@@ -948,6 +948,133 @@ class InitiatePaymentView(APIView):
             return Response({'detail': f'Payment failed: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+def _sync_pesapal_payment(payment, data):
+    try:
+        pesapal_amount = Decimal(str(data['amount']))
+    except (KeyError, TypeError, ValueError, InvalidOperation):
+        raise ValueError('Invalid payment amount.')
+
+    pesapal_currency = str(data.get('currency_code') or data.get('currency') or '').upper()
+    provider_reference = str(data.get('merchant_reference') or '').strip()
+    provider_tracking_id = str(data.get('order_tracking_id') or '').strip()
+
+    with transaction.atomic():
+        payment = Payment.objects.select_for_update().select_related('order__user').get(pk=payment.pk)
+        if payment.status == 'completed':
+            return payment
+
+        if (
+            not pesapal_amount.is_finite()
+            or pesapal_amount <= 0
+            or pesapal_amount != payment.amount
+            or not payment.order
+            or payment.amount != payment.order.total
+            or pesapal_currency != payment.currency.upper()
+            or (provider_reference and payment.merchant_reference and provider_reference != payment.merchant_reference)
+            or (provider_tracking_id and provider_tracking_id != payment.pesapal_order_tracking_id)
+        ):
+            logger.error(
+                'IPN verification mismatch: expected_amount=%s reported_amount=%s expected_currency=%s '
+                'reported_currency=%s tracking=%s',
+                payment.amount, pesapal_amount, payment.currency, pesapal_currency,
+                payment.pesapal_order_tracking_id,
+            )
+            raise ValueError('Payment verification failed.')
+
+        payment_status_desc = str(data.get('payment_status_description') or '').strip().lower()
+        mapped = {
+            'completed': 'completed',
+            'failed': 'failed',
+            'invalid': 'invalid',
+            'cancelled': 'cancelled',
+        }.get(payment_status_desc, 'pending')
+        payment.status = mapped
+        payment.payment_method = data.get('payment_method', '')
+        payment.confirmation_code = data.get('confirmation_code') or payment.confirmation_code
+        payment.save(update_fields=['status', 'payment_method', 'confirmation_code', 'updated_at'])
+
+        order = payment.order
+        if mapped == 'completed' and order.status in ('pending', 'processing'):
+            from traders.wallet import record_paid_order_earnings
+            record_paid_order_earnings(order)
+            for item in order.items.select_related('product').all():
+                if item.product:
+                    Product.objects.filter(pk=item.product.pk).update(
+                        stock=models.F('stock') - item.quantity
+                    )
+                if item.variant_id:
+                    ProductVariant.objects.filter(pk=item.variant_id).update(
+                        stock=models.F('stock') - item.quantity
+                    )
+            if order.status == 'pending':
+                order.status = 'processing'
+                order.save(update_fields=['status', 'updated_at'])
+
+            transaction.on_commit(
+                lambda order_id=order.pk, method=payment.payment_method:
+                    _send_paid_order_followups(order_id, method)
+            )
+        elif mapped in ('failed', 'invalid', 'cancelled') and order.status == 'pending':
+            order.status = 'cancelled'
+            order.cancel_reason = f'Payment {mapped}.'
+            order.save(update_fields=['status', 'cancel_reason', 'updated_at'])
+            _notify(
+                order.user,
+                'order',
+                f'Payment {mapped.title()} — Order #{order.code}',
+                f'Your payment {mapped}. Order #{order.code} has been cancelled. No money was deducted.',
+            )
+            try:
+                send_payment_failed_email(
+                    order.user.name, order.user.email, order.code,
+                    f'{order.total:,.0f}', mapped,
+                )
+            except Exception:
+                logger.exception('Failed to send payment failed email for order %s', order.code)
+
+        return payment
+
+
+def _get_pesapal_transaction_status(tracking_id):
+    token = _pesapal_token()
+    response = http_requests.get(
+        f"{settings.PESAPAL_BASE_URL}/api/Transactions/GetTransactionStatus",
+        params={'orderTrackingId': tracking_id},
+        headers={'Accept': 'application/json', 'Authorization': f'Bearer {token}'},
+        timeout=15,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+class PaymentStatusRefreshView(APIView):
+    permission_classes = (permissions.IsAuthenticated,)
+
+    def post(self, request, code):
+        payment = Payment.objects.select_related('order').filter(
+            order__code=code,
+            order__user=request.user,
+        ).first()
+        if not payment:
+            return Response({'detail': 'Payment not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        if payment.status != 'completed':
+            try:
+                data = _get_pesapal_transaction_status(payment.pesapal_order_tracking_id)
+                payment = _sync_pesapal_payment(payment, data)
+            except ValueError as exc:
+                return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+            except http_requests.HTTPError:
+                logger.exception('Pesapal status refresh failed for order %s', code)
+                return Response({'detail': 'Unable to refresh payment status.'}, status=status.HTTP_502_BAD_GATEWAY)
+            except Exception:
+                logger.exception('Unexpected payment status refresh error for order %s', code)
+                return Response({'detail': 'Unable to refresh payment status.'}, status=status.HTTP_502_BAD_GATEWAY)
+
+        payment.order.refresh_from_db(fields=['status'])
+        return Response({'status': payment.status, 'order_status': payment.order.status})
+
+
 class PesapalIPNView(APIView):
     permission_classes = (permissions.AllowAny,)
 
@@ -1001,7 +1128,11 @@ class PesapalIPNView(APIView):
                 or not payment.order
                 or payment.amount != payment.order.total
                 or pesapal_currency != payment.currency.upper()
-                or (payment.merchant_reference and provider_reference != payment.merchant_reference)
+                or (
+                    provider_reference
+                    and payment.merchant_reference
+                    and provider_reference != payment.merchant_reference
+                )
                 or (provider_tracking_id and provider_tracking_id != tracking_id)
             ):
                 logger.error(

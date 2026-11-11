@@ -4,7 +4,7 @@ from .views import (
     ReturnRequestView, ReturnRequestListView,
     AdminOrderListView, AdminOrderDetailView, AdminOrderConfirmView, AdminOrderCancelView,
     AdminOrderShipView, AdminOrderReadyForPickupView, AdminOrderDeliverView,
-    InitiatePaymentView, PesapalIPNView, AdminPaymentsView,
+    InitiatePaymentView, PaymentStatusRefreshView, PesapalIPNView, AdminPaymentsView,
     AdminReturnRequestListView, AdminReturnRequestApproveView, AdminReturnRequestRejectView,
     AdminReturnRequestRefundedView,
 )
@@ -41,6 +41,7 @@ urlpatterns = [
     path('admin/<str:code>/ready-for-pickup/', AdminOrderReadyForPickupView.as_view(), name='admin-order-ready-for-pickup'),
     path('admin/<str:code>/deliver/', AdminOrderDeliverView.as_view(), name='admin-order-deliver'),
     path('pesapal/ipn/', PesapalIPNView.as_view(), name='pesapal-ipn'),
+    path('<str:code>/payment-status/', PaymentStatusRefreshView.as_view(), name='payment-status-refresh'),
     path('<str:code>/', OrderDetailView.as_view(), name='order-detail'),
     path('<str:code>/cancel/', OrderCancelView.as_view(), name='order-cancel'),
     path('<str:code>/pay/', InitiatePaymentView.as_view(), name='order-pay'),
