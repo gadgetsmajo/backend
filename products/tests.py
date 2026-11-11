@@ -290,6 +290,51 @@ class ProductCommissionPricingAPITest(TestCase):
         product.refresh_from_db()
         self.assertEqual(product.name, 'Other Product')
 
+    def test_trader_can_delete_own_product_through_product_detail_endpoint(self):
+        trader_user = User.objects.create_user(email='owner@example.com', name='Owner', password='Password123!')
+        trader = TraderApplication.objects.create(
+            full_name='Owner', email='owner@example.com', phone='0700000000',
+            business_name='Owner Store', business_type='sole_proprietor',
+            location='Kampala', district='Central', product_categories='Phones',
+            status='approved', user=trader_user,
+        )
+        product = Product.objects.create(
+            name='Owner Product', category=self.category, price='100.00',
+            stock=2, trader=trader,
+        )
+        self.client.force_authenticate(user=trader_user)
+
+        response = self.client.delete(reverse('product-detail', args=[product.id]))
+
+        self.assertEqual(response.status_code, 204)
+        self.assertFalse(Product.objects.filter(pk=product.pk).exists())
+
+    def test_trader_cannot_delete_another_traders_product_through_product_detail_endpoint(self):
+        owner = User.objects.create_user(email='owner@example.com', name='Owner', password='Password123!')
+        trader = TraderApplication.objects.create(
+            full_name='Owner', email='owner@example.com', phone='0700000000',
+            business_name='Owner Store', business_type='sole_proprietor',
+            location='Kampala', district='Central', product_categories='Phones',
+            status='approved', user=owner,
+        )
+        product = Product.objects.create(
+            name='Other Product', category=self.category, price='100.00',
+            stock=2, trader=trader,
+        )
+        other_owner = User.objects.create_user(email='other@example.com', name='Other', password='Password123!')
+        TraderApplication.objects.create(
+            full_name='Other', email='other@example.com', phone='0700000001',
+            business_name='Other Store', business_type='sole_proprietor',
+            location='Jinja', district='Eastern', product_categories='Phones',
+            status='approved', user=other_owner,
+        )
+        self.client.force_authenticate(user=other_owner)
+
+        response = self.client.delete(reverse('product-detail', args=[product.id]))
+
+        self.assertEqual(response.status_code, 403)
+        self.assertTrue(Product.objects.filter(pk=product.pk).exists())
+
     def test_non_admin_cannot_edit_product(self):
         user = User.objects.create_user(email='buyer@example.com', name='Buyer', password='Password123!')
         self.client.force_authenticate(user=user)
