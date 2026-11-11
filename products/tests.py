@@ -1,3 +1,5 @@
+import uuid
+
 from django.contrib.auth import get_user_model
 from django_redis.exceptions import ConnectionInterrupted
 from django.test import TestCase
@@ -145,6 +147,17 @@ class ProductCommissionPricingAPITest(TestCase):
             price='100.00',
             stock=5,
         )
+
+    def test_product_can_be_updated_when_uuid_is_a_string(self):
+        product_uuid = str(self.existing_product.uuid)
+        self.existing_product.uuid = product_uuid
+        self.existing_product.name = 'Updated Product'
+
+        self.existing_product.save()
+
+        self.assertEqual(self.existing_product.slug, f'updated-product-{uuid.UUID(product_uuid).hex[:12]}')
+        self.existing_product.refresh_from_db()
+        self.assertEqual(self.existing_product.name, 'Updated Product')
 
     def test_current_commission_applies_to_products_added_before_and_after_setting(self):
         list_before_setting = self.client.get(reverse('product-list'))

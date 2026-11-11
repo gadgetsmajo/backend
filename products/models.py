@@ -49,7 +49,7 @@ class Product(models.Model):
 
     def save(self, *args, **kwargs):
         self.name = self.name.strip().title()
-        self.slug = f'{slugify(self.name)}-{self.uuid.hex[:12]}'
+        self.slug = f'{slugify(self.name)}-{uuid.UUID(str(self.uuid)).hex[:12]}'
         super().save(*args, **kwargs)
 
 
