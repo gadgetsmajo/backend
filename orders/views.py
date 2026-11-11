@@ -809,7 +809,7 @@ class InitiatePaymentView(APIView):
                     'middle_name': middle_name,
                     'last_name': last_name,
                     'line_1': delivery_address,
-                    'line_2': '',
+                    'line_2': 'NA',
                     'city': request.user.district.strip() or 'Kampala',
                     'state': request.user.region.strip(),
                     'postal_code': '',

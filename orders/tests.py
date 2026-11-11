@@ -54,6 +54,7 @@ class PesapalBillingNameTests(TestCase):
         self.assertEqual(billing_address['middle_name'], 'NA')
         self.assertEqual(billing_address['last_name'], 'Doe')
         self.assertEqual(billing_address['line_1'], 'Kampala_Uganda')
+        self.assertEqual(billing_address['line_2'], 'NA')
         self.assertEqual(billing_address['country_code'], 'UG')
         self.assertEqual(billing_address['city'], 'Kampala')
         self.assertNotIn('address_line_1', billing_address)
@@ -93,6 +94,7 @@ class PesapalBillingNameTests(TestCase):
         self.assertEqual(response.status_code, 200)
         billing_address = mock_submit.call_args.kwargs['json']['billing_address']
         self.assertEqual(billing_address['line_1'], 'Plot_12_O_Connell_Rd_Kampala')
+        self.assertTrue(billing_address['line_2'])
         self.assertRegex(billing_address['line_1'], r'^[A-Za-z0-9._:-]+$')
 
     @override_settings(
