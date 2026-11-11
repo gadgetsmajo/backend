@@ -13,7 +13,7 @@ from .tasks import send_product_rating_notifications
 from users.models import CartItem, Notification
 from settings_app.models import District, PlatformSettings
 from settings_app.pricing import price_with_platform_charges
-from products.models import Product
+from products.models import Product, ProductVariant
 from users.emails import (
     send_admin_new_order_email,
     send_order_confirmed_email,
@@ -41,6 +41,15 @@ def _product_image(product) -> str:
         return ''
 
 
+def _order_item_name(item) -> str:
+    product_name = item.product.name if item.product else 'Product'
+    options = item.variant_options or {}
+    if not options:
+        return product_name
+    details = ', '.join(f'{key.replace("_", " ")}: {value}' for key, value in options.items())
+    return f'{product_name} ({details})'
+
+
 def _notify(user, ntype: str, title: str, body: str):
     try:
         Notification.objects.create(user=user, type=ntype, title=title, body=body)
@@ -51,10 +60,16 @@ def _notify(user, ntype: str, title: str, body: str):
 def _restore_stock(order):
     from products.models import Product
     from django.db import transaction
-    items = order.items.select_related('product').all()
+    if not Payment.objects.filter(order_id=order.pk, status='completed').exists():
+        return
+    items = order.items.select_related('product', 'variant').all()
     for item in items:
         if item.product:
             Product.objects.filter(pk=item.product.pk).update(
+                stock=models.F('stock') + item.quantity
+            )
+        if item.variant_id:
+            ProductVariant.objects.filter(pk=item.variant_id).update(
                 stock=models.F('stock') + item.quantity
             )
 
@@ -88,8 +103,19 @@ class CartQuoteView(APIView):
                 return Response({'detail': 'Select a valid delivery district.'}, status=status.HTTP_400_BAD_REQUEST)
 
         if request.user.is_authenticated:
-            cart_items = list(CartItem.objects.filter(user=request.user).order_by('product_id'))
-            requested_items = [(item.product_id, item.quantity, item.pk) for item in cart_items]
+            cart_items = list(
+                CartItem.objects.select_related('variant')
+                .filter(user=request.user)
+                .order_by('product_id', 'variant_id')
+            )
+            requested_items = [{
+                'product_id': item.product_id,
+                'quantity': item.quantity,
+                'cart_item_id': item.pk,
+                'variant_id': item.variant_id,
+                'variant_options': item.variant.options if item.variant_id else item.variant_options,
+                'variant_required': bool(item.variant_options and not item.variant_id),
+            } for item in cart_items]
             if len(requested_items) > 100:
                 return Response({'detail': 'Your cart has too many different products.'}, status=status.HTTP_400_BAD_REQUEST)
         else:
@@ -105,48 +131,82 @@ class CartQuoteView(APIView):
                 try:
                     product_id = int(raw_item.get('product_id'))
                     quantity = int(raw_item.get('quantity'))
+                    variant_id = int(raw_item['variant_id']) if raw_item.get('variant_id') not in (None, '') else None
+                    cart_item_id = int(raw_item['id']) if raw_item.get('id') not in (None, '') else None
                 except (TypeError, ValueError):
                     return Response({'detail': 'Invalid cart item.'}, status=status.HTTP_400_BAD_REQUEST)
                 if product_id < 1 or not 1 <= quantity <= 100:
                     return Response({'detail': 'Invalid cart item quantity.'}, status=status.HTTP_400_BAD_REQUEST)
-                requested_items.append((product_id, quantity, None))
+                if variant_id is not None and variant_id < 1:
+                    return Response({'detail': 'Invalid product option.'}, status=status.HTTP_400_BAD_REQUEST)
+                requested_items.append({
+                    'product_id': product_id,
+                    'quantity': quantity,
+                    'cart_item_id': cart_item_id,
+                    'variant_id': variant_id,
+                    'variant_options': raw_item.get('variant_options') if isinstance(raw_item.get('variant_options'), dict) else {},
+                    'variant_required': False,
+                })
 
-        if len({product_id for product_id, _, _ in requested_items}) != len(requested_items):
-            return Response({'detail': 'Duplicate products are not allowed in the cart.'}, status=status.HTTP_400_BAD_REQUEST)
-        if any(not 1 <= quantity <= 100 for _, quantity, _ in requested_items):
+        if len({
+            (item['product_id'], item['variant_id'])
+            for item in requested_items
+        }) != len(requested_items):
+            return Response({'detail': 'Duplicate product options are not allowed in the cart.'}, status=status.HTTP_400_BAD_REQUEST)
+        if any(not 1 <= item['quantity'] <= 100 for item in requested_items):
             return Response({'detail': 'Invalid cart item quantity.'}, status=status.HTTP_400_BAD_REQUEST)
 
         products = {
             product.pk: product
             for product in Product.objects.filter(
-                pk__in=[product_id for product_id, _, _ in requested_items],
+                pk__in={item['product_id'] for item in requested_items},
                 is_active=True,
-            )
+            ).select_related('category').prefetch_related('variants')
         }
-        if len(products) != len(requested_items):
+        if len(products) != len({item['product_id'] for item in requested_items}):
             return Response(
                 {'detail': 'A product in your cart is no longer available. Please refresh your cart.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        variant_ids = {item['variant_id'] for item in requested_items if item['variant_id']}
+        variants = {
+            variant.pk: variant
+            for variant in ProductVariant.objects.filter(pk__in=variant_ids, is_active=True)
+        }
 
         items = []
         subtotal = 0
         product_delivery_total = 0
         platform_settings = PlatformSettings.get()
-        for product_id, quantity, cart_item_id in requested_items:
-            product = products[product_id]
-            if quantity > product.stock:
+        for requested_item in requested_items:
+            product = products[requested_item['product_id']]
+            variant = variants.get(requested_item['variant_id'])
+            product_variants = list(product.variants.all())
+            if (product_variants or requested_item['variant_required']) and not variant:
                 return Response(
-                    {'detail': f'Not enough stock for "{product.name}". Available: {product.stock}.'},
+                    {'detail': f'Select an available option for "{product.name}".'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-            product_price = price_with_platform_charges(product.price, platform_settings)
+            if variant and variant.product_id != product.pk:
+                return Response({'detail': 'The selected option does not belong to this product.'}, status=status.HTTP_400_BAD_REQUEST)
+            quantity = requested_item['quantity']
+            available_stock = variant.stock if variant else product.stock
+            if quantity > available_stock:
+                return Response(
+                    {'detail': f'Not enough stock for "{product.name}". Available: {available_stock}.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            base_price = variant.price if variant else product.price
+            product_price = price_with_platform_charges(base_price, platform_settings)
             line_total = product_price * quantity
             subtotal += line_total
             product_delivery_total += product.delivery_fee
             items.append({
-                'id': cart_item_id or product_id,
-                'product_id': product_id,
+                'id': requested_item['cart_item_id'] or requested_item['product_id'],
+                'product_id': requested_item['product_id'],
+                'variant_id': variant.pk if variant else None,
+                'variant_options': variant.options if variant else {},
+                'variant_sku': variant.sku if variant else '',
                 'product_name': product.name,
                 'product_price': product_price,
                 'product_image': product.image.url if product.image else None,
@@ -484,7 +544,7 @@ class AdminOrderConfirmView(APIView):
         order.status_changed_by = request.user
         order.save(update_fields=['status', 'status_changed_by', 'updated_at'])
         try:
-            items = [{'name': i.product.name, 'qty': i.quantity, 'price': f'{i.price:,.0f}', 'image': _product_image(i.product)} for i in order.items.select_related('product').all()]
+            items = [{'name': _order_item_name(i), 'qty': i.quantity, 'price': f'{i.price:,.0f}', 'image': _product_image(i.product)} for i in order.items.select_related('product').all()]
             send_order_confirmed_email(order.user.name, order.user.email, order.code, f'{order.total:,.0f}', items, order.delivery_address)
         except Exception:
             logger.exception('Failed to send order confirmed email for order %s', code)
@@ -586,7 +646,7 @@ class AdminOrderDeliverView(APIView):
         order.save(update_fields=['status', 'status_changed_by', 'updated_at'])
         try:
             items = [{
-                'name': i.product.name,
+                'name': _order_item_name(i),
                 'qty': i.quantity,
                 'price': f'{i.price:,.0f}',
                 'image': _product_image(i.product),
@@ -850,11 +910,15 @@ class PesapalIPNView(APIView):
                                 Product.objects.filter(pk=item.product.pk).update(
                                     stock=models.F('stock') - item.quantity
                                 )
+                            if item.variant_id:
+                                ProductVariant.objects.filter(pk=item.variant_id).update(
+                                    stock=models.F('stock') - item.quantity
+                                )
                         if order.status == 'pending':
                             order.status = 'processing'
                             order.save(update_fields=['status', 'updated_at'])
 
-                        items = [{'name': i.product.name, 'qty': i.quantity, 'price': f'{i.price:,.0f}', 'image': _product_image(i.product)} for i in order.items.select_related('product').all()]
+                        items = [{'name': _order_item_name(i), 'qty': i.quantity, 'price': f'{i.price:,.0f}', 'image': _product_image(i.product)} for i in order.items.select_related('product').all()]
                         try:
                             send_admin_new_order_email(order.code, order.user.name, order.user.email, f'{order.total:,.0f}', items, order.delivery_address)
                         except Exception:
@@ -878,14 +942,14 @@ class PesapalIPNView(APIView):
                             tid = trader_app.id
                             if tid not in notified_traders:
                                 notified_traders[tid] = {'user': trader_app.user, 'lines': []}
-                            notified_traders[tid]['lines'].append(f'{item.product.name} x{item.quantity}')
+                            notified_traders[tid]['lines'].append(f'{_order_item_name(item)} x{item.quantity}')
                         for entry in notified_traders.values():
                             product_list = ', '.join(entry['lines'])
                             _notify(entry['user'], 'order', 'New Paid Order for Your Product!',
                                     f'A customer paid for: {product_list}. Order #{order.code}.')
 
                         try:
-                            items = [{'name': i.product.name, 'qty': i.quantity, 'price': f'{i.price:,.0f}', 'image': _product_image(i.product)} for i in order.items.select_related('product').all()]
+                            items = [{'name': _order_item_name(i), 'qty': i.quantity, 'price': f'{i.price:,.0f}', 'image': _product_image(i.product)} for i in order.items.select_related('product').all()]
                             send_payment_successful_email(
                                 order.user.name, order.user.email, order.code,
                                 f'{order.total:,.0f}', items,

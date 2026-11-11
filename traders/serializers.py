@@ -382,6 +382,8 @@ class TraderOrderItemSerializer(serializers.ModelSerializer):
     delivery_address  = serializers.CharField(source='order_item.order.delivery_address', read_only=True)
     product_name      = serializers.CharField(source='order_item.product.name', read_only=True)
     product_image     = serializers.SerializerMethodField()
+    variant_options   = serializers.JSONField(source='order_item.variant_options', read_only=True)
+    variant_sku       = serializers.CharField(source='order_item.variant_sku', read_only=True)
     quantity          = serializers.IntegerField(source='order_item.quantity', read_only=True)
     price             = serializers.DecimalField(source='order_item.price', max_digits=10, decimal_places=2, read_only=True)
     order_item_id     = serializers.IntegerField(source='order_item.id', read_only=True)
@@ -393,12 +395,12 @@ class TraderOrderItemSerializer(serializers.ModelSerializer):
         fields = (
             'id', 'order_item_id', 'order_code', 'order_id', 'order_status',
             'order_created_at', 'delivery_address',
-            'product_name', 'product_image', 'quantity', 'price',
+            'product_name', 'product_image', 'variant_options', 'variant_sku', 'quantity', 'price',
             'status', 'note', 'status_changed_by_name', 'ready_at', 'updated_at',
         )
         read_only_fields = ('id', 'order_item_id', 'order_code', 'order_id', 'order_status',
                             'order_created_at', 'delivery_address',
-                            'product_name', 'product_image', 'quantity', 'price',
+                            'product_name', 'product_image', 'variant_options', 'variant_sku', 'quantity', 'price',
                             'status_changed_by_name', 'updated_at')
 
     def get_product_image(self, obj):

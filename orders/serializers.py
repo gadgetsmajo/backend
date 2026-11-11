@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from .models import Order, OrderItem, ServiceRating, Payment, ReturnRequest
-from products.models import Product
+from products.models import Product, ProductVariant
 from products.serializers import ProductSerializer
 from settings_app.models import District, PlatformSettings
 from settings_app.pricing import platform_commission_amount, price_with_platform_charges
@@ -20,6 +20,9 @@ class PaymentSerializer(serializers.ModelSerializer):
 
 class OrderItemSerializer(serializers.ModelSerializer):
     product = ProductSerializer(read_only=True)
+    variant_id = serializers.IntegerField(read_only=True)
+    variant_options = serializers.JSONField(read_only=True)
+    variant_sku = serializers.CharField(read_only=True)
     product_id = serializers.PrimaryKeyRelatedField(
         queryset=Product.objects.all(),
         source='product',
@@ -30,7 +33,7 @@ class OrderItemSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = OrderItem
-        fields = ('id', 'product', 'product_id', 'quantity', 'price')
+        fields = ('id', 'product', 'product_id', 'variant_id', 'variant_options', 'variant_sku', 'quantity', 'price')
 
 
 class OrderSerializer(serializers.ModelSerializer):
@@ -76,7 +79,7 @@ class OrderSerializer(serializers.ModelSerializer):
             cart_items = list(
                 CartItem.objects.select_for_update()
                 .filter(user=user)
-                .order_by('product_id')
+                .order_by('product_id', 'variant_id')
             )
             if not cart_items:
                 raise serializers.ValidationError({'detail': 'Your cart is empty.'})
@@ -88,6 +91,11 @@ class OrderSerializer(serializers.ModelSerializer):
                 product.pk: product
                 for product in Product.objects.select_for_update().filter(pk__in=product_ids)
             }
+            variant_ids = [item.variant_id for item in cart_items if item.variant_id]
+            locked_variants = {
+                variant.pk: variant
+                for variant in ProductVariant.objects.select_for_update().filter(pk__in=variant_ids)
+            }
 
             for cart_item in cart_items:
                 product = locked.get(cart_item.product_id)
@@ -95,21 +103,34 @@ class OrderSerializer(serializers.ModelSerializer):
                     raise serializers.ValidationError({
                         'detail': 'A product in your cart is no longer available. Please refresh your cart.'
                     })
-                if cart_item.quantity < 1 or cart_item.quantity > 100 or product.stock < cart_item.quantity:
+                variant = locked_variants.get(cart_item.variant_id)
+                if (product.variants.exists() or cart_item.variant_options) and not variant:
                     raise serializers.ValidationError(
-                        {'detail': f'Not enough stock for "{product.name}". Available: {product.stock}.'}
+                        {'detail': f'Select an available option for "{product.name}" before ordering.'}
+                    )
+                if variant and (
+                    variant.product_id != product.pk
+                    or not variant.is_active
+                ):
+                    raise serializers.ValidationError(
+                        {'detail': f'The selected option for "{product.name}" is no longer available.'}
+                    )
+                available_stock = variant.stock if variant else product.stock
+                if cart_item.quantity < 1 or cart_item.quantity > 100 or available_stock < cart_item.quantity:
+                    raise serializers.ValidationError(
+                        {'detail': f'Not enough stock for "{product.name}". Available: {available_stock}.'}
                     )
 
             platform_settings = PlatformSettings.get()
             item_prices = {
-                product_id: price_with_platform_charges(
-                    locked[product_id].price,
+                item.pk: price_with_platform_charges(
+                    locked_variants[item.variant_id].price if item.variant_id else locked[item.product_id].price,
                     platform_settings,
                 )
-                for product_id in product_ids
+                for item in cart_items
             }
             subtotal = sum(
-                item_prices[item.product_id] * item.quantity
+                item_prices[item.pk] * item.quantity
                 for item in cart_items
             )
             delivery_fee = district.price
@@ -126,15 +147,20 @@ class OrderSerializer(serializers.ModelSerializer):
 
             for cart_item in cart_items:
                 product = locked[cart_item.product_id]
+                variant = locked_variants.get(cart_item.variant_id)
+                seller_price = variant.price if variant else product.price
                 OrderItem.objects.create(
                     order=order,
                     product=product,
+                    variant=variant,
+                    variant_options=variant.options if variant else cart_item.variant_options,
+                    variant_sku=variant.sku if variant else '',
                     quantity=cart_item.quantity,
-                    price=item_prices[product.pk],
-                    seller_price=product.price,
+                    price=item_prices[cart_item.pk],
+                    seller_price=seller_price,
                     platform_commission_pct=platform_settings.commission,
                     platform_commission=platform_commission_amount(
-                        product.price,
+                        seller_price,
                         platform_settings,
                     ) * cart_item.quantity,
                 )

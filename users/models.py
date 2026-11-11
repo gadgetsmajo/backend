@@ -152,6 +152,11 @@ class EmailMfaTrustedDevice(models.Model):
 class CartItem(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='cart_items')
     product_id = models.IntegerField()
+    variant = models.ForeignKey(
+        'products.ProductVariant', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='cart_items',
+    )
+    variant_options = models.JSONField(default=dict, blank=True)
     product_name = models.CharField(max_length=255)
     product_price = models.DecimalField(max_digits=12, decimal_places=2)
     product_image = models.URLField(blank=True, null=True)
@@ -162,7 +167,18 @@ class CartItem(models.Model):
     added_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        unique_together = ('user', 'product_id')
+        constraints = [
+            models.UniqueConstraint(
+                fields=('user', 'product_id'),
+                condition=models.Q(variant__isnull=True, variant_options={}),
+                name='unique_cart_base_product',
+            ),
+            models.UniqueConstraint(
+                fields=('user', 'product_id', 'variant'),
+                condition=models.Q(variant__isnull=False),
+                name='unique_cart_product_variant',
+            ),
+        ]
 
     def __str__(self):
         return f'{self.user.email} — {self.product_name} x{self.quantity}'

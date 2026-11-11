@@ -1,7 +1,7 @@
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from .models import CartItem, WishlistItem, Notification
-from products.models import Product
+from products.models import Product, ProductVariant
 from settings_app.pricing import price_with_platform_charges
 
 User = get_user_model()
@@ -94,17 +94,32 @@ class UpdateProfileSerializer(serializers.ModelSerializer):
 
 class CartItemSerializer(serializers.ModelSerializer):
     product_price = serializers.SerializerMethodField()
+    variant_id = serializers.IntegerField(read_only=True)
+    variant_options = serializers.SerializerMethodField()
+    variant_sku = serializers.SerializerMethodField()
 
     class Meta:
         model = CartItem
-        fields = ('id', 'product_id', 'product_name', 'product_price', 'product_image', 'product_slug', 'product_category', 'product_rating', 'quantity', 'added_at')
+        fields = (
+            'id', 'product_id', 'variant_id', 'variant_options', 'variant_sku',
+            'product_name', 'product_price', 'product_image', 'product_slug',
+            'product_category', 'product_rating', 'quantity', 'added_at',
+        )
         read_only_fields = ('id', 'added_at')
 
     def get_product_price(self, obj):
-        price = Product.objects.filter(pk=obj.product_id).values_list('price', flat=True).first()
+        price = obj.variant.price if obj.variant_id else Product.objects.filter(
+            pk=obj.product_id,
+        ).values_list('price', flat=True).first()
         if price is None:
             price = obj.product_price
         return str(price_with_platform_charges(price))
+
+    def get_variant_options(self, obj):
+        return obj.variant.options if obj.variant_id else obj.variant_options
+
+    def get_variant_sku(self, obj):
+        return obj.variant.sku if obj.variant_id else ''
 
 
 class WishlistItemSerializer(serializers.ModelSerializer):

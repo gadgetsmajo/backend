@@ -24,7 +24,7 @@ from .emails import send_welcome_email, send_password_reset_email, send_password
 from .emails import send_cart_reminder_email
 from .sms import send_welcome_sms
 from .authentication import requires_email_mfa
-from products.models import Product
+from products.models import Product, ProductVariant
 from settings_app.models import PlatformSettings
 from settings_app.pricing import price_with_platform_charges
 
@@ -874,12 +874,15 @@ class CartView(APIView):
     permission_classes = (permissions.IsAuthenticated,)
 
     def get(self, request):
-        items = CartItem.objects.filter(user=request.user)
+        items = CartItem.objects.select_related('variant').filter(user=request.user)
         return Response(CartItemSerializer(items, many=True).data)
 
     def post(self, request):
         try:
             product_id = serializers.IntegerField(min_value=1).run_validation(request.data.get('product_id'))
+            variant_id = serializers.IntegerField(min_value=1, allow_null=True).run_validation(
+                request.data.get('variant_id')
+            ) if request.data.get('variant_id') not in (None, '') else None
             quantity = serializers.IntegerField(min_value=1, max_value=100).run_validation(
                 request.data.get('quantity', 1)
             )
@@ -891,29 +894,44 @@ class CartView(APIView):
                 product = Product.objects.select_for_update().get(pk=product_id, is_active=True)
             except Product.DoesNotExist:
                 return Response({'detail': 'Product not found.'}, status=status.HTTP_404_NOT_FOUND)
-            item = CartItem.objects.select_for_update().filter(
+            if product.variants.exists() and variant_id is None:
+                return Response({'detail': 'Select product options before adding this item.'}, status=status.HTTP_400_BAD_REQUEST)
+            variant = None
+            if variant_id is not None:
+                try:
+                    variant = ProductVariant.objects.select_for_update().get(
+                        pk=variant_id, product=product, is_active=True,
+                    )
+                except ProductVariant.DoesNotExist:
+                    return Response({'detail': 'The selected product option is unavailable.'}, status=status.HTTP_400_BAD_REQUEST)
+            stock = variant.stock if variant else product.stock
+            unit_price = variant.price if variant else product.price
+            cart_items = CartItem.objects.select_for_update().filter(
                 user=request.user,
                 product_id=product.pk,
-            ).first()
+                variant=variant,
+            )
+            item = cart_items.first() if variant else cart_items.filter(variant_options={}).first()
             if item is None and CartItem.objects.filter(user=request.user).count() >= 100:
                 return Response(
                     {'detail': 'Your cart has too many different products.'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
             new_quantity = quantity + (item.quantity if item else 0)
-            if new_quantity > product.stock or new_quantity > 100:
+            if new_quantity > stock or new_quantity > 100:
                 return Response(
-                    {'detail': f'Not enough stock for "{product.name}". Available: {product.stock}.'},
+                    {'detail': f'Not enough stock for "{product.name}". Available: {stock}.'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
             canonical_values = {
                 'product_name': product.name,
-                'product_price': price_with_platform_charges(product.price),
+                'product_price': price_with_platform_charges(unit_price),
                 'product_image': product.image.url if product.image else None,
                 'product_slug': product.slug,
                 'product_category': product.category.name if product.category else '',
                 'product_rating': product.rating,
+                'variant_options': variant.options if variant else {},
                 'quantity': new_quantity,
             }
             if item:
@@ -924,6 +942,7 @@ class CartView(APIView):
                 item = CartItem.objects.create(
                     user=request.user,
                     product_id=product.pk,
+                    variant=variant,
                     **canonical_values,
                 )
         return Response(CartItemSerializer(item).data, status=status.HTTP_201_CREATED)
@@ -936,24 +955,39 @@ class CartView(APIView):
 class CartItemView(APIView):
     permission_classes = (permissions.IsAuthenticated,)
 
-    def patch(self, request, product_id):
+    def patch(self, request, product_id=None, item_id=None):
         try:
-            item = CartItem.objects.get(user=request.user, product_id=product_id)
+            item = CartItem.objects.get(
+                user=request.user,
+                **({'pk': item_id} if item_id is not None else {'product_id': product_id}),
+            )
             quantity = serializers.IntegerField(min_value=0, max_value=100).run_validation(
                 request.data.get('quantity', item.quantity)
             )
             if quantity == 0:
                 item.delete()
                 return Response(status=status.HTTP_204_NO_CONTENT)
-            product = Product.objects.get(pk=product_id, is_active=True)
-            if quantity > product.stock:
+            product = Product.objects.get(pk=item.product_id, is_active=True)
+            if (product.variants.exists() or item.variant_options) and not item.variant_id:
+                return Response({'detail': 'Select an available product option.'}, status=status.HTTP_400_BAD_REQUEST)
+            if item.variant_id:
+                variant = ProductVariant.objects.get(
+                    pk=item.variant_id, product=product, is_active=True,
+                )
+                stock = variant.stock
+                unit_price = variant.price
+                item.variant_options = variant.options
+            else:
+                stock = product.stock
+                unit_price = product.price
+            if quantity > stock:
                 return Response(
-                    {'detail': f'Not enough stock for "{product.name}". Available: {product.stock}.'},
+                    {'detail': f'Not enough stock for "{product.name}". Available: {stock}.'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
             item.quantity = quantity
             item.product_name = product.name
-            item.product_price = price_with_platform_charges(product.price)
+            item.product_price = price_with_platform_charges(unit_price)
             item.product_image = product.image.url if product.image else None
             item.product_slug = product.slug
             item.product_category = product.category.name if product.category else ''
@@ -964,11 +998,16 @@ class CartItemView(APIView):
             return Response({'detail': exc.detail}, status=status.HTTP_400_BAD_REQUEST)
         except Product.DoesNotExist:
             return Response({'detail': 'Product not found.'}, status=status.HTTP_404_NOT_FOUND)
+        except ProductVariant.DoesNotExist:
+            return Response({'detail': 'The selected product option is unavailable.'}, status=status.HTTP_400_BAD_REQUEST)
         except CartItem.DoesNotExist:
             return Response(status=status.HTTP_404_NOT_FOUND)
 
-    def delete(self, request, product_id):
-        CartItem.objects.filter(user=request.user, product_id=product_id).delete()
+    def delete(self, request, product_id=None, item_id=None):
+        CartItem.objects.filter(
+            user=request.user,
+            **({'pk': item_id} if item_id is not None else {'product_id': product_id}),
+        ).delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -978,7 +1017,9 @@ class CartReminderView(APIView):
     def post(self, request):
         with transaction.atomic():
             user = User.objects.select_for_update().get(pk=request.user.pk)
-            cart_items = list(CartItem.objects.filter(user=user).order_by('product_id'))
+            cart_items = list(
+                CartItem.objects.select_related('variant').filter(user=user).order_by('product_id', 'variant_id')
+            )
             if not cart_items:
                 return Response({'sent': False, 'reason': 'empty_cart'})
 
@@ -996,23 +1037,31 @@ class CartReminderView(APIView):
             for item in cart_items:
                 product = products.get(item.product_id)
                 item_price = price_with_platform_charges(
-                    product.price if product else item.product_price,
+                    item.variant.price if item.variant_id else product.price if product else item.product_price,
                     platform_settings,
                 )
                 item_delivery = product.delivery_fee if product else 0
+                option_summary = ', '.join(
+                    f'{key.replace("_", " ")}: {value}'
+                    for key, value in (item.variant.options if item.variant_id else item.variant_options).items()
+                )
+                item_name = f'{item.product_name} ({option_summary})' if option_summary else item.product_name
                 subtotal += item_price * item.quantity
                 delivery += item_delivery
                 items.append({
-                    'name': item.product_name,
+                    'name': item_name,
                     'image': item.product_image or '',
                     'slug': item.product_slug,
+                    'variant_options': item.variant.options if item.variant_id else item.variant_options,
                     'quantity': item.quantity,
                     'price': item_price,
                     'delivery_fee': item_delivery,
                 })
                 fingerprint_data.append({
                     'product_id': item.product_id,
-                    'name': item.product_name,
+                    'variant_id': item.variant_id,
+                    'variant_options': item.variant.options if item.variant_id else item.variant_options,
+                    'name': item_name,
                     'image': item.product_image or '',
                     'slug': item.product_slug,
                     'quantity': item.quantity,

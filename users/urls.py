@@ -22,6 +22,7 @@ urlpatterns = [
     path('token/refresh/', EmailMfaTokenRefreshView.as_view(), name='token_refresh'),
     path('profile/', ProfileView.as_view(), name='profile'),
     path('cart/', CartView.as_view(), name='cart'),
+    path('cart/items/<int:item_id>/', CartItemView.as_view(), name='cart-item-detail'),
     path('cart/<int:product_id>/', CartItemView.as_view(), name='cart-item'),
     path('cart/reminder/', CartReminderView.as_view(), name='cart-reminder'),
     path('wishlist/', WishlistView.as_view(), name='wishlist'),

@@ -8,7 +8,7 @@ from rest_framework.test import APIClient
 
 from accounting.models import Refund as AccountingRefund
 from orders.models import Order, OrderItem, Payment, ReturnRequest
-from products.models import Product
+from products.models import Product, ProductVariant
 from settings_app.models import District, PlatformSettings
 from users.models import CartItem, Notification
 
@@ -301,6 +301,179 @@ class OrderPricingSecurityTests(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertFalse(Order.objects.exists())
         self.assertTrue(CartItem.objects.filter(user=self.user).exists())
+
+    def test_variant_options_price_stock_and_snapshot_are_used_through_order(self):
+        self.cart_item.delete()
+        variant = ProductVariant.objects.create(
+            product=self.product,
+            sku='SHOE-BLACK-42',
+            options={'size': '42', 'color': 'Black'},
+            price='17500.00',
+            stock=3,
+        )
+        cart_response = self.client.post('/api/auth/cart/', {
+            'product_id': self.product.id,
+            'variant_id': variant.id,
+            'quantity': 2,
+        }, format='json')
+
+        self.assertEqual(cart_response.status_code, 201, cart_response.data)
+        self.assertEqual(cart_response.data['variant_options'], {'size': '42', 'color': 'Black'})
+        quote = self.client.post('/api/orders/quote/', {
+            'district_id': self.district.id,
+        }, format='json')
+        self.assertEqual(quote.status_code, 200, quote.data)
+        self.assertEqual(quote.data['items'][0]['variant_id'], variant.id)
+        self.assertEqual(quote.data['items'][0]['variant_options'], {'size': '42', 'color': 'Black'})
+        self.assertEqual(quote.data['items'][0]['product_price'], Decimal('17500.00'))
+
+        response = self.client.post('/api/orders/', {
+            'district_id': self.district.id,
+            'phone': '+256700000000',
+        }, format='json')
+        self.assertEqual(response.status_code, 201, response.data)
+        order_item = OrderItem.objects.get(order_id=response.data['id'])
+        self.assertEqual(order_item.variant, variant)
+        self.assertEqual(order_item.variant_options, {'size': '42', 'color': 'Black'})
+        self.assertEqual(order_item.variant_sku, 'SHOE-BLACK-42')
+        self.assertEqual(order_item.price, quote.data['items'][0]['product_price'])
+        self.assertEqual(response.data['items'][0]['variant_options'], {'size': '42', 'color': 'Black'})
+
+    def test_optioned_product_requires_a_variant_and_uses_variant_stock_limit(self):
+        variant = ProductVariant.objects.create(
+            product=self.product,
+            options={'size': '42', 'color': 'Black'},
+            price='17500.00',
+            stock=1,
+        )
+        self.cart_item.quantity = 2
+        self.cart_item.save(update_fields=['quantity'])
+        missing_option = self.client.post('/api/orders/quote/', {
+            'district_id': self.district.id,
+        }, format='json')
+        self.assertEqual(missing_option.status_code, 400)
+
+        self.cart_item.variant = variant
+        self.cart_item.variant_options = variant.options
+        self.cart_item.save(update_fields=['variant', 'variant_options'])
+        insufficient_variant_stock = self.client.post('/api/orders/quote/', {
+            'district_id': self.district.id,
+        }, format='json')
+        self.assertEqual(insufficient_variant_stock.status_code, 400)
+        self.assertIn('Available: 1', insufficient_variant_stock.data['detail'])
+
+    def test_guest_quote_prices_the_selected_variant(self):
+        variant = ProductVariant.objects.create(
+            product=self.product,
+            options={'size': '42', 'color': 'Blue'},
+            price='19000.00',
+            stock=2,
+        )
+        self.client.force_authenticate(user=None)
+        quote = self.client.post('/api/orders/quote/', {
+            'district_id': self.district.id,
+            'items': [{
+                'id': 987654,
+                'product_id': self.product.id,
+                'variant_id': variant.id,
+                'quantity': 1,
+            }],
+        }, format='json')
+
+        self.assertEqual(quote.status_code, 200, quote.data)
+        self.assertEqual(quote.data['items'][0]['id'], 987654)
+        self.assertEqual(quote.data['items'][0]['variant_id'], variant.id)
+        self.assertEqual(quote.data['items'][0]['variant_options'], {'size': '42', 'color': 'Blue'})
+        self.assertEqual(quote.data['items'][0]['product_price'], Decimal('19000.00'))
+
+    def test_cancelling_unpaid_option_order_does_not_restore_unreserved_stock(self):
+        variant = ProductVariant.objects.create(
+            product=self.product,
+            options={'size': '42', 'color': 'Black'},
+            price='17500.00',
+            stock=3,
+        )
+        order = Order.objects.create(user=self.user, total='35000.00')
+        OrderItem.objects.create(
+            order=order,
+            product=self.product,
+            variant=variant,
+            variant_options=variant.options,
+            quantity=2,
+            price='17500.00',
+        )
+
+        response = self.client.post(f'/api/orders/{order.code}/cancel/')
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.product.refresh_from_db()
+        variant.refresh_from_db()
+        self.assertEqual(self.product.stock, 5)
+        self.assertEqual(variant.stock, 3)
+
+    def test_restoring_paid_option_order_returns_product_and_variant_stock(self):
+        from orders.views import _restore_stock
+
+        variant = ProductVariant.objects.create(
+            product=self.product,
+            options={'size': '42', 'color': 'Black'},
+            price='17500.00',
+            stock=1,
+        )
+        order = Order.objects.create(user=self.user, total='35000.00')
+        OrderItem.objects.create(
+            order=order,
+            product=self.product,
+            variant=variant,
+            variant_options=variant.options,
+            quantity=2,
+            price='17500.00',
+        )
+        Payment.objects.create(
+            order=order,
+            pesapal_order_tracking_id='track-variant-restock',
+            amount='35000.00',
+            status='completed',
+        )
+        self.product.stock = 3
+        self.product.save(update_fields=['stock'])
+
+        _restore_stock(order)
+
+        self.product.refresh_from_db()
+        variant.refresh_from_db()
+        self.assertEqual(self.product.stock, 5)
+        self.assertEqual(variant.stock, 3)
+
+    def test_cart_requires_and_keeps_distinct_variant_selections(self):
+        self.cart_item.delete()
+        variants = [
+            ProductVariant.objects.create(
+                product=self.product,
+                options={'size': size, 'color': 'Black'},
+                price='17500.00',
+                stock=2,
+            )
+            for size in ('41', '42')
+        ]
+        missing_selection = self.client.post('/api/auth/cart/', {
+            'product_id': self.product.id,
+            'quantity': 1,
+        }, format='json')
+        self.assertEqual(missing_selection.status_code, 400)
+
+        for variant in variants:
+            response = self.client.post('/api/auth/cart/', {
+                'product_id': self.product.id,
+                'variant_id': variant.id,
+                'quantity': 1,
+            }, format='json')
+            self.assertEqual(response.status_code, 201, response.data)
+
+        items = self.client.get('/api/auth/cart/')
+        self.assertEqual(items.status_code, 200)
+        self.assertEqual({item['variant_id'] for item in items.data}, {variant.id for variant in variants})
+        self.assertEqual({item['variant_options']['size'] for item in items.data}, {'41', '42'})
 
 
 class ReturnRequestAdminTests(TestCase):

@@ -112,6 +112,12 @@ class ReturnRequest(models.Model):
 class OrderItem(models.Model):
     order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name='items')
     product = models.ForeignKey(Product, on_delete=models.SET_NULL, null=True)
+    variant = models.ForeignKey(
+        'products.ProductVariant', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='order_items',
+    )
+    variant_options = models.JSONField(default=dict, blank=True)
+    variant_sku = models.CharField(max_length=100, blank=True, default='')
     quantity = models.PositiveIntegerField()
     price = models.DecimalField(max_digits=10, decimal_places=2)
     seller_price = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
