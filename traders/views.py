@@ -47,8 +47,16 @@ def _get_trader_by_uuid(uuid_str):
     ).first()
 
 
+def _is_trader_owner(request, trader):
+    return (
+        request.user.is_staff
+        or trader.user_id == request.user.pk
+        or trader.email.casefold() == (request.user.email or '').casefold()
+    )
+
+
 class IsTraderOwner(permissions.BasePermission):
-    """Allow access only if the authenticated user owns the trader account (matched by email)."""
+    """Allow access only to the trader's linked user, matching email as a legacy fallback."""
     def has_permission(self, request, view):
         if not request.user or not request.user.is_authenticated:
             return False
@@ -56,7 +64,7 @@ class IsTraderOwner(permissions.BasePermission):
         trader = _get_trader_by_uuid(uuid_str)
         if not trader:
             return False
-        return trader.email == request.user.email or request.user.is_staff
+        return _is_trader_owner(request, trader)
 
 
 # ── Public: submit application ────────────────────────────────────────────────
@@ -90,7 +98,7 @@ class TraderProfileView(APIView):
         trader = _get_trader_by_uuid(trader_uuid)
         if not trader:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
-        if trader.email != request.user.email and not request.user.is_staff:
+        if not _is_trader_owner(request, trader):
             return Response({'detail': 'Forbidden.'}, status=status.HTTP_403_FORBIDDEN)
         return Response(TraderApplicationAdminSerializer(trader).data)
 
@@ -291,7 +299,7 @@ class TraderDashboardView(APIView):
         trader = _get_trader_by_uuid(trader_uuid)
         if not trader:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
-        if trader.email != request.user.email and not request.user.is_staff:
+        if not _is_trader_owner(request, trader):
             return Response({'detail': 'Forbidden.'}, status=status.HTTP_403_FORBIDDEN)
 
         sales = TraderSale.objects.filter(trader=trader)
@@ -418,7 +426,7 @@ class TraderProductListView(APIView):
         trader = _get_trader_by_uuid(trader_uuid)
         if not trader:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
-        if trader.email != request.user.email and not request.user.is_staff:
+        if not _is_trader_owner(request, trader):
             return Response({'detail': 'Forbidden.'}, status=status.HTTP_403_FORBIDDEN)
         products = TraderProduct.objects.filter(trader=trader)
         return Response(TraderProductSerializer(products, many=True).data)
@@ -427,7 +435,7 @@ class TraderProductListView(APIView):
         trader = _get_trader_by_uuid(trader_uuid)
         if not trader:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
-        if trader.email != request.user.email and not request.user.is_staff:
+        if not _is_trader_owner(request, trader):
             return Response({'detail': 'Forbidden.'}, status=status.HTTP_403_FORBIDDEN)
         serializer = TraderProductSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -455,7 +463,7 @@ class TraderProductDetailView(APIView):
         trader, product = self._get(trader_uuid, product_uuid)
         if not trader or not product:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
-        if trader.email != request.user.email and not request.user.is_staff:
+        if not _is_trader_owner(request, trader):
             return Response({'detail': 'Forbidden.'}, status=status.HTTP_403_FORBIDDEN)
         return Response(TraderProductSerializer(product).data)
 
@@ -463,7 +471,7 @@ class TraderProductDetailView(APIView):
         trader, product = self._get(trader_uuid, product_uuid)
         if not trader or not product:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
-        if trader.email != request.user.email and not request.user.is_staff:
+        if not _is_trader_owner(request, trader):
             return Response({'detail': 'Forbidden.'}, status=status.HTTP_403_FORBIDDEN)
         serializer = TraderProductSerializer(product, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
@@ -477,7 +485,7 @@ class TraderProductDetailView(APIView):
         trader, product = self._get(trader_uuid, product_uuid)
         if not trader or not product:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
-        if trader.email != request.user.email and not request.user.is_staff:
+        if not _is_trader_owner(request, trader):
             return Response({'detail': 'Forbidden.'}, status=status.HTTP_403_FORBIDDEN)
         with transaction.atomic():
             pub = _find_public_product_for_trader_product(product)

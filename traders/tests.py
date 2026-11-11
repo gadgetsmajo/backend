@@ -475,6 +475,17 @@ class TraderInventoryStockSyncTests(TestCase):
 		self.assertEqual(response.status_code, 200)
 		self.assertEqual(response.data[0]['public_product_id'], public_product.id)
 
+	def test_linked_trader_user_can_fetch_profile_and_products_when_emails_differ(self):
+		self.trader.email = 'legacy-trader-email@example.com'
+		self.trader.save(update_fields=['email'])
+
+		profile_response = self.client.get(reverse('trader-profile', args=[self.trader.uuid]))
+		products_response = self.client.get(reverse('trader-products', args=[self.trader.uuid]))
+
+		self.assertEqual(profile_response.status_code, 200)
+		self.assertEqual(products_response.status_code, 200)
+		self.assertEqual([item['uuid'] for item in products_response.data], [str(self.product.uuid)])
+
 	def test_trader_can_edit_own_product_details_and_public_product_stays_in_sync(self):
 		public_product = Product.objects.create(
 			name=self.product.name,
