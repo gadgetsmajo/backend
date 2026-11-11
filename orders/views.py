@@ -747,7 +747,7 @@ class InitiatePaymentView(APIView):
             settings.PESAPAL_CONSUMER_KEY,
             settings.PESAPAL_CONSUMER_SECRET,
             settings.PESAPAL_IPN_URL,
-            settings.PESAPAL_CALLBACK_URL,
+            settings.FRONTEND_URL,
         )):
             logger.error('Pesapal configuration is incomplete for order %s', code)
             return Response({'detail': 'Pesapal payment is not configured on the server.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
@@ -803,7 +803,7 @@ class InitiatePaymentView(APIView):
                 'currency': 'UGX',
                 'amount': float(order.total),
                 'description': f'Payment for order {order.code}',
-                'callback_url': settings.PESAPAL_CALLBACK_URL,
+                'callback_url': f"{settings.FRONTEND_URL.rstrip('/')}/payment-callback",
                 'notification_id': ipn_id,
                 'billing_address': {
                     'email_address': request.user.email,

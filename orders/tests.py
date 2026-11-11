@@ -21,6 +21,7 @@ class PesapalBillingNameTests(TestCase):
         PESAPAL_CONSUMER_SECRET='test-secret',
         PESAPAL_IPN_URL='https://example.com/ipn',
         PESAPAL_CALLBACK_URL='https://example.com/callback',
+        FRONTEND_URL='https://www.majogadgets.com',
     )
     def test_submit_payload_includes_non_empty_middle_name(self):
         user = User.objects.create_user(
@@ -50,6 +51,10 @@ class PesapalBillingNameTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         billing_address = mock_submit.call_args.kwargs['json']['billing_address']
+        self.assertEqual(
+            mock_submit.call_args.kwargs['json']['callback_url'],
+            'https://www.majogadgets.com/payment-callback',
+        )
         self.assertEqual(billing_address['first_name'], 'Jane')
         self.assertEqual(billing_address['middle_name'], 'NA')
         self.assertEqual(billing_address['last_name'], 'Doe')
