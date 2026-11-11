@@ -57,6 +57,8 @@ class PesapalBillingNameTests(TestCase):
         self.assertEqual(billing_address['line_2'], 'NA')
         self.assertEqual(billing_address['country_code'], 'UG')
         self.assertEqual(billing_address['city'], 'Kampala')
+        self.assertEqual(billing_address['postal_code'], '00000')
+        self.assertNotIn('zip_code', billing_address)
         self.assertNotIn('address_line_1', billing_address)
 
     @override_settings(

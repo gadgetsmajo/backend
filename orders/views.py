@@ -816,8 +816,7 @@ class InitiatePaymentView(APIView):
                     'line_2': 'NA',
                     'city': _pesapal_address_field(request.user.district),
                     'state': _pesapal_address_field(request.user.region),
-                    'postal_code': '',
-                    'zip_code': '',
+                    'postal_code': '00000',
                 },
             }
             resp = http_requests.post(
