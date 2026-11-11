@@ -777,6 +777,16 @@ class InitiatePaymentView(APIView):
                 if character.isascii() and (character.isalnum() or character in '-_.:')
             ) or 'NA'
             last_name = name_parts[-1] if len(name_parts) > 1 else first_name
+            delivery_address = order.delivery_address.strip()
+            if not delivery_address:
+                delivery_address = ', '.join(
+                    part for part in (
+                        request.user.village.strip(),
+                        request.user.district.strip(),
+                        request.user.region.strip(),
+                    )
+                    if part
+                ) or 'Kampala'
             payload = {
                 'id': order.code,
                 'currency': 'UGX',
@@ -787,10 +797,16 @@ class InitiatePaymentView(APIView):
                 'billing_address': {
                     'email_address': request.user.email,
                     'phone_number': order.phone or request.user.phone,
+                    'country_code': 'UG',
                     'first_name': first_name,
                     'middle_name': middle_name,
                     'last_name': last_name,
-                    'address_line_1': order.delivery_address.strip() or 'Not provided',
+                    'line_1': delivery_address,
+                    'line_2': '',
+                    'city': request.user.district.strip() or 'Kampala',
+                    'state': request.user.region.strip(),
+                    'postal_code': '',
+                    'zip_code': '',
                 },
             }
             resp = http_requests.post(
