@@ -1,6 +1,10 @@
+import importlib
 import uuid
+from types import SimpleNamespace
 
+from django.apps import apps
 from django.contrib.auth import get_user_model
+from django.db import connections
 from django_redis.exceptions import ConnectionInterrupted
 from django.test import TestCase
 from django.urls import reverse
@@ -131,6 +135,44 @@ class ProductRecommendationsAPITest(TestCase):
         )
         self.assertEqual(linked_detail.status_code, 200)
         self.assertEqual(linked_detail.data['seller_uuid'], str(self.trader.uuid))
+
+    def test_migration_links_unique_unowned_legacy_product_to_trader(self):
+        image = 'products/rtc-module.jpg'
+        trader_product = TraderProduct.objects.create(
+            trader=self.trader,
+            name='DS3231 AT24C32 High-Precision I2C Real-Time Clock (RTC) Module',
+            price=18000,
+            stock=2,
+            image=image,
+        )
+        legacy_product = Product.objects.create(
+            name='Legacy RTC module title',
+            category=self.phone_category,
+            price=18000,
+            stock=2,
+            image=image,
+            is_active=True,
+            review_status='approved',
+        )
+        migration = importlib.import_module(
+            'products.migrations.0018_relink_unowned_trader_products'
+        )
+
+        migration.relink_unowned_trader_products(
+            apps,
+            SimpleNamespace(connection=connections['default']),
+        )
+
+        legacy_product.refresh_from_db()
+        self.assertEqual(legacy_product.trader_id, self.trader.pk)
+        self.assertEqual(legacy_product.trader_product_id, trader_product.pk)
+        response = self.client.get(reverse('product-list'), {'seller': str(self.trader.uuid)})
+        self.assertEqual(response.status_code, 200)
+        seller_products = {
+            item['id']: item for item in response.data['results']
+        }
+        self.assertIn(legacy_product.pk, seller_products)
+        self.assertEqual(seller_products[legacy_product.pk]['seller_uuid'], str(self.trader.uuid))
 
     def test_closed_or_hidden_trader_products_are_not_listed_as_majo_products(self):
         for field in ('is_closed', 'is_visible'):

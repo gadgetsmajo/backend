@@ -98,6 +98,15 @@ class PublicTraderProfileTests(TestCase):
 		self.assertIn(self.product.id, product_ids)
 		self.assertNotIn(other_product.id, product_ids)
 
+	def test_unsigned_agreement_does_not_hide_approved_trader_profile(self):
+		self.trader.agreement_required = True
+		self.trader.agreement_signed_at = None
+		self.trader.save(update_fields=['agreement_required', 'agreement_signed_at'])
+
+		response = self.client.get(reverse('trader-public-profile', args=[self.trader.uuid]))
+
+		self.assertEqual(response.status_code, 200)
+
 	def test_following_is_authenticated_and_idempotent(self):
 		url = reverse('trader-public-profile', args=[self.trader.uuid])
 		preflight = self.client.options(url, HTTP_ORIGIN='https://www.majogadgets.com', HTTP_ACCESS_CONTROL_REQUEST_METHOD='POST')

@@ -203,8 +203,6 @@ class PublicTraderProfileView(APIView):
             status='approved',
             is_visible=True,
             is_closed=False,
-        ).filter(
-            Q(agreement_required=False) | Q(agreement_signed_at__isnull=False),
         ).first()
 
     def get(self, request, trader_uuid):
