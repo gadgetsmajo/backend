@@ -1,4 +1,5 @@
 import bleach
+import json
 import logging
 from html import escape
 from uuid import UUID
@@ -11,6 +12,7 @@ from django.shortcuts import get_object_or_404
 from django_redis.exceptions import ConnectionInterrupted
 from redis.exceptions import RedisError
 from rest_framework import generics, filters, permissions, status
+from rest_framework.renderers import JSONRenderer
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -118,14 +120,29 @@ class CategoryListView(generics.ListCreateAPIView):
             for descendant in response.data:
                 count = direct_counts[descendant['id']]
                 parent_id = descendant['parent_id']
+                ancestors = []
+                visited = {descendant['id']}
+                has_cycle = False
                 while parent_id is not None:
+                    if parent_id in visited:
+                        logger.error(
+                            'Category hierarchy cycle detected while counting products for category %s.',
+                            descendant['id'],
+                        )
+                        has_cycle = True
+                        break
+                    visited.add(parent_id)
                     parent = by_id.get(parent_id)
                     if parent is None:
                         break
-                    parent['product_count'] += count
+                    ancestors.append(parent)
                     parent_id = parent['parent_id']
+                if not has_cycle:
+                    for ancestor in ancestors:
+                        ancestor['product_count'] += count
         try:
-            cache.set(cache_key, response.data, CATEGORY_CACHE_TTL)
+            cache_data = json.loads(JSONRenderer().render(response.data))
+            cache.set(cache_key, cache_data, CATEGORY_CACHE_TTL)
         except (ConnectionInterrupted, RedisError):
             logger.exception('Category list cache write failed.')
         return response
