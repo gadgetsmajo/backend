@@ -810,6 +810,40 @@ class ConfigurableProductCatalogTests(TestCase):
         self.assertEqual(product.variants.count(), 1)
         self.assertEqual(product.stock, 3)
 
+    def test_updating_variant_without_new_image_preserves_image_and_identity(self):
+        product = Product.objects.create(
+            name='Color LED',
+            category=Category.objects.create(name='Lights', slug='lights'),
+            price=100,
+            stock=3,
+            specifications={'material': 'Plastic'},
+        )
+        variant = ProductVariant.objects.create(
+            product=product,
+            sku='LED-RED',
+            options={'color': 'Red'},
+            price=100,
+            stock=3,
+            image='product_variants/red-led.jpg',
+        )
+        serializer = ProductSerializer(product, data={
+            'variants': [{
+                'sku': 'LED-RED',
+                'options': {'color': 'Red'},
+                'price': '110.00',
+                'stock': 2,
+            }],
+        }, partial=True)
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        serializer.save()
+
+        variant.refresh_from_db()
+        self.assertEqual(str(variant.image), 'product_variants/red-led')
+        self.assertEqual(variant.price, 110)
+        self.assertEqual(variant.stock, 2)
+        self.assertEqual(product.variants.count(), 1)
+
     def test_required_category_values_are_validated(self):
         serializer = ProductSerializer(data={
             'name': 'Incomplete Shoe',

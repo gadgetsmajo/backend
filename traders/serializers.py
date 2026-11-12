@@ -200,6 +200,13 @@ class TraderProductSerializer(serializers.ModelSerializer):
                     data[field] = json.loads(value)
                 except json.JSONDecodeError as exc:
                     raise serializers.ValidationError({field: 'Enter valid JSON.'}) from exc
+        if isinstance(data.get('variants'), list):
+            request = self.context.get('request')
+            files = request.FILES if request else {}
+            for index, variant in enumerate(data['variants']):
+                image = files.get(f'variant_image_{index}')
+                if image and isinstance(variant, dict):
+                    variant['image'] = image
         empty_fields = ('category_id', 'original_price')
         if any(data.get(field) == '' for field in empty_fields):
             for field in empty_fields:
@@ -238,6 +245,15 @@ class TraderProductSerializer(serializers.ModelSerializer):
             skus = [variant.get('sku', '').strip().casefold() for variant in variants if variant.get('sku', '').strip()]
             if len(skus) != len(set(skus)):
                 raise serializers.ValidationError({'variants': 'Each variant SKU must be unique.'})
+            product_variants = ProductVariant.objects.all()
+            if self.instance:
+                try:
+                    product_variants = product_variants.exclude(product=self.instance.public_product)
+                except ObjectDoesNotExist:
+                    pass
+            for sku in skus:
+                if product_variants.filter(sku__iexact=sku).exists():
+                    raise serializers.ValidationError({'variants': f'SKU {sku} is already in use.'})
             option_sets = [
                 tuple(sorted((key, str(value)) for key, value in variant.get('options', {}).items()))
                 for variant in variants

@@ -16,6 +16,7 @@ from django.db.models import Avg, Count, F, Q
 from django_redis.exceptions import ConnectionInterrupted
 from orders.models import OrderItem
 from products.models import Product, ProductReview, ProductVariant
+from products.serializers import sync_product_variants
 from redis.exceptions import RedisError
 from rest_framework import generics, permissions, status
 from rest_framework.views import APIView
@@ -369,6 +370,7 @@ def _invalidate_product_cache(product, trader_product_id):
         )
 
 
+@transaction.atomic
 def _sync_to_product(trader_product):
     defaults = {
         'trader': trader_product.trader,
@@ -427,10 +429,7 @@ def _sync_to_product(trader_product):
 
     submitted_variants = getattr(trader_product, '_submitted_variants', None)
     if submitted_variants is not None:
-        product.variants.all().delete()
-        ProductVariant.objects.bulk_create(
-            [ProductVariant(product=product, **variant) for variant in submitted_variants]
-        )
+        sync_product_variants(product, submitted_variants)
         if submitted_variants:
             product.price = min(variant['price'] for variant in submitted_variants)
             product.stock = sum(variant['stock'] for variant in submitted_variants)

@@ -140,13 +140,6 @@ class ProductVariantSerializer(serializers.ModelSerializer):
         return value
 
     def validate(self, attrs):
-        sku = attrs.get('sku', getattr(self.instance, 'sku', '')).strip()
-        if sku:
-            existing = ProductVariant.objects.filter(sku__iexact=sku)
-            if self.instance:
-                existing = existing.exclude(pk=self.instance.pk)
-            if existing.exists():
-                raise serializers.ValidationError({'sku': 'This SKU is already in use.'})
         price = attrs.get('price', getattr(self.instance, 'price', None))
         compare_at_price = attrs.get('compare_at_price', getattr(self.instance, 'compare_at_price', None))
         if price is not None and price <= 0:
@@ -167,6 +160,33 @@ class ProductVariantSerializer(serializers.ModelSerializer):
         if instance.compare_at_price:
             rep['compare_at_price'] = str(price_with_platform_charges(instance.compare_at_price))
         return rep
+
+
+def sync_product_variants(product, variants):
+    existing = list(product.variants.all())
+    by_options = {
+        json.dumps(variant.options, sort_keys=True, separators=(',', ':')): variant
+        for variant in existing
+    }
+    submitted = [
+        (variant, by_options.pop(
+            json.dumps(variant['options'], sort_keys=True, separators=(',', ':')),
+            None,
+        ))
+        for variant in variants
+    ]
+    retained_ids = [variant.pk for _, variant in submitted if variant]
+    product.variants.exclude(pk__in=retained_ids).delete()
+    if retained_ids:
+        product.variants.filter(pk__in=retained_ids).update(sku='')
+
+    for data, variant in submitted:
+        if variant is None:
+            ProductVariant.objects.create(product=product, **data)
+            continue
+        for field, value in data.items():
+            setattr(variant, field, value)
+        variant.save()
 
 
 class ProductImageSerializer(serializers.ModelSerializer):
@@ -221,6 +241,13 @@ class ProductSerializer(serializers.ModelSerializer):
                     data[field] = json.loads(value)
                 except json.JSONDecodeError as exc:
                     raise serializers.ValidationError({field: 'Enter valid JSON.'}) from exc
+        if isinstance(data.get('variants'), list):
+            request = self.context.get('request')
+            files = request.FILES if request else {}
+            for index, variant in enumerate(data['variants']):
+                image = files.get(f'variant_image_{index}')
+                if image and isinstance(variant, dict):
+                    variant['image'] = image
         if data.get('category_id') == '':
             data['category_id'] = None
         return super().to_internal_value(data)
@@ -268,6 +295,12 @@ class ProductSerializer(serializers.ModelSerializer):
             skus = [variant.get('sku', '').strip().casefold() for variant in variants if variant.get('sku', '').strip()]
             if len(skus) != len(set(skus)):
                 raise serializers.ValidationError({'variants': 'Each variant SKU must be unique.'})
+            product_variants = ProductVariant.objects.all()
+            if self.instance:
+                product_variants = product_variants.exclude(product=self.instance)
+            for sku in skus:
+                if product_variants.filter(sku__iexact=sku).exists():
+                    raise serializers.ValidationError({'variants': f'SKU {sku} is already in use.'})
             option_sets = [
                 tuple(sorted((key, str(value)) for key, value in variant.get('options', {}).items()))
                 for variant in variants
@@ -316,10 +349,7 @@ class ProductSerializer(serializers.ModelSerializer):
         variants = validated_data.pop('variants', None)
         product = super().update(instance, validated_data)
         if variants is not None:
-            product.variants.all().delete()
-            ProductVariant.objects.bulk_create(
-                [ProductVariant(product=product, **variant) for variant in variants]
-            )
+            sync_product_variants(product, variants)
             if variants:
                 product.price = min(variant['price'] for variant in variants)
                 product.stock = sum(variant['stock'] for variant in variants)
