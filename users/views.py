@@ -927,7 +927,10 @@ class CartView(APIView):
             canonical_values = {
                 'product_name': product.name,
                 'product_price': price_with_platform_charges(unit_price),
-                'product_image': product.image.url if product.image else None,
+                'product_image': (
+                    variant.image.url if variant and variant.image
+                    else product.image.url if product.image else None
+                ),
                 'product_slug': product.slug,
                 'product_category': product.category.name if product.category else '',
                 'product_rating': product.rating,
@@ -988,7 +991,10 @@ class CartItemView(APIView):
             item.quantity = quantity
             item.product_name = product.name
             item.product_price = price_with_platform_charges(unit_price)
-            item.product_image = product.image.url if product.image else None
+            item.product_image = (
+                variant.image.url if item.variant_id and variant.image
+                else product.image.url if product.image else None
+            )
             item.product_slug = product.slug
             item.product_category = product.category.name if product.category else ''
             item.product_rating = product.rating

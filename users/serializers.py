@@ -94,6 +94,7 @@ class UpdateProfileSerializer(serializers.ModelSerializer):
 
 class CartItemSerializer(serializers.ModelSerializer):
     product_price = serializers.SerializerMethodField()
+    product_image = serializers.SerializerMethodField()
     variant_id = serializers.IntegerField(read_only=True)
     variant_options = serializers.SerializerMethodField()
     variant_sku = serializers.SerializerMethodField()
@@ -117,6 +118,14 @@ class CartItemSerializer(serializers.ModelSerializer):
 
     def get_variant_options(self, obj):
         return obj.variant.options if obj.variant_id else obj.variant_options
+
+    def get_product_image(self, obj):
+        if obj.variant_id and obj.variant and obj.variant.image:
+            try:
+                return obj.variant.image.url
+            except (AttributeError, ValueError):
+                pass
+        return obj.product_image
 
     def get_variant_sku(self, obj):
         return obj.variant.sku if obj.variant_id else ''

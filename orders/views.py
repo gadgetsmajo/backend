@@ -322,7 +322,10 @@ class CartQuoteView(APIView):
                 'variant_sku': variant.sku if variant else '',
                 'product_name': product.name,
                 'product_price': product_price,
-                'product_image': product.image.url if product.image else None,
+                'product_image': (
+                    variant.image.url if variant and variant.image
+                    else product.image.url if product.image else None
+                ),
                 'product_slug': product.slug,
                 'product_category': product.category.name if product.category else '',
                 'product_rating': product.rating,

@@ -809,6 +809,34 @@ class OrderPricingSecurityTests(TestCase):
         self.assertEqual({item['variant_id'] for item in items.data}, {variant.id for variant in variants})
         self.assertEqual({item['variant_options']['size'] for item in items.data}, {'41', '42'})
 
+    def test_selected_variant_image_is_used_in_cart_and_quote(self):
+        self.cart_item.delete()
+        variant = ProductVariant.objects.create(
+            product=self.product,
+            sku='IMAGE-RED',
+            options={'color': 'Red'},
+            price='13000.00',
+            stock=2,
+            image='product_variants/red-led',
+        )
+
+        cart_response = self.client.post('/api/auth/cart/', {
+            'product_id': self.product.id,
+            'variant_id': variant.id,
+            'quantity': 1,
+        }, format='json')
+
+        self.assertEqual(cart_response.status_code, 201, cart_response.data)
+        variant.refresh_from_db()
+        self.assertEqual(cart_response.data['product_image'], variant.image.url)
+
+        quote = self.client.post('/api/orders/quote/', {
+            'district_id': self.district.id,
+        }, format='json')
+
+        self.assertEqual(quote.status_code, 200, quote.data)
+        self.assertEqual(quote.data['items'][0]['product_image'], variant.image.url)
+
 
 class ReturnRequestAdminTests(TestCase):
     def setUp(self):
