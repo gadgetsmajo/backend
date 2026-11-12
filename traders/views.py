@@ -257,8 +257,6 @@ class PublicTraderProfileView(APIView):
         return Response({
             'uuid': str(trader.uuid),
             'business_name': trader.business_name,
-            'location': trader.location,
-            'district': trader.district,
             'bio': trader.bio,
             'is_verified': True,
             'follower_count': trader.follower_records.count(),

@@ -309,7 +309,7 @@ class TraderProductSerializer(serializers.ModelSerializer):
 class TraderSaleSerializer(serializers.ModelSerializer):
     class Meta:
         model = TraderSale
-        fields = ('id', 'uuid', 'product', 'product_name', 'quantity', 'unit_price', 'total', 'customer_name', 'note', 'created_at')
+        fields = ('id', 'uuid', 'product', 'product_name', 'quantity', 'unit_price', 'total', 'note', 'created_at')
         read_only_fields = ('id', 'uuid', 'created_at')
 
 
@@ -392,10 +392,8 @@ class AdminTraderWithdrawalSerializer(TraderWithdrawalSerializer):
 
 class TraderOrderItemSerializer(serializers.ModelSerializer):
     order_code        = serializers.CharField(source='order_item.order.code', read_only=True)
-    order_id          = serializers.IntegerField(source='order_item.order.id', read_only=True)
     order_status      = serializers.CharField(source='order_item.order.status', read_only=True)
     order_created_at  = serializers.DateTimeField(source='order_item.order.created_at', read_only=True)
-    delivery_address  = serializers.CharField(source='order_item.order.delivery_address', read_only=True)
     product_name      = serializers.CharField(source='order_item.product.name', read_only=True)
     product_image     = serializers.SerializerMethodField()
     variant_options   = serializers.JSONField(source='order_item.variant_options', read_only=True)
@@ -409,13 +407,11 @@ class TraderOrderItemSerializer(serializers.ModelSerializer):
     class Meta:
         model = TraderOrderItem
         fields = (
-            'id', 'order_item_id', 'order_code', 'order_id', 'order_status',
-            'order_created_at', 'delivery_address',
+            'id', 'order_item_id', 'order_code', 'order_status', 'order_created_at',
             'product_name', 'product_image', 'variant_options', 'variant_sku', 'quantity', 'price',
             'status', 'note', 'status_changed_by_name', 'ready_at', 'updated_at',
         )
-        read_only_fields = ('id', 'order_item_id', 'order_code', 'order_id', 'order_status',
-                            'order_created_at', 'delivery_address',
+        read_only_fields = ('id', 'order_item_id', 'order_code', 'order_status', 'order_created_at',
                             'product_name', 'product_image', 'variant_options', 'variant_sku', 'quantity', 'price',
                             'status_changed_by_name', 'updated_at')
 

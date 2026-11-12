@@ -12,12 +12,12 @@ from django.urls import reverse
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from orders.models import Order, OrderItem, ReturnRequest
+from orders.models import Order, OrderItem, Payment, ReturnRequest
 from products.models import Category, CategoryAttribute, Product, ProductReview
 from settings_app.models import PlatformSettings
 from traders.models import (
 	TraderApplication, TraderEarning, TraderFollower, TraderInventoryItem,
-	TraderOrderItem, TraderProduct, TraderWithdrawal,
+	TraderOrderItem, TraderProduct, TraderSale, TraderWithdrawal,
 )
 from traders.wallet import record_paid_order_earnings, reverse_order_earnings, wallet_summary
 from users.models import User
@@ -69,12 +69,86 @@ class PublicTraderProfileTests(TestCase):
 		self.assertEqual(response.data['cancellation_rate'], 50.0)
 		self.assertEqual(response.data['seller_score'], 72.5)
 		self.assertFalse(response.data['is_following'])
+		self.assertEqual(response.data['business_name'], self.trader.business_name)
+		self.assertNotIn('location', response.data)
+		self.assertNotIn('district', response.data)
 
 	def test_product_response_exposes_approved_seller_uuid(self):
 		response = self.client.get(reverse('product-detail-by-slug', args=[self.product.slug]))
 
 		self.assertEqual(response.status_code, 200)
 		self.assertEqual(response.data['seller_uuid'], str(self.trader.uuid))
+
+	def test_trader_order_list_and_status_response_hide_customer_details(self):
+		order = Order.objects.create(
+			user=self.user,
+			status='pending',
+			total=100000,
+			delivery_address='Sensitive Customer Address',
+			phone='0700123456',
+			note='Sensitive Customer Note',
+		)
+		OrderItem.objects.create(
+			order=order, product=self.product, quantity=1, price=100000,
+		)
+		Payment.objects.create(
+			order=order,
+			pesapal_order_tracking_id='privacy-order-tracking-id',
+			amount=100000,
+			status='completed',
+		)
+		trader_client = APIClient()
+		trader_client.force_authenticate(user=self.trader.user)
+
+		response = trader_client.get(reverse('trader-orders', args=[self.trader.uuid]))
+
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(len(response.data), 1)
+		self.assertEqual(response.data[0]['product_name'], self.product.name)
+		for field in ('delivery_address', 'customer_name', 'phone', 'customer_phone', 'order_id'):
+			self.assertNotIn(field, response.data[0])
+		self.assertNotIn('Sensitive Customer', str(response.data))
+		self.assertNotIn(self.user.email, str(response.data))
+
+		update_response = trader_client.patch(
+			reverse('trader-order-item-update', args=[self.trader.uuid, response.data[0]['id']]),
+			{'status': 'preparing'},
+			format='json',
+		)
+
+		self.assertEqual(update_response.status_code, 200)
+		for field in ('delivery_address', 'customer_name', 'phone', 'customer_phone', 'order_id'):
+			self.assertNotIn(field, update_response.data)
+		self.assertNotIn('Sensitive Customer', str(update_response.data))
+		self.assertNotIn(self.user.email, str(update_response.data))
+
+	def test_trader_sales_endpoint_never_returns_or_stores_submitted_customer_name(self):
+		trader_client = APIClient()
+		trader_client.force_authenticate(user=self.trader.user)
+		url = reverse('trader-sales', args=[self.trader.uuid])
+
+		create_response = trader_client.post(
+			url,
+			{
+				'product_name': 'Test offline sale',
+				'quantity': 1,
+				'unit_price': '25000.00',
+				'total': '25000.00',
+				'customer_name': 'Sensitive Customer Name',
+			},
+			format='json',
+		)
+
+		self.assertEqual(create_response.status_code, 201, create_response.data)
+		self.assertNotIn('customer_name', create_response.data)
+		self.assertNotIn('Sensitive Customer Name', str(create_response.data))
+		sale = TraderSale.objects.get(trader=self.trader)
+		self.assertEqual(sale.customer_name, '')
+
+		list_response = trader_client.get(url)
+		self.assertEqual(list_response.status_code, 200)
+		self.assertNotIn('customer_name', list_response.data[0])
+		self.assertNotIn('Sensitive Customer Name', str(list_response.data))
 
 	def test_product_list_filter_returns_only_products_from_requested_seller(self):
 		other_trader = TraderApplication.objects.create(
