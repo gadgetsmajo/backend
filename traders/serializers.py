@@ -6,7 +6,7 @@ from rest_framework import serializers
 from django.core.exceptions import ObjectDoesNotExist
 from products.models import Category
 from products.models import ProductVariant
-from products.serializers import ProductVariantSerializer
+from products.serializers import ProductVariantSerializer, to_plain_data
 from .models import (
     TraderApplication, TraderProduct, TraderSale, TraderExpense, TraderOrderItem,
     TraderInventoryItem, TraderStockMovement, TraderEarning, TraderWithdrawal,
@@ -192,7 +192,7 @@ class TraderProductSerializer(serializers.ModelSerializer):
         )
 
     def to_internal_value(self, data):
-        data = data.copy()
+        data = to_plain_data(data)
         for field in ('tags', 'specifications', 'variants'):
             value = data.get(field)
             if isinstance(value, str):

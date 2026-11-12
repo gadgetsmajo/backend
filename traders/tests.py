@@ -471,6 +471,23 @@ class TraderInventoryStockSyncTests(TestCase):
 		public_list = APIClient().get(reverse('product-list'))
 		self.assertNotIn(public_product.pk, [item['id'] for item in public_list.data['results']])
 
+	def test_multipart_variant_update_syncs_variants_to_public_product(self):
+		response = self.client.patch(
+			reverse('trader-product-detail', args=[self.trader.uuid, self.product.uuid]),
+			{
+				'variants': '[{"sku":"TRADER-RED","options":{"color":"Red"},"price":"1200.00","stock":4}]',
+				'specifications': '{}',
+				'tags': '[]',
+			},
+			format='multipart',
+		)
+
+		self.assertEqual(response.status_code, 200, response.data)
+		public_product = Product.objects.get(trader_product=self.product)
+		self.assertEqual(public_product.variants.count(), 1)
+		self.assertEqual(public_product.variants.get().options, {'color': 'Red'})
+		self.assertEqual(response.data['variant_list'][0]['options'], {'color': 'Red'})
+
 	def test_adding_inventory_quantity_updates_product_stock(self):
 		response = self.client.post(
 			reverse('trader-inventory', args=[self.trader.uuid]),

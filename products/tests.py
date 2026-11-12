@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from django.apps import apps
 from django.contrib.auth import get_user_model
 from django.db import connections
+from django.http import QueryDict
 from django_redis.exceptions import ConnectionInterrupted
 from django.test import TestCase
 from django.urls import reverse
@@ -809,6 +810,23 @@ class ConfigurableProductCatalogTests(TestCase):
         self.assertEqual(product.review_status, 'approved')
         self.assertEqual(product.variants.count(), 1)
         self.assertEqual(product.stock, 3)
+
+    def test_product_serializer_parses_variants_from_multipart_form_data(self):
+        data = QueryDict('', mutable=True)
+        data.update({
+            'name': 'Multipart Running Shoe',
+            'category_id': str(self.category.pk),
+            'price': '100.00',
+            'stock': '3',
+            'specifications': '{"material":"Mesh"}',
+            'variants': '[{"sku":"SHOE-BLACK-9","options":{"size":"9"},"price":"100.00","stock":3}]',
+        })
+        serializer = ProductSerializer(data=data)
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        product = serializer.save()
+        self.assertEqual(product.variants.count(), 1)
+        self.assertEqual(product.specifications, {'material': 'Mesh'})
 
     def test_product_representation_exposes_unmodified_listed_prices_for_editing(self):
         product = Product.objects.create(

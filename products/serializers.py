@@ -8,6 +8,10 @@ from .models import Category, CategoryAttribute, Product, ProductImage, ProductV
 from settings_app.pricing import price_with_platform_charges
 
 
+def to_plain_data(data):
+    return {key: data.get(key) for key in data}
+
+
 class CategoryAttributeSerializer(serializers.ModelSerializer):
     class Meta:
         model = CategoryAttribute
@@ -236,7 +240,7 @@ class ProductSerializer(serializers.ModelSerializer):
         )
 
     def to_internal_value(self, data):
-        data = data.copy()
+        data = to_plain_data(data)
         for field in ('tags', 'specifications', 'variants'):
             value = data.get(field)
             if isinstance(value, str):
