@@ -83,7 +83,9 @@ class IsTraderProductOwner(permissions.BasePermission):
 
 
 class CategoryListView(generics.ListCreateAPIView):
-    queryset = Category.objects.all().annotate(product_count=Count('products', distinct=True))
+    queryset = Category.objects.all().annotate(
+        product_count=Count('products', distinct=True),
+    ).prefetch_related('attributes')
     serializer_class = CategorySerializer
     permission_classes = (IsAdminOrReadOnly,)
     pagination_class = None
@@ -102,27 +104,30 @@ class CategoryListView(generics.ListCreateAPIView):
 
     def list(self, request, *args, **kwargs):
         cache_key = 'categories:list:v4:admin' if request.user.is_staff else 'categories:list:v4:public'
-        cached = cache.get(cache_key)
+        try:
+            cached = cache.get(cache_key)
+        except (ConnectionInterrupted, RedisError):
+            logger.exception('Category list cache read failed.')
+            cached = None
         if cached is not None:
             return Response(cached)
         response = super().list(request, *args, **kwargs)
         if isinstance(response.data, list):
             by_id = {item['id']: item for item in response.data}
             direct_counts = {item['id']: item['product_count'] for item in response.data}
-            for item in response.data:
-                total = direct_counts[item['id']]
-                for descendant in response.data:
-                    if descendant['id'] == item['id']:
-                        continue
-                    parent_id = descendant['parent_id']
-                    while parent_id is not None:
-                        if parent_id == item['id']:
-                            total += direct_counts[descendant['id']]
-                            break
-                        parent = by_id.get(parent_id)
-                        parent_id = parent['parent_id'] if parent else None
-                item['product_count'] = total
-        cache.set(cache_key, response.data, CATEGORY_CACHE_TTL)
+            for descendant in response.data:
+                count = direct_counts[descendant['id']]
+                parent_id = descendant['parent_id']
+                while parent_id is not None:
+                    parent = by_id.get(parent_id)
+                    if parent is None:
+                        break
+                    parent['product_count'] += count
+                    parent_id = parent['parent_id']
+        try:
+            cache.set(cache_key, response.data, CATEGORY_CACHE_TTL)
+        except (ConnectionInterrupted, RedisError):
+            logger.exception('Category list cache write failed.')
         return response
 
     def perform_create(self, serializer):
