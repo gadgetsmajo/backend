@@ -810,6 +810,19 @@ class ConfigurableProductCatalogTests(TestCase):
         self.assertEqual(product.variants.count(), 1)
         self.assertEqual(product.stock, 3)
 
+    def test_product_representation_exposes_unmodified_listed_prices_for_editing(self):
+        product = Product.objects.create(
+            name='Price-safe Product',
+            category=self.category,
+            price='22000.00',
+            original_price='44000.00',
+        )
+
+        data = ProductSerializer(product).data
+
+        self.assertEqual(data['listed_price'], '22000.00')
+        self.assertEqual(data['original_listed_price'], '44000.00')
+
     def test_updating_variant_without_new_image_preserves_image_and_identity(self):
         product = Product.objects.create(
             name='Color LED',

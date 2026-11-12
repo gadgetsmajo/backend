@@ -210,6 +210,9 @@ class ProductSerializer(serializers.ModelSerializer):
         required=False, allow_null=True,
     )
     listed_price = serializers.DecimalField(source='price', max_digits=10, decimal_places=2, read_only=True)
+    original_listed_price = serializers.DecimalField(
+        source='original_price', max_digits=10, decimal_places=2, read_only=True,
+    )
     image_url = serializers.SerializerMethodField(read_only=True)
     images = ProductImageSerializer(many=True, read_only=True)
     is_featured = serializers.BooleanField(required=False)
@@ -223,7 +226,7 @@ class ProductSerializer(serializers.ModelSerializer):
         model = Product
         fields = ('id', 'uuid', 'name', 'slug', 'category', 'category_id',
                   'brand', 'condition', 'tags', 'specifications', 'review_status', 'review_note', 'variants',
-                  'price', 'listed_price', 'original_price', 'image_url', 'images',
+                  'price', 'listed_price', 'original_price', 'original_listed_price', 'image_url', 'images',
                   'short_description', 'long_description', 'delivery_fee',
                   'rating', 'stock', 'is_active', 'is_featured', 'is_new_deal', 'seller_uuid', 'seller_name',
                   'created_at', 'reviews_count')
