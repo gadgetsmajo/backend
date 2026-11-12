@@ -174,6 +174,32 @@ class ProductRecommendationsAPITest(TestCase):
         self.assertIn(legacy_product.pk, seller_products)
         self.assertEqual(seller_products[legacy_product.pk]['seller_uuid'], str(self.trader.uuid))
 
+    def test_migration_creates_unmatched_trader_product_for_admin_review(self):
+        trader_product = TraderProduct.objects.create(
+            trader=self.trader,
+            name='2-Channel 5V Relay Module with Optocoupler Isolation',
+            price=18000,
+            stock=2,
+            category=self.phone_category,
+            is_active=True,
+        )
+        migration = importlib.import_module(
+            'products.migrations.0019_create_missing_trader_public_products'
+        )
+
+        migration.create_missing_trader_public_products(
+            apps,
+            SimpleNamespace(connection=connections['default']),
+        )
+
+        public_product = Product.objects.get(trader_product=trader_product)
+        self.assertEqual(public_product.trader_id, self.trader.pk)
+        self.assertEqual(public_product.review_status, 'pending_review')
+        self.assertFalse(public_product.is_active)
+        listing = self.client.get(reverse('product-list'), {'seller': str(self.trader.uuid)})
+        self.assertEqual(listing.status_code, 200)
+        self.assertNotIn(public_product.pk, [item['id'] for item in listing.data['results']])
+
     def test_closed_or_hidden_trader_products_are_not_listed_as_majo_products(self):
         for field in ('is_closed', 'is_visible'):
             with self.subTest(field=field):
