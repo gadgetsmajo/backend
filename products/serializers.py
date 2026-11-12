@@ -43,11 +43,18 @@ class CategorySerializer(serializers.ModelSerializer):
         source='parent', queryset=Category.objects.all(), required=False, allow_null=True,
     )
     attributes = CategoryAttributeSerializer(many=True, required=False)
+    product_count = serializers.SerializerMethodField()
 
     class Meta:
         model = Category
-        fields = ('id', 'uuid', 'name', 'slug', 'image', 'parent_id', 'attributes')
+        fields = (
+            'id', 'uuid', 'name', 'slug', 'description', 'image', 'parent_id',
+            'is_active', 'position', 'product_count', 'attributes',
+        )
         extra_kwargs = {'slug': {'required': False}}
+
+    def get_product_count(self, obj):
+        return getattr(obj, 'product_count', 0)
 
     def to_internal_value(self, data):
         data = data.copy()
@@ -72,10 +79,14 @@ class CategorySerializer(serializers.ModelSerializer):
         attrs['slug'] = slug
         parent = attrs.get('parent', getattr(self.instance, 'parent', None))
         current_parent = parent
+        depth = 1
         while current_parent:
             if self.instance and current_parent.pk == self.instance.pk:
                 raise serializers.ValidationError({'parent_id': 'A category cannot be its own ancestor.'})
             current_parent = current_parent.parent
+            depth += 1
+        if depth > 3:
+            raise serializers.ValidationError({'parent_id': 'Categories can be nested up to three levels.'})
         return attrs
 
     @transaction.atomic
@@ -238,6 +249,18 @@ class ProductSerializer(serializers.ModelSerializer):
             'id', 'uuid', 'slug', 'rating', 'created_at',
             'review_status', 'review_note',
         )
+
+    def validate_category_id(self, category):
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        if not user or not user.is_authenticated or user.is_staff or category is None:
+            return category
+        existing_assignment = self.instance is not None and self.instance.category_id == category.pk
+        if not category.is_active and not existing_assignment:
+            raise serializers.ValidationError('Choose an active marketplace category.')
+        if category.children.filter(is_active=True).exists() and not existing_assignment:
+            raise serializers.ValidationError('Choose a category or subcategory below this department.')
+        return category
 
     def to_internal_value(self, data):
         data = to_plain_data(data)

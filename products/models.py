@@ -10,7 +10,10 @@ class Category(models.Model):
     uuid = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
     name = models.CharField(max_length=100)
     slug = models.SlugField(unique=True)
+    description = models.TextField(blank=True, default='')
     image = cloudinary.models.CloudinaryField('image', folder='categories/', blank=True, null=True)
+    is_active = models.BooleanField(default=True)
+    position = models.PositiveIntegerField(default=0)
     parent = models.ForeignKey(
         'self', on_delete=models.SET_NULL, null=True, blank=True, related_name='children',
     )
@@ -20,6 +23,7 @@ class Category(models.Model):
 
     class Meta:
         verbose_name_plural = 'categories'
+        ordering = ('position', 'name')
 
 
 class CategoryAttribute(models.Model):

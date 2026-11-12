@@ -15,7 +15,8 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .pagination import ProductPagination
-from .models import Category, Product, ProductImage, FlashSale, ProductReview, ReviewImage
+from .cache import invalidate_category_cache
+from .models import Category, CategoryAttribute, Product, ProductImage, FlashSale, ProductReview, ReviewImage
 from .serializers import (
     CategorySerializer, ProductSerializer, ProductImageSerializer,
     FlashSaleSerializer,
@@ -82,21 +83,55 @@ class IsTraderProductOwner(permissions.BasePermission):
 
 
 class CategoryListView(generics.ListCreateAPIView):
-    queryset = Category.objects.all().order_by('name')
+    queryset = Category.objects.all().annotate(product_count=Count('products', distinct=True))
     serializer_class = CategorySerializer
     permission_classes = (IsAdminOrReadOnly,)
+    pagination_class = None
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        if self.request.user.is_staff:
+            return queryset
+
+        # A visible child must not outlive an inactive parent in the public taxonomy.
+        return queryset.filter(is_active=True).exclude(
+            parent__is_active=False,
+        ).exclude(
+            parent__parent__is_active=False,
+        )
 
     def list(self, request, *args, **kwargs):
-        cached = cache.get('categories:list:v3')
+        cache_key = 'categories:list:v4:admin' if request.user.is_staff else 'categories:list:v4:public'
+        cached = cache.get(cache_key)
         if cached is not None:
             return Response(cached)
         response = super().list(request, *args, **kwargs)
-        cache.set('categories:list:v3', response.data, CATEGORY_CACHE_TTL)
+        if isinstance(response.data, list):
+            by_id = {item['id']: item for item in response.data}
+            direct_counts = {item['id']: item['product_count'] for item in response.data}
+            for item in response.data:
+                total = direct_counts[item['id']]
+                for descendant in response.data:
+                    if descendant['id'] == item['id']:
+                        continue
+                    parent_id = descendant['parent_id']
+                    while parent_id is not None:
+                        if parent_id == item['id']:
+                            total += direct_counts[descendant['id']]
+                            break
+                        parent = by_id.get(parent_id)
+                        parent_id = parent['parent_id'] if parent else None
+                item['product_count'] = total
+        cache.set(cache_key, response.data, CATEGORY_CACHE_TTL)
         return response
 
     def perform_create(self, serializer):
         serializer.save()
-        cache.delete('categories:list:v3')
+        self._invalidate_category_cache()
+
+    @staticmethod
+    def _invalidate_category_cache():
+        invalidate_category_cache()
 
 
 class CategoryDetailView(generics.RetrieveUpdateDestroyAPIView):
@@ -104,13 +139,20 @@ class CategoryDetailView(generics.RetrieveUpdateDestroyAPIView):
     serializer_class = CategorySerializer
     permission_classes = (IsAdminOrReadOnly,)
 
+    def get_queryset(self):
+        queryset = super().get_queryset().annotate(product_count=Count('products', distinct=True))
+        if self.request.user.is_staff:
+            return queryset
+        return queryset.filter(is_active=True)
+
     def perform_update(self, serializer):
         serializer.save()
-        cache.delete('categories:list:v3')
+        CategoryListView._invalidate_category_cache()
 
     def perform_destroy(self, instance):
-        instance.delete()
-        cache.delete('categories:list:v3')
+        instance.is_active = False
+        instance.save(update_fields=('is_active',))
+        CategoryListView._invalidate_category_cache()
 
 
 class ProductListView(generics.ListCreateAPIView):
@@ -118,7 +160,10 @@ class ProductListView(generics.ListCreateAPIView):
     permission_classes = (IsAdminOrReadOnly,)
     pagination_class = ProductPagination
     filter_backends = (filters.SearchFilter, filters.OrderingFilter)
-    search_fields = ('name', 'category__name')
+    search_fields = (
+        'name', 'brand', 'category__name', 'category__parent__name',
+        'category__parent__parent__name',
+    )
     ordering_fields = ('price', 'rating', 'created_at')
 
     def get_queryset(self):
@@ -130,15 +175,65 @@ class ProductListView(generics.ListCreateAPIView):
             ).filter(public_marketplace_product_filter())
         category = self.request.query_params.get('category')
         if category:
-            qs = qs.filter(category__slug=category)
+            selected = Category.objects.filter(slug=category, is_active=True).first()
+            if selected is None:
+                return qs.none()
+            ancestor = selected.parent
+            while ancestor:
+                if not ancestor.is_active:
+                    return qs.none()
+                ancestor = ancestor.parent
+            descendants = [selected.pk]
+            pending = [selected.pk]
+            while pending:
+                child_ids = list(Category.objects.filter(
+                    parent_id__in=pending,
+                    is_active=True,
+                ).values_list('pk', flat=True))
+                descendants.extend(child_ids)
+                pending = child_ids
+            qs = qs.filter(category_id__in=descendants)
+        price_min = self.request.query_params.get('price_min')
+        if price_min:
+            qs = qs.filter(price__gte=price_min)
+        price_max = self.request.query_params.get('price_max')
+        if price_max:
+            qs = qs.filter(price__lte=price_max)
+        brand = self.request.query_params.get('brand')
+        if brand:
+            qs = qs.filter(brand__icontains=brand.strip())
+        available = self.request.query_params.get('available')
+        if available == 'true':
+            qs = qs.filter(stock__gt=0)
+        min_rating = self.request.query_params.get('min_rating')
+        if min_rating:
+            qs = qs.filter(rating__gte=min_rating)
+        filterable_attributes = set(CategoryAttribute.objects.filter(is_filterable=True).values_list('key', flat=True))
+        for parameter, value in self.request.query_params.items():
+            if parameter.startswith('attr_'):
+                key = parameter[5:]
+                if key in filterable_attributes and value:
+                    qs = qs.filter(**{f'specifications__{key}': value})
         seller_uuid = self.request.query_params.get('seller')
         if seller_uuid:
             try:
                 seller_uuid = UUID(seller_uuid)
             except ValueError:
-                return qs.none()
-            visible_seller = Q(trader__uuid=seller_uuid, trader__status='approved', trader__is_visible=True, trader__is_closed=False)
-            visible_seller |= Q(trader_product__trader__uuid=seller_uuid, trader_product__trader__status='approved', trader_product__trader__is_visible=True, trader_product__trader__is_closed=False)
+                visible_seller = Q(
+                    trader__business_name__icontains=seller_uuid,
+                    trader__status='approved',
+                    trader__is_visible=True,
+                    trader__is_closed=False,
+                )
+                visible_seller |= Q(
+                    trader_product__trader__business_name__icontains=seller_uuid,
+                    trader_product__trader__status='approved',
+                    trader_product__trader__is_visible=True,
+                    trader_product__trader__is_closed=False,
+                )
+            else:
+                visible_seller = Q(trader__uuid=seller_uuid, trader__status='approved', trader__is_visible=True, trader__is_closed=False)
+                visible_seller |= Q(trader_product__trader__uuid=seller_uuid, trader_product__trader__status='approved', trader_product__trader__is_visible=True, trader_product__trader__is_closed=False)
             qs = qs.filter(visible_seller)
         if self.request.query_params.get('top_bought') == 'true':
             qs = qs.annotate(
@@ -157,6 +252,7 @@ class ProductListView(generics.ListCreateAPIView):
         product = serializer.save(**(({'image': cover}) if cover else {}))
         for i, img in enumerate(self.request.FILES.getlist('images')):
             ProductImage.objects.create(product=product, image=img, order=i)
+        invalidate_category_cache()
 
 
 class ProductDetailView(generics.RetrieveUpdateDestroyAPIView):
@@ -221,11 +317,13 @@ class ProductDetailView(generics.RetrieveUpdateDestroyAPIView):
             for i, img in enumerate(files):
                 ProductImage.objects.create(product=product, image=img, order=start + i)
         _invalidate_product_cache(product.pk)
+        invalidate_category_cache()
 
     def perform_destroy(self, instance):
         product_id = instance.pk
         instance.delete()
         _invalidate_product_cache(product_id)
+        invalidate_category_cache()
 
 
 class ProductReviewStatusView(APIView):

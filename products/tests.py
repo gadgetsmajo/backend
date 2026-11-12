@@ -7,7 +7,7 @@ from django.contrib.auth import get_user_model
 from django.db import connections
 from django.http import QueryDict
 from django_redis.exceptions import ConnectionInterrupted
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.urls import reverse
 from unittest.mock import patch
 from rest_framework.test import APIClient
@@ -289,6 +289,64 @@ class ProductRecommendationsAPITest(TestCase):
         self.assertEqual(staff_list.status_code, 200)
         self.assertIn(inactive_product.id, [item['id'] for item in staff_list.data['results']])
         self.assertEqual(staff_detail.status_code, 200)
+
+
+@override_settings(CACHES={
+    'default': {
+        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+        'LOCATION': 'marketplace-category-taxonomy-tests',
+    },
+})
+class MarketplaceCategoryTaxonomyAPITest(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.department = Category.objects.create(name='Test Department', slug='test-department')
+        self.category = Category.objects.create(
+            name='Test Category', slug='test-category', parent=self.department,
+        )
+        self.subcategory = Category.objects.create(name='Test Subcategory', slug='test-subcategory', parent=self.category)
+        self.product = Product.objects.create(
+            name='Test Board', category=self.subcategory, brand='Espressif',
+            price=10000, stock=5, is_active=True, review_status='approved',
+        )
+        self.admin = User.objects.create_user(
+            email='taxonomy-admin@example.com',
+            password='strong-pass-123',
+            name='Taxonomy Admin',
+            is_staff=True,
+        )
+
+    def test_department_filter_includes_active_products_in_descendants(self):
+        response = self.client.get(reverse('product-list'), {'category': 'test-department'})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([item['id'] for item in response.data['results']], [self.product.id])
+
+    def test_category_list_returns_all_nodes_and_aggregated_product_counts(self):
+        response = self.client.get(reverse('category-list'))
+
+        self.assertEqual(response.status_code, 200)
+        categories = {item['slug']: item for item in response.data}
+        self.assertEqual(categories['test-department']['product_count'], 1)
+        self.assertEqual(categories['test-category']['product_count'], 1)
+        self.assertEqual(categories['test-subcategory']['product_count'], 1)
+
+    def test_category_delete_deactivates_and_keeps_product_assignment(self):
+        self.client.force_authenticate(user=self.admin)
+
+        response = self.client.delete(reverse('category-detail', args=[self.subcategory.pk]))
+
+        self.assertEqual(response.status_code, 204)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.category_id, self.subcategory.pk)
+        self.subcategory.refresh_from_db()
+        self.assertFalse(self.subcategory.is_active)
+
+    def test_search_matches_category_hierarchy_and_brand(self):
+        response = self.client.get(reverse('product-list'), {'search': 'Espressif'})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([item['id'] for item in response.data['results']], [self.product.id])
 
 
 class ProductCommissionPricingAPITest(TestCase):

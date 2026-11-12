@@ -372,6 +372,8 @@ def _invalidate_product_cache(product, trader_product_id):
 
 @transaction.atomic
 def _sync_to_product(trader_product):
+    from products.cache import invalidate_category_cache
+
     defaults = {
         'trader': trader_product.trader,
         'name': trader_product.name,
@@ -440,6 +442,7 @@ def _sync_to_product(trader_product):
                 trader_product.save(update_fields=('price', 'stock', 'updated_at'))
 
     _invalidate_product_cache(product, trader_product.pk)
+    invalidate_category_cache()
     return product
 
 
@@ -517,6 +520,8 @@ class TraderProductDetailView(APIView):
                 pub.is_active = False
                 pub.save(update_fields=['is_active'])
             product.delete()
+            from products.cache import invalidate_category_cache
+            invalidate_category_cache()
         _invalidate_product_cache(pub, product.pk)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
