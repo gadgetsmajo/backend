@@ -104,7 +104,7 @@ class OrderSerializer(serializers.ModelSerializer):
                         'detail': 'A product in your cart is no longer available. Please refresh your cart.'
                     })
                 variant = locked_variants.get(cart_item.variant_id)
-                if (product.variants.exists() or cart_item.variant_options) and not variant:
+                if cart_item.variant_options and not variant:
                     raise serializers.ValidationError(
                         {'detail': f'Select an available option for "{product.name}" before ordering.'}
                     )

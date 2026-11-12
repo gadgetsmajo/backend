@@ -294,8 +294,7 @@ class CartQuoteView(APIView):
         for requested_item in requested_items:
             product = products[requested_item['product_id']]
             variant = variants.get(requested_item['variant_id'])
-            product_variants = list(product.variants.all())
-            if (product_variants or requested_item['variant_required']) and not variant:
+            if requested_item['variant_required'] and not variant:
                 return Response(
                     {'detail': f'Select an available option for "{product.name}".'},
                     status=status.HTTP_400_BAD_REQUEST,

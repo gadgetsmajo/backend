@@ -894,8 +894,6 @@ class CartView(APIView):
                 product = Product.objects.select_for_update().get(pk=product_id, is_active=True)
             except Product.DoesNotExist:
                 return Response({'detail': 'Product not found.'}, status=status.HTTP_404_NOT_FOUND)
-            if product.variants.exists() and variant_id is None:
-                return Response({'detail': 'Select product options before adding this item.'}, status=status.HTTP_400_BAD_REQUEST)
             variant = None
             if variant_id is not None:
                 try:
@@ -971,7 +969,7 @@ class CartItemView(APIView):
                 item.delete()
                 return Response(status=status.HTTP_204_NO_CONTENT)
             product = Product.objects.get(pk=item.product_id, is_active=True)
-            if (product.variants.exists() or item.variant_options) and not item.variant_id:
+            if item.variant_options and not item.variant_id:
                 return Response({'detail': 'Select an available product option.'}, status=status.HTTP_400_BAD_REQUEST)
             if item.variant_id:
                 variant = ProductVariant.objects.get(

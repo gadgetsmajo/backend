@@ -673,7 +673,7 @@ class OrderPricingSecurityTests(TestCase):
         self.assertEqual(order_item.price, quote.data['items'][0]['product_price'])
         self.assertEqual(response.data['items'][0]['variant_options'], {'size': '42', 'color': 'Black'})
 
-    def test_optioned_product_requires_a_variant_and_uses_variant_stock_limit(self):
+    def test_optioned_product_allows_main_product_and_uses_variant_stock_limit(self):
         variant = ProductVariant.objects.create(
             product=self.product,
             options={'size': '42', 'color': 'Black'},
@@ -682,10 +682,12 @@ class OrderPricingSecurityTests(TestCase):
         )
         self.cart_item.quantity = 2
         self.cart_item.save(update_fields=['quantity'])
-        missing_option = self.client.post('/api/orders/quote/', {
+        main_product_quote = self.client.post('/api/orders/quote/', {
             'district_id': self.district.id,
         }, format='json')
-        self.assertEqual(missing_option.status_code, 400)
+        self.assertEqual(main_product_quote.status_code, 200, main_product_quote.data)
+        self.assertIsNone(main_product_quote.data['items'][0]['variant_id'])
+        self.assertEqual(main_product_quote.data['items'][0]['product_price'], Decimal('12000.00'))
 
         self.cart_item.variant = variant
         self.cart_item.variant_options = variant.options
@@ -790,11 +792,12 @@ class OrderPricingSecurityTests(TestCase):
             )
             for size in ('41', '42')
         ]
-        missing_selection = self.client.post('/api/auth/cart/', {
+        main_product = self.client.post('/api/auth/cart/', {
             'product_id': self.product.id,
             'quantity': 1,
         }, format='json')
-        self.assertEqual(missing_selection.status_code, 400)
+        self.assertEqual(main_product.status_code, 201, main_product.data)
+        self.assertIsNone(main_product.data['variant_id'])
 
         for variant in variants:
             response = self.client.post('/api/auth/cart/', {
@@ -806,8 +809,38 @@ class OrderPricingSecurityTests(TestCase):
 
         items = self.client.get('/api/auth/cart/')
         self.assertEqual(items.status_code, 200)
-        self.assertEqual({item['variant_id'] for item in items.data}, {variant.id for variant in variants})
-        self.assertEqual({item['variant_options']['size'] for item in items.data}, {'41', '42'})
+        self.assertEqual({item['variant_id'] for item in items.data}, {None, *(variant.id for variant in variants)})
+        self.assertEqual({item['variant_options'].get('size') for item in items.data}, {None, '41', '42'})
+
+    def test_main_product_and_selected_variant_use_their_own_images(self):
+        self.cart_item.delete()
+        self.product.image = 'products/main-product'
+        self.product.save(update_fields=['image'])
+        variant = ProductVariant.objects.create(
+            product=self.product,
+            options={'color': 'Red'},
+            price='13000.00',
+            stock=2,
+            image='product_variants/red-led',
+        )
+
+        main_cart = self.client.post('/api/auth/cart/', {
+            'product_id': self.product.id,
+            'quantity': 1,
+        }, format='json')
+        self.assertEqual(main_cart.status_code, 201, main_cart.data)
+        self.assertIsNone(main_cart.data['variant_id'])
+        self.product.refresh_from_db()
+        self.assertEqual(main_cart.data['product_image'], self.product.image.url)
+
+        variant_cart = self.client.post('/api/auth/cart/', {
+            'product_id': self.product.id,
+            'variant_id': variant.id,
+            'quantity': 1,
+        }, format='json')
+        self.assertEqual(variant_cart.status_code, 201, variant_cart.data)
+        variant.refresh_from_db()
+        self.assertEqual(variant_cart.data['product_image'], variant.image.url)
 
     def test_selected_variant_image_is_used_in_cart_and_quote(self):
         self.cart_item.delete()
