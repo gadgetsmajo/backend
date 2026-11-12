@@ -105,7 +105,7 @@ class CategoryListView(generics.ListCreateAPIView):
         )
 
     def list(self, request, *args, **kwargs):
-        cache_key = 'categories:list:v4:admin' if request.user.is_staff else 'categories:list:v4:public'
+        cache_key = 'categories:list:v5:admin' if request.user.is_staff else 'categories:list:v5:public'
         try:
             cached = cache.get(cache_key)
         except (ConnectionInterrupted, RedisError):

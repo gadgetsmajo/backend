@@ -10,6 +10,6 @@ logger = logging.getLogger(__name__)
 
 def invalidate_category_cache():
     try:
-        cache.delete_many(('categories:list:v4:admin', 'categories:list:v4:public'))
+        cache.delete_many(('categories:list:v5:admin', 'categories:list:v5:public'))
     except (ConnectionInterrupted, RedisError):
         logger.exception('Category list cache invalidation failed.')

@@ -331,6 +331,14 @@ class MarketplaceCategoryTaxonomyAPITest(TestCase):
         self.assertEqual(categories['test-category']['product_count'], 1)
         self.assertEqual(categories['test-subcategory']['product_count'], 1)
 
+    def test_fashion_department_and_category_have_distinct_parent_relationships(self):
+        department = Category.objects.get(slug='fashion-accessories')
+        category = Category.objects.get(slug='fashion-accessories-fashion-accessories')
+
+        self.assertIsNone(department.parent_id)
+        self.assertEqual(department.name, 'Fashion & Accessories')
+        self.assertEqual(category.parent_id, department.pk)
+
     def test_category_delete_deactivates_and_keeps_product_assignment(self):
         self.client.force_authenticate(user=self.admin)
 
