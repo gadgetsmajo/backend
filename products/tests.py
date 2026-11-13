@@ -845,6 +845,17 @@ class ConfigurableProductCatalogTests(TestCase):
             is_required=True,
         )
 
+    def test_product_name_preserves_submitted_capitalization(self):
+        serializer = ProductSerializer(data={
+            'name': 'iPhone USB-C Adapter PRO',
+            'price': '10000',
+        })
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        product = serializer.save()
+
+        self.assertEqual(product.name, 'iPhone USB-C Adapter PRO')
+
     def test_category_serializer_saves_hierarchy_and_dynamic_attributes(self):
         parent = Category.objects.create(name='Test Fashion', slug='configurable-test-fashion')
         serializer = CategorySerializer(data={

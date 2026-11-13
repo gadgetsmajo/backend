@@ -133,7 +133,7 @@ class Product(models.Model):
         return bool(required_keys) and isinstance(variant.options, dict) and required_keys.issubset(variant.options)
 
     def save(self, *args, **kwargs):
-        self.name = self.name.strip().title()
+        self.name = self.name.strip()
         self.slug = f'{slugify(self.name)}-{uuid.UUID(str(self.uuid)).hex[:12]}'
         super().save(*args, **kwargs)
 
