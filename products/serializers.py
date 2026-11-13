@@ -14,6 +14,13 @@ def to_plain_data(data):
     return {key: data.get(key) for key in data}
 
 
+class TruncatedCharField(serializers.CharField):
+    def to_internal_value(self, data):
+        if isinstance(data, str) and self.max_length is not None:
+            data = data[:self.max_length]
+        return super().to_internal_value(data)
+
+
 class CategoryAttributeSerializer(serializers.ModelSerializer):
     class Meta:
         model = CategoryAttribute
@@ -303,6 +310,7 @@ class ProductImageSerializer(serializers.ModelSerializer):
 
 
 class ProductSerializer(serializers.ModelSerializer):
+    short_description = TruncatedCharField(max_length=300, required=False, allow_blank=True)
     category = CategorySerializer(read_only=True)
     category_id = serializers.PrimaryKeyRelatedField(
         queryset=Category.objects.all(), source='category', write_only=True,

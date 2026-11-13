@@ -7,7 +7,9 @@ from django.core.exceptions import ObjectDoesNotExist
 from django.db.models import Exists, OuterRef, Sum
 from products.models import Category
 from products.models import ProductVariant
-from products.serializers import ProductVariantSerializer, to_plain_data, validate_variant_removals
+from products.serializers import (
+    ProductVariantSerializer, TruncatedCharField, to_plain_data, validate_variant_removals,
+)
 from .models import (
     TraderApplication, TraderProduct, TraderSale, TraderExpense, TraderOrderItem,
     TraderInventoryItem, TraderStockMovement, TraderEarning, TraderWithdrawal,
@@ -164,6 +166,7 @@ class TraderPayoutAccountSerializer(serializers.Serializer):
 
 
 class TraderProductSerializer(serializers.ModelSerializer):
+    short_description = TruncatedCharField(max_length=300, required=False, allow_blank=True)
     image_url = serializers.SerializerMethodField()
     public_product_id = serializers.SerializerMethodField()
     review_status = serializers.SerializerMethodField()

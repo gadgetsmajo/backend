@@ -446,6 +446,13 @@ class TraderInventoryStockSyncTests(TestCase):
 		self.client = APIClient()
 		self.client.force_authenticate(user=self.user)
 
+	def test_trader_product_model_truncates_long_short_description(self):
+		self.product.short_description = 'x' * 301
+		self.product.save(update_fields=['short_description'])
+		self.product.refresh_from_db()
+
+		self.assertEqual(len(self.product.short_description), 300)
+
 	def test_shop_visibility_hides_and_restores_products_without_overwriting_product_state(self):
 		public_product = Product.objects.create(
 			name='Visibility Test Product',

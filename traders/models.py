@@ -144,6 +144,15 @@ class TraderProduct(models.Model):
     class Meta:
         ordering = ['-created_at']
 
+    def save(self, *args, **kwargs):
+        update_fields = kwargs.get('update_fields')
+        if (
+            (update_fields is None or 'short_description' in update_fields)
+            and isinstance(self.short_description, str)
+        ):
+            self.short_description = self.short_description[:300]
+        super().save(*args, **kwargs)
+
     def __str__(self):
         return f'{self.trader.business_name} — {self.name}'
 

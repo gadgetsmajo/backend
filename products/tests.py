@@ -17,6 +17,7 @@ from products.models import Category, CategoryAttribute, FlashSale, Product, Pro
 from products.serializers import CategoryAttributeSerializer, CategorySerializer, FlashSaleSerializer, ProductSerializer
 from settings_app.models import PlatformSettings
 from traders.models import TraderApplication, TraderProduct
+from traders.serializers import TraderProductSerializer
 
 User = get_user_model()
 
@@ -855,6 +856,33 @@ class ConfigurableProductCatalogTests(TestCase):
         product = serializer.save()
 
         self.assertEqual(product.name, 'iPhone USB-C Adapter PRO')
+
+    def test_long_short_descriptions_are_truncated_for_product_serializers(self):
+        description = 'x' * 301
+        product_serializer = ProductSerializer(data={
+            'name': 'Long Description Product',
+            'price': '10000',
+            'short_description': description,
+        })
+        trader_serializer = TraderProductSerializer(data={
+            'name': 'Long Description Trader Product',
+            'price': '10000',
+            'short_description': description,
+        })
+
+        self.assertTrue(product_serializer.is_valid(), product_serializer.errors)
+        self.assertTrue(trader_serializer.is_valid(), trader_serializer.errors)
+        self.assertEqual(len(product_serializer.validated_data['short_description']), 300)
+        self.assertEqual(len(trader_serializer.validated_data['short_description']), 300)
+
+    def test_product_model_truncates_long_short_description(self):
+        product = Product.objects.create(
+            name='Long Description Model Product',
+            price='10000',
+            short_description='x' * 301,
+        )
+
+        self.assertEqual(len(product.short_description), 300)
 
     def test_category_serializer_saves_hierarchy_and_dynamic_attributes(self):
         parent = Category.objects.create(name='Test Fashion', slug='configurable-test-fashion')

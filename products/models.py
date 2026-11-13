@@ -134,6 +134,12 @@ class Product(models.Model):
 
     def save(self, *args, **kwargs):
         self.name = self.name.strip()
+        update_fields = kwargs.get('update_fields')
+        if (
+            (update_fields is None or 'short_description' in update_fields)
+            and isinstance(self.short_description, str)
+        ):
+            self.short_description = self.short_description[:300]
         self.slug = f'{slugify(self.name)}-{uuid.UUID(str(self.uuid)).hex[:12]}'
         super().save(*args, **kwargs)
 
