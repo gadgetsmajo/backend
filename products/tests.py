@@ -14,7 +14,7 @@ from rest_framework.test import APIClient
 
 from orders.models import Order, OrderItem
 from products.models import Category, CategoryAttribute, FlashSale, Product, ProductReview, ProductVariant
-from products.serializers import CategorySerializer, FlashSaleSerializer, ProductSerializer
+from products.serializers import CategoryAttributeSerializer, CategorySerializer, FlashSaleSerializer, ProductSerializer
 from settings_app.models import PlatformSettings
 from traders.models import TraderApplication, TraderProduct
 
@@ -819,12 +819,21 @@ class FlashSaleBasePricingSerializerTest(TestCase):
 class ConfigurableProductCatalogTests(TestCase):
     def setUp(self):
         self.client = APIClient()
-        self.category = Category.objects.create(name='Shoes', slug='shoes')
+        self.category = Category.objects.create(name='Test Shoes', slug='configurable-test-shoes')
         CategoryAttribute.objects.create(
             category=self.category,
             name='Size',
             key='size',
             input_type='size',
+            is_required=True,
+            is_variant=True,
+        )
+        CategoryAttribute.objects.create(
+            category=self.category,
+            name='Color',
+            key='color',
+            input_type='color',
+            choices=['Black', 'White'],
             is_required=True,
             is_variant=True,
         )
@@ -837,7 +846,7 @@ class ConfigurableProductCatalogTests(TestCase):
         )
 
     def test_category_serializer_saves_hierarchy_and_dynamic_attributes(self):
-        parent = Category.objects.create(name='Fashion', slug='fashion')
+        parent = Category.objects.create(name='Test Fashion', slug='configurable-test-fashion')
         serializer = CategorySerializer(data={
             'name': 'Clothing',
             'parent_id': parent.pk,
@@ -855,6 +864,32 @@ class ConfigurableProductCatalogTests(TestCase):
         self.assertEqual(category.attributes.get().key, 'fit')
         self.assertEqual(category.attributes.get().choices, ['Slim', 'Regular'])
 
+    def test_text_attributes_accept_suggestions_and_allow_custom_values(self):
+        serializer = CategoryAttributeSerializer(data={
+            'name': 'Product Type',
+            'input_type': 'text',
+            'choices': ['T-Shirt', 'Other'],
+        })
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        self.assertEqual(serializer.validated_data['choices'], ['T-Shirt', 'Other'])
+
+    def test_seeded_clothing_and_shoe_categories_have_variant_and_specification_attributes(self):
+        clothing = Category.objects.get(slug='clothing')
+        shoe_root = Category.objects.get(slug='shoes')
+        clothing_keys = set(clothing.attributes.values_list('key', flat=True))
+        shoe_keys = set(shoe_root.attributes.values_list('key', flat=True))
+
+        self.assertTrue({'product-type', 'gender', 'material', 'material-composition', 'pattern', 'fit',
+                         'care-instructions', 'size-system', 'size', 'color'}.issubset(clothing_keys))
+        self.assertTrue({'product-type', 'gender', 'material', 'sole-material', 'style', 'intended-use',
+                         'size-system', 'size', 'color'}.issubset(shoe_keys))
+        self.assertTrue(shoe_root.children.exists())
+        self.assertTrue(all(
+            {'size', 'color'}.issubset(set(category.attributes.values_list('key', flat=True)))
+            for category in shoe_root.children.all()
+        ))
+
     def test_product_serializer_persists_specifications_and_variants(self):
         serializer = ProductSerializer(data={
             'name': 'Running Shoe',
@@ -864,7 +899,7 @@ class ConfigurableProductCatalogTests(TestCase):
             'specifications': {'material': 'Mesh'},
             'variants': [{
                 'sku': 'SHOE-BLACK-9',
-                'options': {'size': '9'},
+                'options': {'size': '9', 'color': 'Black'},
                 'price': '100.00',
                 'stock': 3,
             }],
@@ -877,6 +912,69 @@ class ConfigurableProductCatalogTests(TestCase):
         self.assertEqual(product.variants.count(), 1)
         self.assertEqual(product.stock, 3)
 
+    def test_each_required_variant_option_must_be_present(self):
+        serializer = ProductSerializer(data={
+            'name': 'Incomplete Running Shoe',
+            'category_id': self.category.pk,
+            'price': '100.00',
+            'stock': 3,
+            'specifications': {'material': 'Mesh'},
+            'variants': [{
+                'sku': 'SHOE-MISSING-COLOR',
+                'options': {'size': '9'},
+                'price': '100.00',
+                'stock': 3,
+            }],
+        })
+
+        self.assertFalse(serializer.is_valid())
+        self.assertIn('Each variant must include Color.', str(serializer.errors['variants']))
+
+    def test_adding_variants_to_legacy_product_enforces_category_options(self):
+        product = Product.objects.create(
+            name='Legacy Running Shoe',
+            category=self.category,
+            price='100.00',
+            stock=3,
+            specifications={'material': 'Mesh'},
+        )
+        serializer = ProductSerializer(product, data={
+            'variants': [{
+                'options': {'size': '9'},
+                'price': '100.00',
+                'stock': 3,
+            }],
+        }, partial=True)
+
+        self.assertFalse(serializer.is_valid())
+        self.assertIn('Each variant must include Color.', str(serializer.errors['variants']))
+
+    def test_variant_attributes_are_filterable_and_searchable(self):
+        product = Product.objects.create(
+            name='Mesh Running Shoe',
+            category=self.category,
+            price='100.00',
+            stock=2,
+            specifications={'material': ['Mesh']},
+        )
+        ProductVariant.objects.create(
+            product=product,
+            options={'size': '42', 'color': 'Black'},
+            price='100.00',
+            stock=2,
+        )
+
+        filtered = self.client.get(reverse('product-list'), {
+            'category': self.category.slug,
+            'attr_size': '42',
+        })
+        searched = self.client.get(reverse('product-list'), {'search': '42'})
+
+        self.assertEqual(filtered.status_code, 200, filtered.data)
+        self.assertIn(product.id, [item['id'] for item in filtered.data['results']])
+        self.assertEqual(searched.status_code, 200, searched.data)
+        self.assertIn(product.id, [item['id'] for item in searched.data['results']])
+
     def test_product_serializer_parses_variants_from_multipart_form_data(self):
         data = QueryDict('', mutable=True)
         data.update({
@@ -885,7 +983,7 @@ class ConfigurableProductCatalogTests(TestCase):
             'price': '100.00',
             'stock': '3',
             'specifications': '{"material":"Mesh"}',
-            'variants': '[{"sku":"SHOE-BLACK-9","options":{"size":"9"},"price":"100.00","stock":3}]',
+            'variants': '[{"sku":"SHOE-BLACK-9","options":{"size":"9","color":"Black"},"price":"100.00","stock":3}]',
         })
         serializer = ProductSerializer(data=data)
 
@@ -952,6 +1050,56 @@ class ConfigurableProductCatalogTests(TestCase):
         self.assertFalse(serializer.is_valid())
         self.assertIn('specifications', serializer.errors)
         self.assertIn('variants', serializer.errors)
+
+    def test_variant_with_order_history_cannot_be_removed(self):
+        product = Product.objects.create(
+            name='Ordered Shoe',
+            category=self.category,
+            price='100.00',
+            stock=1,
+        )
+        variant = ProductVariant.objects.create(
+            product=product,
+            sku='ORDERED-SHOE-9',
+            options={'size': '9', 'color': 'Black'},
+            price='100.00',
+            stock=1,
+        )
+        user = User.objects.create_user(
+            email='ordered-shoe-customer@example.com',
+            name='Shoe Customer',
+            password='Password123!',
+        )
+        order = Order.objects.create(user=user, total='100.00')
+        OrderItem.objects.create(
+            order=order,
+            product=product,
+            variant=variant,
+            variant_options=variant.options,
+            variant_sku=variant.sku,
+            quantity=1,
+            price='100.00',
+        )
+
+        public_variant_data = ProductSerializer(product).data['variants'][0]
+        self.assertNotIn('sold_quantity', public_variant_data)
+        admin = User.objects.create_user(
+            email='shoe-admin@example.com',
+            name='Shoe Admin',
+            password='Password123!',
+            is_staff=True,
+        )
+        admin_variant_data = ProductSerializer(
+            product,
+            context={'request': SimpleNamespace(user=admin)},
+        ).data['variants'][0]
+        self.assertEqual(admin_variant_data['sold_quantity'], 1)
+
+        serializer = ProductSerializer(product, data={'variants': []}, partial=True)
+
+        self.assertFalse(serializer.is_valid())
+        self.assertIn('order or inventory history', str(serializer.errors['variants']))
+        self.assertTrue(ProductVariant.objects.filter(pk=variant.pk).exists())
 
     def test_review_action_requires_feedback_and_controls_public_visibility(self):
         admin = User.objects.create_user(

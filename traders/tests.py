@@ -13,7 +13,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from orders.models import Order, OrderItem, Payment, ReturnRequest
-from products.models import Category, CategoryAttribute, Product, ProductReview
+from products.models import Category, CategoryAttribute, Product, ProductReview, ProductVariant
 from settings_app.models import PlatformSettings
 from traders.models import (
 	TraderApplication, TraderEarning, TraderFollower, TraderInventoryItem,
@@ -561,6 +561,28 @@ class TraderInventoryStockSyncTests(TestCase):
 		self.assertEqual(public_product.variants.count(), 1)
 		self.assertEqual(public_product.variants.get().options, {'color': 'Red'})
 		self.assertEqual(response.data['variant_list'][0]['options'], {'color': 'Red'})
+		variant = public_product.variants.get()
+		inventory_item = TraderInventoryItem.objects.create(
+			trader=self.trader,
+			product=self.product,
+			variant=variant,
+			quantity=4,
+			cost_price=800,
+		)
+
+		updated = self.client.patch(
+			reverse('trader-product-detail', args=[self.trader.uuid, self.product.uuid]),
+			{
+				'variants': '[{"sku":"TRADER-RED","options":{"color":"Red"},"price":"1200.00","stock":7}]',
+				'specifications': '{}',
+				'tags': '[]',
+			},
+			format='multipart',
+		)
+
+		self.assertEqual(updated.status_code, 200, updated.data)
+		inventory_item.refresh_from_db()
+		self.assertEqual(inventory_item.quantity, 7)
 
 	def test_adding_inventory_quantity_updates_product_stock(self):
 		response = self.client.post(
@@ -575,6 +597,145 @@ class TraderInventoryStockSyncTests(TestCase):
 		self.assertEqual(inventory_item.quantity, 12)
 		self.assertEqual(self.product.stock, 12)
 		self.assertEqual(response.data['product_stock'], 12)
+
+	def test_variant_inventory_updates_only_the_selected_option_and_parent_total(self):
+		public_product = Product.objects.create(
+			name=self.product.name,
+			price=25000,
+			stock=5,
+			is_active=True,
+			trader=self.trader,
+			trader_product=self.product,
+		)
+		selected = ProductVariant.objects.create(
+			product=public_product,
+			sku='INVENTORY-SHOE-42',
+			options={'size': '42', 'color': 'Black'},
+			price=25000,
+			stock=2,
+		)
+		other = ProductVariant.objects.create(
+			product=public_product,
+			sku='INVENTORY-SHOE-43',
+			options={'size': '43', 'color': 'Black'},
+			price=25000,
+			stock=3,
+		)
+
+		added = self.client.post(
+			reverse('trader-inventory', args=[self.trader.uuid]),
+			{'product': self.product.id, 'variant': selected.id, 'quantity': 7, 'cost_price': 15000},
+			format='json',
+		)
+		self.assertEqual(added.status_code, 201, added.data)
+		selected.refresh_from_db()
+		other.refresh_from_db()
+		public_product.refresh_from_db()
+		self.product.refresh_from_db()
+		self.assertEqual(selected.stock, 7)
+		self.assertEqual(other.stock, 3)
+		self.assertEqual(public_product.stock, 10)
+		self.assertEqual(self.product.stock, 10)
+		self.assertEqual(added.data['variant_options'], {'size': '42', 'color': 'Black'})
+
+		movement = self.client.post(
+			reverse('trader-stock-movement', args=[self.trader.uuid, added.data['id']]),
+			{'type': 'out', 'quantity': 2},
+			format='json',
+		)
+		self.assertEqual(movement.status_code, 200, movement.data)
+		selected.refresh_from_db()
+		public_product.refresh_from_db()
+		self.product.refresh_from_db()
+		self.assertEqual(selected.stock, 5)
+		self.assertEqual(other.stock, 3)
+		self.assertEqual(public_product.stock, 8)
+		self.assertEqual(self.product.stock, 8)
+
+	def test_variant_products_reject_product_level_inventory(self):
+		public_product = Product.objects.create(
+			name=self.product.name,
+			price=25000,
+			stock=5,
+			trader=self.trader,
+			trader_product=self.product,
+		)
+		ProductVariant.objects.create(
+			product=public_product,
+			options={'size': '42'},
+			price=25000,
+			stock=5,
+		)
+
+		response = self.client.post(
+			reverse('trader-inventory', args=[self.trader.uuid]),
+			{'product': self.product.id, 'quantity': 5},
+			format='json',
+		)
+
+		self.assertEqual(response.status_code, 400)
+		self.assertIn('Select a product option', response.data['detail'])
+
+	def test_paid_variant_stock_adjustments_keep_inventory_and_trader_totals_in_sync(self):
+		public_product = Product.objects.create(
+			name=self.product.name,
+			price=25000,
+			stock=2,
+			trader=self.trader,
+			trader_product=self.product,
+		)
+		variant = ProductVariant.objects.create(
+			product=public_product,
+			options={'size': '42', 'color': 'Black'},
+			price=25000,
+			stock=2,
+		)
+		inventory_item = TraderInventoryItem.objects.create(
+			trader=self.trader,
+			product=self.product,
+			variant=variant,
+			quantity=2,
+			cost_price=15000,
+		)
+		order = Order.objects.create(user=self.user, total=25000)
+		order_item = OrderItem.objects.create(
+			order=order,
+			product=public_product,
+			variant=variant,
+			variant_options=variant.options,
+			quantity=1,
+			price=25000,
+		)
+		Payment.objects.create(
+			order=order,
+			pesapal_order_tracking_id='variant-inventory-restock',
+			amount=25000,
+			status='completed',
+		)
+
+		from orders.views import _adjust_variant_stock, _restore_stock
+
+		self.product.stock = 2
+		self.product.save(update_fields=['stock'])
+		public_product.stock = 1
+		public_product.save(update_fields=['stock'])
+		_adjust_variant_stock(order_item, -1)
+		variant.refresh_from_db()
+		inventory_item.refresh_from_db()
+		self.product.refresh_from_db()
+		self.assertEqual(variant.stock, 1)
+		self.assertEqual(inventory_item.quantity, 1)
+		self.assertEqual(self.product.stock, 1)
+
+		_restore_stock(order)
+		variant.refresh_from_db()
+		inventory_item.refresh_from_db()
+		public_product.refresh_from_db()
+		self.product.refresh_from_db()
+		self.assertEqual(variant.stock, 2)
+		self.assertEqual(inventory_item.quantity, 2)
+		self.assertEqual(public_product.stock, 2)
+		self.assertEqual(self.product.stock, 2)
 
 	def test_stock_movement_updates_linked_public_product_stock(self):
 		public_product = Product.objects.create(

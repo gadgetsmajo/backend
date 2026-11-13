@@ -8,6 +8,7 @@ import os
 
 from cloudinary.utils import cloudinary_url, private_download_url
 from django.conf import settings
+from django.core.exceptions import ObjectDoesNotExist
 from django.core.serializers.json import DjangoJSONEncoder
 from django.db import transaction
 from django.db.models import Sum
@@ -454,7 +455,7 @@ class TraderProductListView(APIView):
         if not _is_trader_owner(request, trader):
             return Response({'detail': 'Forbidden.'}, status=status.HTTP_403_FORBIDDEN)
         products = TraderProduct.objects.filter(trader=trader)
-        return Response(TraderProductSerializer(products, many=True).data)
+        return Response(TraderProductSerializer(products, many=True, context={'request': request}).data)
 
     def post(self, request, trader_uuid):
         trader = _get_trader_by_uuid(trader_uuid)
@@ -462,7 +463,7 @@ class TraderProductListView(APIView):
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         if not _is_trader_owner(request, trader):
             return Response({'detail': 'Forbidden.'}, status=status.HTTP_403_FORBIDDEN)
-        serializer = TraderProductSerializer(data=request.data)
+        serializer = TraderProductSerializer(data=request.data, context={'request': request})
         serializer.is_valid(raise_exception=True)
         image_file = request.FILES.get('image')
         extra = {'image': image_file} if image_file else {}
@@ -490,7 +491,7 @@ class TraderProductDetailView(APIView):
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         if not _is_trader_owner(request, trader):
             return Response({'detail': 'Forbidden.'}, status=status.HTTP_403_FORBIDDEN)
-        return Response(TraderProductSerializer(product).data)
+        return Response(TraderProductSerializer(product, context={'request': request}).data)
 
     def patch(self, request, trader_uuid, product_uuid):
         trader, product = self._get(trader_uuid, product_uuid)
@@ -498,7 +499,7 @@ class TraderProductDetailView(APIView):
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         if not _is_trader_owner(request, trader):
             return Response({'detail': 'Forbidden.'}, status=status.HTTP_403_FORBIDDEN)
-        serializer = TraderProductSerializer(product, data=request.data, partial=True)
+        serializer = TraderProductSerializer(product, data=request.data, partial=True, context={'request': request})
         serializer.is_valid(raise_exception=True)
         image_file = request.FILES.get('image')
         extra = {'image': image_file} if image_file else {}
@@ -854,7 +855,7 @@ class TraderInventoryListView(APIView):
         trader = _get_trader_by_uuid(trader_uuid)
         if not trader or (trader.email != request.user.email and not request.user.is_staff):
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
-        items = TraderInventoryItem.objects.filter(trader=trader).select_related('product')
+        items = TraderInventoryItem.objects.filter(trader=trader).select_related('product', 'variant')
         return Response(TraderInventoryItemSerializer(items, many=True).data)
 
     def post(self, request, trader_uuid):
@@ -866,20 +867,39 @@ class TraderInventoryListView(APIView):
             product = TraderProduct.objects.get(pk=product_id, trader=trader)
         except TraderProduct.DoesNotExist:
             return Response({'detail': 'Product not found.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            public_product = product.public_product
+        except ObjectDoesNotExist:
+            public_product = None
+        variant_id = request.data.get('variant')
+        variant = None
+        if variant_id not in (None, ''):
+            if not public_product:
+                return Response({'detail': 'Product options are not available yet.'}, status=status.HTTP_400_BAD_REQUEST)
+            try:
+                variant = ProductVariant.objects.get(pk=int(variant_id), product=public_product)
+            except (ProductVariant.DoesNotExist, TypeError, ValueError):
+                return Response({'detail': 'Select a valid product option.'}, status=status.HTTP_400_BAD_REQUEST)
+        elif public_product and public_product.variants.exists():
+            return Response({'detail': 'Select a product option to track its inventory separately.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            quantity = int(request.data.get('quantity', 0))
+            if quantity < 0:
+                raise ValueError
+        except (ValueError, TypeError):
+            return Response({'detail': 'Enter a valid non-negative quantity.'}, status=status.HTTP_400_BAD_REQUEST)
         item, created = TraderInventoryItem.objects.get_or_create(
-            trader=trader, product=product,
+            trader=trader, product=product, variant=variant,
             defaults={
-                'quantity': int(request.data.get('quantity', 0)),
+                'quantity': quantity,
                 'cost_price': request.data.get('cost_price', 0),
                 'location': request.data.get('location', ''),
                 'note': request.data.get('note', ''),
             }
         )
         if not created:
-            return Response({'detail': 'Product already in inventory.'}, status=status.HTTP_400_BAD_REQUEST)
-        product.stock = item.quantity
-        product.save(update_fields=['stock'])
-        _sync_to_product(product)
+            return Response({'detail': 'This product option is already in inventory.'}, status=status.HTTP_400_BAD_REQUEST)
+        _sync_inventory_stock(item)
         return Response(TraderInventoryItemSerializer(item).data, status=status.HTTP_201_CREATED)
 
 
@@ -891,7 +911,7 @@ class TraderInventoryItemDetailView(APIView):
         if not trader or (trader.email != user.email and not user.is_staff):
             return None, None
         try:
-            return trader, TraderInventoryItem.objects.select_related('product').get(pk=pk, trader=trader)
+            return trader, TraderInventoryItem.objects.select_related('product', 'variant').get(pk=pk, trader=trader)
         except TraderInventoryItem.DoesNotExist:
             return trader, None
 
@@ -921,9 +941,19 @@ class TraderStockMovementView(APIView):
         if not trader or (trader.email != request.user.email and not request.user.is_staff):
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         try:
-            item = TraderInventoryItem.objects.select_related('product').get(pk=pk, trader=trader)
+            item = TraderInventoryItem.objects.select_related('product', 'variant').get(pk=pk, trader=trader)
         except TraderInventoryItem.DoesNotExist:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        if not item.variant_id:
+            try:
+                public_product = item.product.public_product
+            except ObjectDoesNotExist:
+                public_product = None
+            if public_product and public_product.variants.exists():
+                return Response(
+                    {'detail': 'This product now uses option-level inventory. Remove this legacy product-level record and track each option separately.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
         mv_type = request.data.get('type')
         if mv_type not in ('in', 'out', 'adjust', 'return'):
             return Response({'detail': 'Invalid type.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -938,10 +968,30 @@ class TraderStockMovementView(APIView):
         )
         item.quantity = max(0, item.quantity + signed_qty)
         item.save(update_fields=['quantity', 'updated_at'])
-        item.product.stock = max(0, item.product.stock + signed_qty)
-        item.product.save(update_fields=['stock'])
-        _sync_to_product(item.product)
+        _sync_inventory_stock(item)
         return Response(TraderInventoryItemSerializer(item).data)
+
+
+def _sync_inventory_stock(item):
+    if item.variant_id:
+        variant = item.variant
+        variant.stock = item.quantity
+        variant.save(update_fields=('stock', 'updated_at'))
+        public_product = variant.product
+        variants = list(public_product.variants.all())
+        public_product.stock = sum(entry.stock for entry in variants)
+        if variants:
+            public_product.price = min(entry.price for entry in variants)
+        public_product.save(update_fields=('stock', 'price'))
+        item.product.stock = public_product.stock
+        item.product.price = public_product.price
+        item.product.save(update_fields=('stock', 'price', 'updated_at'))
+        _sync_to_product(item.product)
+        return
+
+    item.product.stock = item.quantity
+    item.product.save(update_fields=('stock', 'updated_at'))
+    _sync_to_product(item.product)
 
 
 class TraderAccountView(APIView):

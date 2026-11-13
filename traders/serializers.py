@@ -4,9 +4,10 @@ import re
 
 from rest_framework import serializers
 from django.core.exceptions import ObjectDoesNotExist
+from django.db.models import Exists, OuterRef, Sum
 from products.models import Category
 from products.models import ProductVariant
-from products.serializers import ProductVariantSerializer, to_plain_data
+from products.serializers import ProductVariantSerializer, to_plain_data, validate_variant_removals
 from .models import (
     TraderApplication, TraderProduct, TraderSale, TraderExpense, TraderOrderItem,
     TraderInventoryItem, TraderStockMovement, TraderEarning, TraderWithdrawal,
@@ -234,6 +235,12 @@ class TraderProductSerializer(serializers.ModelSerializer):
         category = attrs.get('category', getattr(self.instance, 'category', None))
         specifications = attrs.get('specifications', getattr(self.instance, 'specifications', {}))
         variants = attrs.get('variants')
+        public_product = None
+        if self.instance:
+            try:
+                public_product = self.instance.public_product
+            except ObjectDoesNotExist:
+                pass
         if not isinstance(specifications, dict):
             raise serializers.ValidationError({'specifications': 'Specifications must be an object.'})
         tags = attrs.get('tags', getattr(self.instance, 'tags', []))
@@ -260,17 +267,36 @@ class TraderProductSerializer(serializers.ModelSerializer):
             ]
             if len(option_sets) != len(set(option_sets)):
                 raise serializers.ValidationError({'variants': 'Variant option combinations must be unique.'})
+            validate_variant_removals(public_product, variants)
         if category:
             errors = {}
+            validate_specifications = (
+                self.instance is None or 'category' in attrs or 'specifications' in attrs
+            )
+            validate_variants = (
+                self.instance is None
+                or 'category' in attrs
+                or (
+                    variants is not None
+                    and (bool(variants) or (public_product and public_product.variants.exists()))
+                )
+            )
+            variant_data = variants
+            if variant_data is None and self.instance and validate_variants:
+                variant_data = [
+                    {'options': variant.options}
+                    for variant in public_product.variants.all()
+                ] if public_product else []
             for attribute in category.attributes.filter(is_required=True):
                 if attribute.is_variant:
-                    if variants is not None and (
-                        not variants or any(attribute.key not in variant.get('options', {}) for variant in variants)
+                    if validate_variants and (
+                        not variant_data
+                        or any(attribute.key not in variant.get('options', {}) for variant in variant_data)
                     ):
                         errors.setdefault('variants', []).append(f'Each variant must include {attribute.name}.')
-                    elif variants is None and self.instance is None:
-                        errors.setdefault('variants', []).append(f'At least one variant with {attribute.name} is required.')
-                elif attribute.key not in specifications or specifications[attribute.key] in (None, '', []):
+                elif validate_specifications and (
+                    attribute.key not in specifications or specifications[attribute.key] in (None, '', [])
+                ):
                     errors.setdefault('specifications', []).append(f'{attribute.name} is required.')
             if errors:
                 raise serializers.ValidationError(errors)
@@ -301,7 +327,13 @@ class TraderProductSerializer(serializers.ModelSerializer):
 
     def get_variant_list(self, obj):
         try:
-            return ProductVariantSerializer(obj.public_product.variants.all(), many=True).data
+            variants = ProductVariant.objects.filter(product=obj.public_product).annotate(
+                sold_quantity=Sum('order_items__quantity'),
+                has_inventory_item=Exists(
+                    TraderInventoryItem.objects.filter(variant_id=OuterRef('pk')),
+                ),
+            )
+            return ProductVariantSerializer(variants, many=True, context=self.context).data
         except ObjectDoesNotExist:
             return []
 
@@ -323,16 +355,34 @@ class TraderExpenseSerializer(serializers.ModelSerializer):
 class TraderInventoryItemSerializer(serializers.ModelSerializer):
     product_name  = serializers.CharField(source='product.name', read_only=True)
     product_image = serializers.SerializerMethodField()
-    product_price = serializers.DecimalField(source='product.price', max_digits=12, decimal_places=2, read_only=True)
-    product_stock = serializers.IntegerField(source='product.stock', read_only=True)
+    product_price = serializers.SerializerMethodField()
+    product_stock = serializers.SerializerMethodField()
     product_uuid  = serializers.CharField(source='product.uuid', read_only=True)
+    variant_options = serializers.SerializerMethodField()
+    variant_sku = serializers.CharField(source='variant.sku', read_only=True, default='')
 
     class Meta:
         model = TraderInventoryItem
-        fields = ('id', 'product', 'product_uuid', 'product_name', 'product_image', 'product_price',
-                  'product_stock', 'quantity', 'cost_price', 'location', 'note', 'updated_at', 'created_at')
+        fields = ('id', 'product', 'variant', 'variant_options', 'variant_sku', 'product_uuid',
+                  'product_name', 'product_image', 'product_price', 'product_stock', 'quantity',
+                  'cost_price', 'location', 'note', 'updated_at', 'created_at')
         read_only_fields = ('id', 'product_uuid', 'product_name', 'product_image', 'product_price',
-                            'product_stock', 'updated_at', 'created_at')
+                            'product_stock', 'variant_options', 'variant_sku', 'updated_at', 'created_at')
+
+    def get_product_price(self, obj):
+        try:
+            return obj.variant.price if obj.variant_id else obj.product.price
+        except ObjectDoesNotExist:
+            return obj.product.price
+
+    def get_product_stock(self, obj):
+        try:
+            return obj.variant.stock if obj.variant_id else obj.product.stock
+        except ObjectDoesNotExist:
+            return obj.product.stock
+
+    def get_variant_options(self, obj):
+        return obj.variant.options if obj.variant_id and obj.variant else {}
 
     def get_product_image(self, obj):
         try:

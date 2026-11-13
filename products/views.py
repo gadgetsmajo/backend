@@ -5,7 +5,7 @@ from html import escape
 from uuid import UUID
 
 from django.core.cache import cache
-from django.db.models import Avg, Count, F, IntegerField, Q, Sum, Value
+from django.db.models import Avg, Count, Exists, F, IntegerField, OuterRef, Prefetch, Q, Sum, Value
 from django.db.models.functions import Coalesce
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
@@ -18,7 +18,7 @@ from rest_framework.views import APIView
 
 from .pagination import ProductPagination
 from .cache import invalidate_category_cache
-from .models import Category, CategoryAttribute, Product, ProductImage, FlashSale, ProductReview, ReviewImage
+from .models import Category, CategoryAttribute, Product, ProductImage, ProductVariant, FlashSale, ProductReview, ReviewImage
 from .serializers import (
     CategorySerializer, ProductSerializer, ProductImageSerializer,
     FlashSaleSerializer,
@@ -184,12 +184,24 @@ class ProductListView(generics.ListCreateAPIView):
     filter_backends = (filters.SearchFilter, filters.OrderingFilter)
     search_fields = (
         'name', 'brand', 'category__name', 'category__parent__name',
-        'category__parent__parent__name',
+        'category__parent__parent__name', 'specifications', 'variants__options',
     )
     ordering_fields = ('price', 'rating', 'created_at')
 
     def get_queryset(self):
-        qs = Product.objects.all().select_related('category', 'trader', 'trader_product__trader').prefetch_related('images', 'variants')
+        from traders.models import TraderInventoryItem
+
+        variant_queryset = ProductVariant.objects.select_related(
+            'product__trader', 'product__trader_product__trader',
+        ).annotate(
+            sold_quantity=Sum('order_items__quantity'),
+            has_inventory_item=Exists(
+                TraderInventoryItem.objects.filter(variant_id=OuterRef('pk')),
+            ),
+        )
+        qs = Product.objects.all().select_related(
+            'category', 'trader', 'trader_product__trader',
+        ).prefetch_related('images', Prefetch('variants', queryset=variant_queryset))
         if not self.request.user.is_staff:
             qs = qs.filter(
                 is_active=True,
@@ -230,12 +242,23 @@ class ProductListView(generics.ListCreateAPIView):
         min_rating = self.request.query_params.get('min_rating')
         if min_rating:
             qs = qs.filter(rating__gte=min_rating)
-        filterable_attributes = set(CategoryAttribute.objects.filter(is_filterable=True).values_list('key', flat=True))
+        filterable_attributes = {}
+        for key, is_variant in CategoryAttribute.objects.filter(is_filterable=True).values_list('key', 'is_variant'):
+            filterable_attributes[key] = filterable_attributes.get(key, False) or is_variant
         for parameter, value in self.request.query_params.items():
             if parameter.startswith('attr_'):
                 key = parameter[5:]
                 if key in filterable_attributes and value:
-                    qs = qs.filter(**{f'specifications__{key}': value})
+                    spec_filter = Q(**{f'specifications__{key}__icontains': value})
+                    if filterable_attributes[key]:
+                        variant_filter = Q(**{
+                            f'variants__options__{key}__iexact': value,
+                            'variants__is_active': True,
+                            'variants__stock__gt': 0,
+                        })
+                        qs = qs.filter(spec_filter | variant_filter).distinct()
+                    else:
+                        qs = qs.filter(spec_filter)
         seller_uuid = self.request.query_params.get('seller')
         if seller_uuid:
             try:

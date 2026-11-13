@@ -108,6 +108,30 @@ class Product(models.Model):
     def __str__(self):
         return self.name
 
+    @property
+    def required_variant_keys(self):
+        if not self.category_id:
+            return set()
+        return set(
+            self.category.attributes.filter(is_variant=True, is_required=True)
+            .values_list('key', flat=True)
+        )
+
+    @property
+    def requires_variant_selection(self):
+        required_keys = self.required_variant_keys
+        if not required_keys:
+            return False
+        variants = list(self.variants.all())
+        return any(
+            isinstance(variant.options, dict) and required_keys.issubset(variant.options)
+            for variant in variants
+        )
+
+    def variant_has_required_options(self, variant):
+        required_keys = self.required_variant_keys
+        return bool(required_keys) and isinstance(variant.options, dict) and required_keys.issubset(variant.options)
+
     def save(self, *args, **kwargs):
         self.name = self.name.strip().title()
         self.slug = f'{slugify(self.name)}-{uuid.UUID(str(self.uuid)).hex[:12]}'

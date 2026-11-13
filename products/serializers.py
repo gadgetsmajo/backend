@@ -1,9 +1,11 @@
 import json
 
 from rest_framework import serializers
+from django.core.exceptions import ObjectDoesNotExist
 from django.utils.text import slugify
+from django.utils import timezone
 from django.db import transaction
-from django.db.models import Avg, Count
+from django.db.models import Avg, Count, Q, Sum
 from .models import Category, CategoryAttribute, Product, ProductImage, ProductVariant, FlashSale, ProductReview, ReviewImage
 from settings_app.pricing import price_with_platform_charges
 
@@ -27,12 +29,14 @@ class CategoryAttributeSerializer(serializers.ModelSerializer):
         if not key:
             raise serializers.ValidationError({'key': 'Provide a name for this attribute.'})
         attrs['key'] = key
-        choices = attrs.get('choices', [])
+        input_type = attrs.get('input_type', getattr(self.instance, 'input_type', None))
+        choices = attrs.get('choices', getattr(self.instance, 'choices', []))
+        attrs['choices'] = choices
         if not isinstance(choices, list) or any(not isinstance(choice, str) or not choice.strip() for choice in choices):
             raise serializers.ValidationError({'choices': 'Choices must be a list of non-empty strings.'})
-        if attrs.get('input_type') not in ('dropdown', 'multi_select') and choices:
-            raise serializers.ValidationError({'choices': 'Choices are supported only for dropdown and multi-select attributes.'})
-        if attrs.get('input_type') in ('dropdown', 'multi_select') and not choices:
+        if input_type not in ('dropdown', 'multi_select', 'text', 'size', 'color') and choices:
+            raise serializers.ValidationError({'choices': 'Choices are supported only for text, size, color, dropdown, and multi-select attributes.'})
+        if input_type in ('dropdown', 'multi_select') and not choices:
             raise serializers.ValidationError({'choices': 'Add at least one choice for this attribute type.'})
         return attrs
 
@@ -130,6 +134,8 @@ class CategorySerializer(serializers.ModelSerializer):
 
 class ProductVariantSerializer(serializers.ModelSerializer):
     image_url = serializers.SerializerMethodField()
+    sold_quantity = serializers.SerializerMethodField()
+    has_inventory_item = serializers.SerializerMethodField()
     listed_price = serializers.DecimalField(source='price', max_digits=10, decimal_places=2, read_only=True)
     compare_at_listed_price = serializers.DecimalField(
         source='compare_at_price', max_digits=10, decimal_places=2, read_only=True,
@@ -140,9 +146,9 @@ class ProductVariantSerializer(serializers.ModelSerializer):
         fields = (
             'id', 'sku', 'options', 'price', 'listed_price',
             'compare_at_price', 'compare_at_listed_price', 'stock',
-            'weight', 'image', 'image_url', 'is_active',
+            'weight', 'image', 'image_url', 'is_active', 'sold_quantity', 'has_inventory_item',
         )
-        read_only_fields = ('id', 'image_url')
+        read_only_fields = ('id', 'image_url', 'sold_quantity', 'has_inventory_item')
         extra_kwargs = {'sku': {'validators': []}}
 
     def validate_options(self, value):
@@ -152,6 +158,8 @@ class ProductVariantSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError('Variant option names must be non-empty strings.')
         if any(not isinstance(option, (str, int, float, bool)) for option in value.values()):
             raise serializers.ValidationError('Variant option values must be simple values.')
+        if any(isinstance(option, str) and not option.strip() for option in value.values()):
+            raise serializers.ValidationError('Variant option values must not be empty.')
         return value
 
     def validate(self, attrs):
@@ -169,12 +177,80 @@ class ProductVariantSerializer(serializers.ModelSerializer):
         except Exception:
             return None
 
+    def get_sold_quantity(self, obj):
+        if not self._can_view_inventory(obj):
+            return 0
+        if hasattr(obj, 'sold_quantity'):
+            return obj.sold_quantity or 0
+        return obj.order_items.aggregate(total=Sum('quantity'))['total'] or 0
+
+    def get_has_inventory_item(self, obj):
+        if not self._can_view_inventory(obj):
+            return False
+        if hasattr(obj, 'has_inventory_item'):
+            return obj.has_inventory_item
+        return obj.trader_inventory_items.exists()
+
+    def _can_view_inventory(self, obj):
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        if not user or not user.is_authenticated:
+            return False
+        if user.is_staff:
+            return True
+        product = obj.product
+        trader = product.trader
+        if not trader and product.trader_product_id:
+            try:
+                trader = product.trader_product.trader
+            except ObjectDoesNotExist:
+                return False
+        return bool(
+            trader
+            and (
+                trader.user_id == user.pk
+                or trader.email.casefold() == (user.email or '').casefold()
+            )
+        )
+
     def to_representation(self, instance):
         rep = super().to_representation(instance)
         rep['price'] = str(price_with_platform_charges(instance.price))
         if instance.compare_at_price:
             rep['compare_at_price'] = str(price_with_platform_charges(instance.compare_at_price))
+        if not self._can_view_inventory(instance):
+            rep.pop('sold_quantity', None)
+            rep.pop('has_inventory_item', None)
         return rep
+
+
+def validate_variant_removals(product, variants):
+    if not product:
+        return
+    retained_options = {
+        json.dumps(variant.get('options', {}), sort_keys=True, separators=(',', ':'))
+        for variant in variants
+    }
+    removable_candidates = []
+    for variant in product.variants.all():
+        option_key = json.dumps(variant.options, sort_keys=True, separators=(',', ':'))
+        if option_key not in retained_options:
+            removable_candidates.append(variant.pk)
+    if not removable_candidates:
+        return
+    protected_ids = set(
+        ProductVariant.objects.filter(pk__in=removable_candidates)
+        .filter(
+            Q(order_items__isnull=False)
+            | Q(trader_inventory_items__isnull=False)
+        )
+        .values_list('pk', flat=True)
+        .distinct()
+    )
+    if protected_ids:
+        raise serializers.ValidationError({
+            'variants': 'Variants with order or inventory history cannot be removed. Mark them unavailable instead.',
+        })
 
 
 def sync_product_variants(product, variants):
@@ -202,6 +278,14 @@ def sync_product_variants(product, variants):
         for field, value in data.items():
             setattr(variant, field, value)
         variant.save()
+
+    from traders.models import TraderInventoryItem
+
+    for variant in product.variants.all():
+        TraderInventoryItem.objects.filter(variant_id=variant.pk).update(
+            quantity=variant.stock,
+            updated_at=timezone.now(),
+        )
 
 
 class ProductImageSerializer(serializers.ModelSerializer):
@@ -337,17 +421,37 @@ class ProductSerializer(serializers.ModelSerializer):
             ]
             if len(option_sets) != len(set(option_sets)):
                 raise serializers.ValidationError({'variants': 'Variant option combinations must be unique.'})
+            if self.instance:
+                validate_variant_removals(self.instance, variants)
         if category:
             errors = {}
+            validate_specifications = (
+                self.instance is None or 'category' in attrs or 'specifications' in attrs
+            )
+            validate_variants = (
+                self.instance is None
+                or 'category' in attrs
+                or (
+                    variants is not None
+                    and (bool(variants) or self.instance.variants.exists())
+                )
+            )
+            variant_data = variants
+            if variant_data is None and self.instance and validate_variants:
+                variant_data = [
+                    {'options': variant.options}
+                    for variant in self.instance.variants.all()
+                ]
             for attribute in category.attributes.filter(is_required=True):
                 if attribute.is_variant:
-                    if variants is not None and (
-                        not variants or any(attribute.key not in variant.get('options', {}) for variant in variants)
+                    if validate_variants and (
+                        not variant_data
+                        or any(attribute.key not in variant.get('options', {}) for variant in variant_data)
                     ):
                         errors.setdefault('variants', []).append(f'Each variant must include {attribute.name}.')
-                    elif variants is None and self.instance is None:
-                        errors.setdefault('variants', []).append(f'At least one variant with {attribute.name} is required.')
-                elif attribute.key not in specifications or specifications[attribute.key] in (None, '', []):
+                elif validate_specifications and (
+                    attribute.key not in specifications or specifications[attribute.key] in (None, '', [])
+                ):
                     errors.setdefault('specifications', []).append(f'{attribute.name} is required.')
             if errors:
                 raise serializers.ValidationError(errors)
@@ -372,6 +476,14 @@ class ProductSerializer(serializers.ModelSerializer):
             product.price = min(variant['price'] for variant in variants)
             product.stock = sum(variant['stock'] for variant in variants)
             product.save(update_fields=('price', 'stock'))
+            try:
+                trader_product = product.trader_product
+            except ObjectDoesNotExist:
+                trader_product = None
+            if trader_product:
+                trader_product.price = product.price
+                trader_product.stock = product.stock
+                trader_product.save(update_fields=('price', 'stock', 'updated_at'))
         return product
 
     @transaction.atomic

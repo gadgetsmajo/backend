@@ -6,6 +6,7 @@ from django.utils.decorators import method_decorator
 from django.views.decorators.cache import never_cache
 from django.core.cache import cache
 from django.db import transaction, models
+from django.utils import timezone
 from accounting.models import Refund as AccountingRefund
 from .models import Order, ServiceRating, Payment, ReturnRequest
 from .serializers import OrderSerializer, ServiceRatingSerializer, PaymentSerializer, ReturnRequestSerializer, AdminReturnRequestSerializer
@@ -80,9 +81,24 @@ def _restore_stock(order):
                 stock=models.F('stock') + item.quantity
             )
         if item.variant_id:
-            ProductVariant.objects.filter(pk=item.variant_id).update(
-                stock=models.F('stock') + item.quantity
-            )
+            _adjust_variant_stock(item, item.quantity)
+
+
+def _adjust_variant_stock(item, quantity_delta):
+    ProductVariant.objects.filter(pk=item.variant_id).update(
+        stock=models.F('stock') + quantity_delta
+    )
+    from traders.models import TraderInventoryItem, TraderProduct
+
+    TraderInventoryItem.objects.filter(variant_id=item.variant_id).update(
+        quantity=models.F('quantity') + quantity_delta,
+        updated_at=timezone.now(),
+    )
+    if item.product and item.product.trader_product_id:
+        TraderProduct.objects.filter(pk=item.product.trader_product_id).update(
+            stock=models.F('stock') + quantity_delta,
+            updated_at=timezone.now(),
+        )
 
 
 def _send_paid_order_followups(order_id, payment_method):
@@ -299,8 +315,18 @@ class CartQuoteView(APIView):
                     {'detail': f'Select an available option for "{product.name}".'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
+            if not variant and product.requires_variant_selection:
+                return Response(
+                    {'detail': f'Select all required options for "{product.name}".'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             if variant and variant.product_id != product.pk:
                 return Response({'detail': 'The selected option does not belong to this product.'}, status=status.HTTP_400_BAD_REQUEST)
+            if variant and product.requires_variant_selection and not product.variant_has_required_options(variant):
+                return Response(
+                    {'detail': f'The selected option for "{product.name}" is incomplete.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             quantity = requested_item['quantity']
             available_stock = variant.stock if variant else product.stock
             if quantity > available_stock:
@@ -1005,9 +1031,7 @@ def _sync_pesapal_payment(payment, data):
                         stock=models.F('stock') - item.quantity
                     )
                 if item.variant_id:
-                    ProductVariant.objects.filter(pk=item.variant_id).update(
-                        stock=models.F('stock') - item.quantity
-                    )
+                    _adjust_variant_stock(item, -item.quantity)
             if order.status == 'pending':
                 order.status = 'processing'
                 order.save(update_fields=['status', 'updated_at'])
@@ -1169,9 +1193,7 @@ class PesapalIPNView(APIView):
                                     stock=models.F('stock') - item.quantity
                                 )
                             if item.variant_id:
-                                ProductVariant.objects.filter(pk=item.variant_id).update(
-                                    stock=models.F('stock') - item.quantity
-                                )
+                                _adjust_variant_stock(item, -item.quantity)
                         if order.status == 'pending':
                             order.status = 'processing'
                             order.save(update_fields=['status', 'updated_at'])

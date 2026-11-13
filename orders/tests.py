@@ -9,7 +9,7 @@ from rest_framework.test import APIClient
 
 from accounting.models import Refund as AccountingRefund
 from orders.models import Order, OrderItem, Payment, ReturnRequest
-from products.models import Product, ProductVariant
+from products.models import Category, CategoryAttribute, Product, ProductVariant
 from settings_app.models import District, PlatformSettings
 from traders.models import TraderApplication, TraderEarning
 from users.models import CartItem, Notification
@@ -672,6 +672,66 @@ class OrderPricingSecurityTests(TestCase):
         self.assertEqual(order_item.variant_sku, 'SHOE-BLACK-42')
         self.assertEqual(order_item.price, quote.data['items'][0]['product_price'])
         self.assertEqual(response.data['items'][0]['variant_options'], {'size': '42', 'color': 'Black'})
+
+    def test_required_category_variants_are_selected_but_legacy_products_remain_purchasable(self):
+        category = Category.objects.create(name='Clothing', slug='required-clothing-test')
+        for key, name in (('size', 'Size'), ('color', 'Color')):
+            CategoryAttribute.objects.create(
+                category=category,
+                name=name,
+                key=key,
+                input_type=key,
+                is_required=True,
+                is_variant=True,
+                is_filterable=True,
+            )
+        product = Product.objects.create(
+            name='Variant Clothing',
+            category=category,
+            price='20000.00',
+            stock=2,
+        )
+        variant = ProductVariant.objects.create(
+            product=product,
+            sku='CLOTHING-M-BLACK',
+            options={'size': 'M', 'color': 'Black'},
+            price='20000.00',
+            stock=2,
+        )
+        legacy_product = Product.objects.create(
+            name='Legacy Clothing',
+            category=category,
+            price='15000.00',
+            stock=2,
+        )
+
+        missing_variant = self.client.post('/api/auth/cart/', {
+            'product_id': product.id,
+            'quantity': 1,
+        }, format='json')
+        self.assertEqual(missing_variant.status_code, 400)
+        self.assertFalse(CartItem.objects.filter(product_id=product.id).exists())
+
+        selected_variant = self.client.post('/api/auth/cart/', {
+            'product_id': product.id,
+            'variant_id': variant.id,
+            'quantity': 1,
+        }, format='json')
+        self.assertEqual(selected_variant.status_code, 201, selected_variant.data)
+        self.assertEqual(selected_variant.data['variant_options'], {'size': 'M', 'color': 'Black'})
+
+        legacy_item = self.client.post('/api/auth/cart/', {
+            'product_id': legacy_product.id,
+            'quantity': 1,
+        }, format='json')
+        self.assertEqual(legacy_item.status_code, 201, legacy_item.data)
+
+        quote = self.client.post('/api/orders/quote/', {'district_id': self.district.id}, format='json')
+        self.assertEqual(quote.status_code, 200, quote.data)
+        self.assertEqual(
+            {item['variant_id'] for item in quote.data['items']},
+            {variant.id, None},
+        )
 
     def test_optioned_product_allows_main_product_and_uses_variant_stock_limit(self):
         variant = ProductVariant.objects.create(

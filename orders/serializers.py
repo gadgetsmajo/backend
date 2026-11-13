@@ -108,12 +108,20 @@ class OrderSerializer(serializers.ModelSerializer):
                     raise serializers.ValidationError(
                         {'detail': f'Select an available option for "{product.name}" before ordering.'}
                     )
+                if not variant and product.requires_variant_selection:
+                    raise serializers.ValidationError(
+                        {'detail': f'Select all required options for "{product.name}" before ordering.'}
+                    )
                 if variant and (
                     variant.product_id != product.pk
                     or not variant.is_active
                 ):
                     raise serializers.ValidationError(
                         {'detail': f'The selected option for "{product.name}" is no longer available.'}
+                    )
+                if variant and product.requires_variant_selection and not product.variant_has_required_options(variant):
+                    raise serializers.ValidationError(
+                        {'detail': f'The selected option for "{product.name}" is incomplete.'}
                     )
                 available_stock = variant.stock if variant else product.stock
                 if cart_item.quantity < 1 or cart_item.quantity > 100 or available_stock < cart_item.quantity:

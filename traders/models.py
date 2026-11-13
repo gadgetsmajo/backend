@@ -1,5 +1,6 @@
 import cloudinary.models
 from django.db import models
+from django.db.models import Q
 from django.conf import settings
 import uuid
 
@@ -186,6 +187,10 @@ class TraderInventoryItem(models.Model):
     """A product tracked in the trader's inventory."""
     trader      = models.ForeignKey(TraderApplication, on_delete=models.CASCADE, related_name='inventory_items')
     product     = models.ForeignKey(TraderProduct, on_delete=models.CASCADE, related_name='inventory_items')
+    variant     = models.ForeignKey(
+        'products.ProductVariant', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='trader_inventory_items',
+    )
     quantity    = models.IntegerField(default=0)
     cost_price  = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     location    = models.CharField(max_length=255, blank=True)
@@ -194,7 +199,18 @@ class TraderInventoryItem(models.Model):
     created_at  = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        unique_together = ('trader', 'product')
+        constraints = [
+            models.UniqueConstraint(
+                fields=('trader', 'product'),
+                condition=Q(variant__isnull=True),
+                name='unique_trader_base_inventory_item',
+            ),
+            models.UniqueConstraint(
+                fields=('trader', 'variant'),
+                condition=Q(variant__isnull=False),
+                name='unique_trader_variant_inventory_item',
+            ),
+        ]
         ordering = ['-updated_at']
 
     def __str__(self):

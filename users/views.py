@@ -902,6 +902,16 @@ class CartView(APIView):
                     )
                 except ProductVariant.DoesNotExist:
                     return Response({'detail': 'The selected product option is unavailable.'}, status=status.HTTP_400_BAD_REQUEST)
+            if variant is None and product.requires_variant_selection:
+                return Response(
+                    {'detail': f'Select all required options for "{product.name}" before adding it to your cart.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if variant and product.requires_variant_selection and not product.variant_has_required_options(variant):
+                return Response(
+                    {'detail': f'The selected option for "{product.name}" is incomplete.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             stock = variant.stock if variant else product.stock
             unit_price = variant.price if variant else product.price
             cart_items = CartItem.objects.select_for_update().filter(
@@ -971,10 +981,17 @@ class CartItemView(APIView):
             product = Product.objects.get(pk=item.product_id, is_active=True)
             if item.variant_options and not item.variant_id:
                 return Response({'detail': 'Select an available product option.'}, status=status.HTTP_400_BAD_REQUEST)
+            if not item.variant_id and product.requires_variant_selection:
+                return Response(
+                    {'detail': f'Select all required options for "{product.name}" before updating your cart.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             if item.variant_id:
                 variant = ProductVariant.objects.get(
                     pk=item.variant_id, product=product, is_active=True,
                 )
+                if product.requires_variant_selection and not product.variant_has_required_options(variant):
+                    return Response({'detail': f'The selected option for "{product.name}" is incomplete.'}, status=status.HTTP_400_BAD_REQUEST)
                 stock = variant.stock
                 unit_price = variant.price
                 item.variant_options = variant.options
