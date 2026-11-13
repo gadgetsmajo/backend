@@ -568,6 +568,7 @@ def _placement_queryset(request):
     q = str(request.query_params.get('q') or '').strip()[:100]
     category_value = str(request.query_params.get('category') or '').strip()[:100]
     product_value = str(request.query_params.get('product') or '').strip()[:100]
+    exact_product_value = str(request.query_params.get('exact_product') or '').strip()
     excluded_value = str(request.query_params.get('exclude') or '').strip()
     if excluded_value:
         try:
@@ -623,6 +624,10 @@ def _placement_queryset(request):
             )
         else:
             queryset = queryset.filter(catalog_product_id=target_catalog.pk)
+    if exact_product_value:
+        if not exact_product_value.isdigit() or int(exact_product_value) <= 0:
+            return queryset.none(), q
+        queryset = queryset.filter(trader_offer__public_product__pk=int(exact_product_value))
     return queryset, q
 
 

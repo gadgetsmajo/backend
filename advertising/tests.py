@@ -236,6 +236,12 @@ class AdvertisingAPITests(TestCase):
         self.assertEqual(placement.status_code, 200)
         self.assertEqual(placement.data['results'][0]['campaign_offer_id'], campaign_offer.pk)
         self.assertEqual(placement.data['results'][0]['public_product_id'], self.public_product.pk)
+        exact_placement = self.buyer_client.get(
+            f'/api/advertising/placements/?exact_product={self.public_product.pk}&limit=1'
+        )
+        self.assertEqual(exact_placement.status_code, 200)
+        self.assertEqual(len(exact_placement.data['results']), 1)
+        self.assertEqual(exact_placement.data['results'][0]['public_product_id'], self.public_product.pk)
         excluded = self.buyer_client.get(
             f'/api/advertising/placements/?exclude={self.public_product.pk}'
         )
