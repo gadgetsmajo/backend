@@ -1,0 +1,24 @@
+{% extends "admin/base_site.html" %}
+{% load i18n %}
+
+{% block content %}
+  <h1>{{ title }}</h1>
+  <p>Select the catalog product to keep. Listings will be reassigned; source catalog records will be disabled, not deleted.</p>
+  <form method="post">
+    {% csrf_token %}
+    <input type="hidden" name="action" value="{{ action_name }}">
+    {% for product in products %}
+      <input type="hidden" name="_selected_action" value="{{ product.pk }}">
+    {% endfor %}
+    <label for="survivor_id">Keep this product</label>
+    <select id="survivor_id" name="survivor_id" required>
+      {% for product in products %}
+        <option value="{{ product.pk }}">{{ product.name }}{% if product.brand %} · {{ product.brand }}{% endif %}{% if product.model %} · {{ product.model }}{% endif %}</option>
+      {% endfor %}
+    </select>
+    <div class="submit-row">
+      <button type="submit" name="confirm_merge" value="1" class="default">Merge selected products</button>
+      <a href="../">Cancel</a>
+    </div>
+  </form>
+{% endblock %}

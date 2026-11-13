@@ -6,7 +6,10 @@ from django.utils.text import slugify
 from django.utils import timezone
 from django.db import transaction
 from django.db.models import Avg, Count, Q, Sum
-from .models import Category, CategoryAttribute, Product, ProductImage, ProductVariant, FlashSale, ProductReview, ReviewImage
+from .models import (
+    CatalogVariant, Category, CategoryAttribute, Product, ProductImage, ProductVariant,
+    FlashSale, ProductReview, ReviewImage,
+)
 from settings_app.pricing import price_with_platform_charges
 
 
@@ -179,10 +182,19 @@ class ProductVariantSerializer(serializers.ModelSerializer):
         return attrs
 
     def get_image_url(self, obj):
-        try:
-            return obj.image.url if obj.image else None
-        except Exception:
-            return None
+        if obj.image:
+            try:
+                return obj.image.url
+            except Exception:
+                return None
+        if obj.catalog_variant_id and obj.catalog_variant.image_references:
+            from cloudinary.utils import cloudinary_url
+
+            try:
+                return cloudinary_url(obj.catalog_variant.image_references[0])[0]
+            except Exception:
+                return None
+        return None
 
     def get_sold_quantity(self, obj):
         if not self._can_view_inventory(obj):
@@ -280,11 +292,27 @@ def sync_product_variants(product, variants):
 
     for data, variant in submitted:
         if variant is None:
-            ProductVariant.objects.create(product=product, **data)
-            continue
-        for field, value in data.items():
-            setattr(variant, field, value)
-        variant.save()
+            variant = ProductVariant.objects.create(product=product, **data)
+        else:
+            for field, value in data.items():
+                setattr(variant, field, value)
+            variant.save()
+        if product.catalog_product_id:
+            options_key = CatalogVariant.make_options_key(variant.options)
+            catalog_variant = CatalogVariant.objects.filter(
+                catalog_product_id=product.catalog_product_id,
+                options_key=options_key,
+            ).first()
+            catalog_product = product.catalog_product
+            if catalog_variant is None and variant.options in catalog_product.get_variant_options():
+                catalog_variant, _ = CatalogVariant.objects.get_or_create(
+                    catalog_product_id=product.catalog_product_id,
+                    options_key=options_key,
+                    defaults={'options': variant.options},
+                )
+            if catalog_variant:
+                variant.catalog_variant = catalog_variant
+                variant.save(update_fields=('catalog_variant', 'updated_at'))
 
     from traders.models import TraderInventoryItem
 
@@ -312,6 +340,7 @@ class ProductImageSerializer(serializers.ModelSerializer):
 class ProductSerializer(serializers.ModelSerializer):
     short_description = TruncatedCharField(max_length=300, required=False, allow_blank=True)
     category = CategorySerializer(read_only=True)
+    catalog_product_id = serializers.IntegerField(read_only=True, allow_null=True)
     category_id = serializers.PrimaryKeyRelatedField(
         queryset=Category.objects.all(), source='category', write_only=True,
         required=False, allow_null=True,
@@ -321,21 +350,27 @@ class ProductSerializer(serializers.ModelSerializer):
         source='original_price', max_digits=10, decimal_places=2, read_only=True,
     )
     image_url = serializers.SerializerMethodField(read_only=True)
-    images = ProductImageSerializer(many=True, read_only=True)
+    images = serializers.SerializerMethodField()
     is_featured = serializers.BooleanField(required=False)
     is_new_deal = serializers.BooleanField(required=False)
     reviews_count = serializers.SerializerMethodField()
     seller_uuid = serializers.SerializerMethodField()
     seller_name = serializers.SerializerMethodField()
     variants = ProductVariantSerializer(many=True, required=False)
+    availability = serializers.SerializerMethodField()
+    warranty = serializers.SerializerMethodField()
+    delivery_options = serializers.SerializerMethodField()
+    package_details = serializers.SerializerMethodField()
 
     class Meta:
         model = Product
         fields = ('id', 'uuid', 'name', 'slug', 'category', 'category_id',
                   'brand', 'condition', 'tags', 'specifications', 'review_status', 'review_note', 'variants',
+                  'catalog_product_id',
                   'price', 'listed_price', 'original_price', 'original_listed_price', 'image_url', 'images',
                   'short_description', 'long_description', 'delivery_fee',
                   'rating', 'stock', 'is_active', 'is_featured', 'is_new_deal', 'seller_uuid', 'seller_name',
+                  'availability', 'warranty', 'delivery_options', 'package_details',
                   'created_at', 'reviews_count')
         read_only_fields = (
             'id', 'uuid', 'slug', 'rating', 'created_at',
@@ -389,11 +424,32 @@ class ProductSerializer(serializers.ModelSerializer):
         return str(trader.uuid)
 
     def get_seller_name(self, obj):
-        request = self.context.get('request')
-        if not request or not request.user.is_staff:
-            return None
         trader = obj.trader or (obj.trader_product.trader if obj.trader_product_id else None)
-        return trader.business_name if trader else None
+        if (
+            not trader
+            or trader.status != 'approved'
+            or not trader.is_visible
+            or trader.is_closed
+        ):
+            return None
+        return trader.business_name
+
+    def _get_offer_value(self, obj, field, default):
+        if not obj.trader_product_id:
+            return default
+        return getattr(obj.trader_product, field, default)
+
+    def get_availability(self, obj):
+        return self._get_offer_value(obj, 'availability', 'in_stock')
+
+    def get_warranty(self, obj):
+        return self._get_offer_value(obj, 'warranty', '')
+
+    def get_delivery_options(self, obj):
+        return self._get_offer_value(obj, 'delivery_options', [])
+
+    def get_package_details(self, obj):
+        return self._get_offer_value(obj, 'package_details', '')
 
     def validate_specifications(self, value):
         if not isinstance(value, dict):
@@ -408,6 +464,25 @@ class ProductSerializer(serializers.ModelSerializer):
         return value
 
     def validate(self, attrs):
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        if (
+            self.instance
+            and self.instance.catalog_product_id
+            and user
+            and user.is_authenticated
+            and not user.is_staff
+        ):
+            protected_fields = {
+                'name', 'brand', 'category', 'tags', 'specifications',
+                'short_description', 'long_description',
+            }
+            changed_fields = protected_fields.intersection(attrs)
+            if changed_fields:
+                raise serializers.ValidationError({
+                    field: 'This information is managed in the shared catalog.'
+                    for field in sorted(changed_fields)
+                })
         category = attrs.get('category', getattr(self.instance, 'category', None))
         specifications = attrs.get('specifications', getattr(self.instance, 'specifications', {}))
         variants = attrs.get('variants')
@@ -473,13 +548,36 @@ class ProductSerializer(serializers.ModelSerializer):
                 pass
         return None
 
+    def get_images(self, obj):
+        serialized = list(ProductImageSerializer(obj.images.all(), many=True).data)
+        if obj.trader_product_id and obj.trader_product.catalog_image_references:
+            references = obj.trader_product.catalog_image_references
+        elif obj.catalog_product_id:
+            references = obj.catalog_product.image_references
+        else:
+            references = []
+        if references:
+            from cloudinary.utils import cloudinary_url
+
+            for reference in references:
+                try:
+                    url = cloudinary_url(reference)[0]
+                except Exception:
+                    continue
+                serialized.append({
+                    'id': -(len(serialized) + 1),
+                    'url': url,
+                    'order': len(serialized),
+                })
+        return serialized
+
     @transaction.atomic
     def create(self, validated_data):
         variants = validated_data.pop('variants', [])
         validated_data['is_active'] = True
         product = super().create(validated_data)
-        for variant in variants:
-            ProductVariant.objects.create(product=product, **variant)
+        if variants:
+            sync_product_variants(product, variants)
         if variants:
             product.price = min(variant['price'] for variant in variants)
             product.stock = sum(variant['stock'] for variant in variants)
@@ -508,6 +606,18 @@ class ProductSerializer(serializers.ModelSerializer):
 
     def to_representation(self, instance):
         rep = super().to_representation(instance)
+        if instance.catalog_product_id:
+            catalog = instance.catalog_product
+            rep.update({
+                'name': catalog.name,
+                'brand': catalog.brand,
+                'tags': catalog.tags,
+                'specifications': catalog.specifications,
+                'short_description': catalog.short_description,
+                'long_description': catalog.long_description,
+            })
+            if catalog.category_id:
+                rep['category'] = CategorySerializer(catalog.category).data
         rep['image'] = rep.get('image_url')
         rep['price'] = str(price_with_platform_charges(instance.price))
         if instance.original_price:

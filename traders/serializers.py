@@ -5,8 +5,7 @@ import re
 from rest_framework import serializers
 from django.core.exceptions import ObjectDoesNotExist
 from django.db.models import Exists, OuterRef, Sum
-from products.models import Category
-from products.models import ProductVariant
+from products.models import CatalogProduct, Category, ProductVariant
 from products.serializers import (
     ProductVariantSerializer, TruncatedCharField, to_plain_data, validate_variant_removals,
 )
@@ -166,9 +165,21 @@ class TraderPayoutAccountSerializer(serializers.Serializer):
 
 
 class TraderProductSerializer(serializers.ModelSerializer):
+    name = serializers.CharField(required=False, max_length=255)
     short_description = TruncatedCharField(max_length=300, required=False, allow_blank=True)
     image_url = serializers.SerializerMethodField()
     public_product_id = serializers.SerializerMethodField()
+    catalog_product_id = serializers.PrimaryKeyRelatedField(
+        source='catalog_product',
+        queryset=CatalogProduct.objects.filter(review_status='approved', is_active=True),
+        required=False,
+        allow_null=True,
+        write_only=True,
+    )
+    catalog_product = serializers.SerializerMethodField()
+    catalog_image_references = serializers.ListField(
+        child=serializers.CharField(max_length=500), required=False,
+    )
     review_status = serializers.SerializerMethodField()
     review_note = serializers.SerializerMethodField()
     variant_list = serializers.SerializerMethodField()
@@ -184,8 +195,10 @@ class TraderProductSerializer(serializers.ModelSerializer):
         fields = (
             'id', 'uuid', 'name', 'short_description', 'long_description', 'description',
             'brand', 'condition', 'tags', 'specifications',
-            'price', 'original_price', 'delivery_fee', 'stock',
-            'category_id', 'category_name', 'public_product_id',
+            'price', 'original_price', 'delivery_fee', 'stock', 'trader_sku',
+            'availability', 'warranty', 'delivery_options', 'package_details',
+            'category_id', 'category_name', 'public_product_id', 'catalog_product_id',
+            'catalog_product', 'catalog_image_references',
             'image_url', 'is_active', 'is_featured', 'is_new_deal',
             'review_status', 'review_note', 'variants', 'variant_list', 'submit_for_review',
             'created_at', 'updated_at',
@@ -197,13 +210,18 @@ class TraderProductSerializer(serializers.ModelSerializer):
 
     def to_internal_value(self, data):
         data = to_plain_data(data)
-        for field in ('tags', 'specifications', 'variants'):
+        for field in ('tags', 'specifications', 'variants', 'catalog_image_references'):
             value = data.get(field)
             if isinstance(value, str):
                 try:
                     data[field] = json.loads(value)
                 except json.JSONDecodeError as exc:
                     raise serializers.ValidationError({field: 'Enter valid JSON.'}) from exc
+        if isinstance(data.get('delivery_options'), str):
+            try:
+                data['delivery_options'] = json.loads(data['delivery_options'])
+            except json.JSONDecodeError as exc:
+                raise serializers.ValidationError({'delivery_options': 'Enter valid JSON.'}) from exc
         if isinstance(data.get('variants'), list):
             request = self.context.get('request')
             files = request.FILES if request else {}
@@ -221,6 +239,9 @@ class TraderProductSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         variants = validated_data.pop('variants', None)
         submit_for_review = validated_data.pop('submit_for_review', True)
+        catalog_product = validated_data.get('catalog_product')
+        if catalog_product:
+            self._inherit_catalog_fields(validated_data, catalog_product)
         product = super().create(validated_data)
         product._submitted_variants = variants
         product._submit_for_review = submit_for_review
@@ -229,12 +250,58 @@ class TraderProductSerializer(serializers.ModelSerializer):
     def update(self, instance, validated_data):
         variants = validated_data.pop('variants', None)
         submit_for_review = validated_data.pop('submit_for_review', None)
+        catalog_product = validated_data.get('catalog_product', instance.catalog_product)
+        if instance.catalog_product_id and catalog_product != instance.catalog_product:
+            raise serializers.ValidationError({
+                'catalog_product_id': 'An attached catalog product cannot be replaced or removed.',
+            })
+        if catalog_product:
+            self._inherit_catalog_fields(validated_data, catalog_product, instance=instance)
         product = super().update(instance, validated_data)
         product._submitted_variants = variants
         product._submit_for_review = submit_for_review
         return product
 
     def validate(self, attrs):
+        catalog_product = attrs.get(
+            'catalog_product',
+            self.instance.catalog_product if self.instance else None,
+        )
+        if self.instance and self.instance.catalog_product_id and (
+            'catalog_product' in attrs and attrs['catalog_product'] != self.instance.catalog_product
+        ):
+            raise serializers.ValidationError({
+                'catalog_product_id': 'An attached catalog product cannot be replaced or removed.',
+            })
+        if catalog_product:
+            if catalog_product.review_status != 'approved' or not catalog_product.is_active:
+                raise serializers.ValidationError({'catalog_product_id': 'This catalog product is unavailable.'})
+            field_map = {
+                'name': catalog_product.name,
+                'brand': catalog_product.brand,
+                'category': catalog_product.category,
+                'tags': catalog_product.tags,
+                'specifications': catalog_product.specifications,
+                'short_description': catalog_product.short_description,
+                'long_description': catalog_product.long_description,
+                'description': catalog_product.long_description,
+            }
+            for field, catalog_value in field_map.items():
+                if field in attrs and attrs[field] != catalog_value:
+                    input_name = 'category_id' if field == 'category' else field
+                    raise serializers.ValidationError({
+                        input_name: 'This information is managed in the shared catalog.',
+                    })
+            if 'catalog_image_references' in attrs:
+                allowed_references = set(catalog_product.image_references or [])
+                if not set(attrs['catalog_image_references']).issubset(allowed_references):
+                    raise serializers.ValidationError({
+                        'catalog_image_references': 'Select images already approved for this catalog product.',
+                    })
+            self._inherit_catalog_fields(attrs, catalog_product, instance=self.instance)
+        elif not (self.instance and self.instance.name) and not attrs.get('name', '').strip():
+            raise serializers.ValidationError({'name': 'Name is required.'})
+
         category = attrs.get('category', getattr(self.instance, 'category', None))
         specifications = attrs.get('specifications', getattr(self.instance, 'specifications', {}))
         variants = attrs.get('variants')
@@ -249,21 +316,17 @@ class TraderProductSerializer(serializers.ModelSerializer):
         tags = attrs.get('tags', getattr(self.instance, 'tags', []))
         if not isinstance(tags, list) or any(not isinstance(tag, str) or not tag.strip() for tag in tags):
             raise serializers.ValidationError({'tags': 'Tags must be a list of non-empty strings.'})
+        delivery_options = attrs.get('delivery_options', getattr(self.instance, 'delivery_options', []))
+        if not isinstance(delivery_options, list) or any(
+            not isinstance(option, str) or not option.strip() for option in delivery_options
+        ):
+            raise serializers.ValidationError({'delivery_options': 'Delivery options must be a list of non-empty strings.'})
         if len(variants or []) > 100:
             raise serializers.ValidationError({'variants': 'A product cannot have more than 100 variants.'})
         if variants is not None:
             skus = [variant.get('sku', '').strip().casefold() for variant in variants if variant.get('sku', '').strip()]
             if len(skus) != len(set(skus)):
                 raise serializers.ValidationError({'variants': 'Each variant SKU must be unique.'})
-            product_variants = ProductVariant.objects.all()
-            if self.instance:
-                try:
-                    product_variants = product_variants.exclude(product=self.instance.public_product)
-                except ObjectDoesNotExist:
-                    pass
-            for sku in skus:
-                if product_variants.filter(sku__iexact=sku).exists():
-                    raise serializers.ValidationError({'variants': f'SKU {sku} is already in use.'})
             option_sets = [
                 tuple(sorted((key, str(value)) for key, value in variant.get('options', {}).items()))
                 for variant in variants
@@ -271,6 +334,25 @@ class TraderProductSerializer(serializers.ModelSerializer):
             if len(option_sets) != len(set(option_sets)):
                 raise serializers.ValidationError({'variants': 'Variant option combinations must be unique.'})
             validate_variant_removals(public_product, variants)
+            if catalog_product:
+                catalog_options = catalog_product.get_variant_options()
+                if variants and not catalog_options:
+                    raise serializers.ValidationError({
+                        'variants': 'This catalog product has no approved variants. Ask an administrator to add them.',
+                    })
+                canonical_options = {
+                    json.dumps(option, sort_keys=True, separators=(',', ':'))
+                    for option in catalog_options
+                    if isinstance(option, dict)
+                }
+                if any(
+                    json.dumps(variant.get('options', {}), sort_keys=True, separators=(',', ':'))
+                    not in canonical_options
+                    for variant in variants
+                ):
+                    raise serializers.ValidationError({
+                        'variants': 'Select only variants defined in the shared catalog.',
+                    })
         if category:
             errors = {}
             validate_specifications = (
@@ -305,10 +387,69 @@ class TraderProductSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError(errors)
         return attrs
 
+    @staticmethod
+    def _inherit_catalog_fields(validated_data, catalog_product, instance=None):
+        fields = {
+            'name': catalog_product.name,
+            'brand': catalog_product.brand,
+            'category': catalog_product.category,
+            'tags': catalog_product.tags,
+            'specifications': catalog_product.specifications,
+            'short_description': catalog_product.short_description,
+            'long_description': catalog_product.long_description,
+            'description': catalog_product.long_description,
+        }
+        for field, value in fields.items():
+            validated_data[field] = value
+        if instance is None and 'catalog_image_references' not in validated_data:
+            validated_data['catalog_image_references'] = list(catalog_product.image_references or [])
+
     def get_image_url(self, obj):
         if obj.image:
             return obj.image.url
+        references = obj.catalog_image_references
+        if not references and obj.catalog_product_id:
+            references = obj.catalog_product.image_references
+        if references:
+            try:
+                from cloudinary.utils import cloudinary_url
+                return cloudinary_url(references[0])[0]
+            except Exception:
+                return None
         return obj.image_url or None
+
+    def get_catalog_product(self, obj):
+        if not obj.catalog_product_id:
+            return None
+        product = obj.catalog_product
+        variants = getattr(product, '_prefetched_objects_cache', {}).get('variants')
+        if variants is None:
+            variants = list(product.variants.all())
+        active_variants = [variant for variant in variants if variant.is_active]
+        if active_variants:
+            variant_data = [
+                {'options': variant.options, 'image_references': variant.image_references}
+                for variant in active_variants
+            ]
+        elif variants:
+            variant_data = []
+        else:
+            variant_data = [
+                {'options': options, 'image_references': []}
+                for options in product.variant_options or []
+                if isinstance(options, dict) and options
+            ]
+        return {
+            'id': product.pk,
+            'name': product.name,
+            'brand': product.brand,
+            'model': product.model,
+            'product_type': product.product_type,
+            'category_id': product.category_id,
+            'variant_options': product.get_variant_options(),
+            'variants': variant_data,
+            'image_references': product.image_references,
+        }
 
     def get_public_product_id(self, obj):
         try:

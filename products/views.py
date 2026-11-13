@@ -5,7 +5,7 @@ from html import escape
 from uuid import UUID
 
 from django.core.cache import cache
-from django.db.models import Avg, Count, Exists, F, IntegerField, OuterRef, Prefetch, Q, Sum, Value
+from django.db.models import Avg, Count, Exists, F, IntegerField, OuterRef, Prefetch, Q, Subquery, Sum, Value
 from django.db.models.functions import Coalesce
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
@@ -201,6 +201,7 @@ class ProductListView(generics.ListCreateAPIView):
         )
         qs = Product.objects.all().select_related(
             'category', 'trader', 'trader_product__trader',
+            'catalog_product__category', 'trader_product__catalog_product',
         ).prefetch_related('images', Prefetch('variants', queryset=variant_queryset))
         if not self.request.user.is_staff:
             qs = qs.filter(
@@ -280,6 +281,14 @@ class ProductListView(generics.ListCreateAPIView):
                 visible_seller = Q(trader__uuid=seller_uuid, trader__status='approved', trader__is_visible=True, trader__is_closed=False)
                 visible_seller |= Q(trader_product__trader__uuid=seller_uuid, trader_product__trader__status='approved', trader_product__trader__is_visible=True, trader_product__trader__is_closed=False)
             qs = qs.filter(visible_seller)
+        if not seller_uuid and not self.request.user.is_staff:
+            best_matching_offer = qs.order_by('price', 'pk').filter(
+                catalog_product_id=OuterRef('catalog_product_id'),
+            ).values('pk')[:1]
+            qs = qs.filter(
+                Q(catalog_product__isnull=True)
+                | Q(pk=Subquery(best_matching_offer))
+            )
         if self.request.query_params.get('top_bought') == 'true':
             qs = qs.annotate(
                 bought_quantity=Coalesce(
@@ -301,7 +310,10 @@ class ProductListView(generics.ListCreateAPIView):
 
 
 class ProductDetailView(generics.RetrieveUpdateDestroyAPIView):
-    queryset = Product.objects.all().select_related('category', 'trader', 'trader_product__trader').prefetch_related('images', 'variants')
+    queryset = Product.objects.all().select_related(
+        'category', 'trader', 'trader_product__trader',
+        'catalog_product__category', 'trader_product__catalog_product',
+    ).prefetch_related('images', 'variants')
     serializer_class = ProductSerializer
     permission_classes = (IsAdminOrProductOwnerOrReadOnly,)
 

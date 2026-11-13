@@ -1,9 +1,12 @@
 from django.db import models
 from django.db.models import Q
 from django.utils.text import slugify
+import re
 import uuid
 import cloudinary.models
 from django.conf import settings
+import hashlib
+import json
 
 
 class Category(models.Model):
@@ -58,6 +61,117 @@ class CategoryAttribute(models.Model):
         return f'{self.category.name}: {self.name}'
 
 
+class CatalogProduct(models.Model):
+    """Shared product identity; never stores trader price, stock, or SKU."""
+
+    REVIEW_STATUSES = (
+        ('pending_review', 'Pending review'),
+        ('approved', 'Approved'),
+        ('rejected', 'Rejected'),
+        ('disabled', 'Disabled'),
+    )
+
+    name = models.CharField(max_length=255)
+    brand = models.CharField(max_length=120, blank=True, default='')
+    model = models.CharField(max_length=120, blank=True, default='')
+    product_type = models.CharField(max_length=120, blank=True, default='')
+    category = models.ForeignKey(
+        Category, on_delete=models.SET_NULL, null=True, blank=True, related_name='catalog_products',
+    )
+    short_description = models.CharField(max_length=300, blank=True, default='')
+    long_description = models.TextField(blank=True, default='')
+    tags = models.JSONField(default=list, blank=True)
+    specifications = models.JSONField(default=dict, blank=True)
+    attributes = models.JSONField(default=dict, blank=True)
+    identifiers = models.JSONField(default=dict, blank=True)
+    variant_options = models.JSONField(default=list, blank=True)
+    # Cloudinary public IDs only: shared assets are referenced, never re-uploaded.
+    image_references = models.JSONField(default=list, blank=True)
+    review_status = models.CharField(max_length=20, choices=REVIEW_STATUSES, default='pending_review')
+    review_note = models.TextField(blank=True, default='')
+    is_active = models.BooleanField(default=False)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='catalog_product_requests',
+    )
+    identity_key = models.CharField(max_length=255, blank=True, default='', editable=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ('name', 'pk')
+        constraints = [
+            models.UniqueConstraint(
+                fields=('identity_key',),
+                condition=~Q(identity_key=''),
+                name='unique_catalog_product_identity',
+            ),
+        ]
+
+    @staticmethod
+    def normalize_identity(value):
+        return ' '.join(re.findall(r'[a-z0-9]+', (value or '').casefold()))
+
+    def save(self, *args, **kwargs):
+        brand_key = self.normalize_identity(self.brand)
+        identifiers = self.identifiers if isinstance(self.identifiers, dict) else {}
+        identity = ''
+        for key in ('gtin', 'barcode', 'ean', 'isbn', 'mpn', 'manufacturer_part_number'):
+            value = self.normalize_identity(identifiers.get(key))
+            if value:
+                identity = f'{key}|{value}'
+                break
+        if not identity:
+            model_key = self.normalize_identity(self.model) or self.normalize_identity(self.name)
+            identity = f'{brand_key}|{model_key}'
+        self.identity_key = identity[:255]
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f'{self.brand} {self.model or self.name}'.strip()
+
+    def get_variant_options(self):
+        variants = getattr(self, '_prefetched_objects_cache', {}).get('variants')
+        if variants is None:
+            variants = list(self.variants.all())
+        if variants:
+            return [variant.options for variant in variants if variant.is_active]
+        return self.variant_options or []
+
+
+class CatalogVariant(models.Model):
+    catalog_product = models.ForeignKey(
+        CatalogProduct, on_delete=models.CASCADE, related_name='variants',
+    )
+    options = models.JSONField(default=dict)
+    options_key = models.CharField(max_length=1000, editable=False)
+    image_references = models.JSONField(default=list, blank=True)
+    is_active = models.BooleanField(default=True)
+    position = models.PositiveSmallIntegerField(default=0)
+
+    class Meta:
+        ordering = ('position', 'pk')
+        constraints = [
+            models.UniqueConstraint(
+                fields=('catalog_product', 'options_key'),
+                name='unique_catalog_variant_options',
+            ),
+        ]
+
+    @staticmethod
+    def make_options_key(options):
+        canonical = json.dumps(options or {}, sort_keys=True, separators=(',', ':'))
+        return hashlib.sha256(canonical.encode('utf-8')).hexdigest()
+
+    def save(self, *args, **kwargs):
+        self.options_key = self.make_options_key(self.options)
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        values = ' / '.join(str(value) for value in (self.options or {}).values())
+        return f'{self.catalog_product} — {values or self.pk}'
+
+
 class Product(models.Model):
     CONDITION_CHOICES = (
         ('new', 'New'),
@@ -100,6 +214,9 @@ class Product(models.Model):
     trader_product = models.OneToOneField(
         'traders.TraderProduct', on_delete=models.SET_NULL,
         null=True, blank=True, related_name='public_product'
+    )
+    catalog_product = models.ForeignKey(
+        CatalogProduct, on_delete=models.PROTECT, null=True, blank=True, related_name='public_offers',
     )
     is_featured = models.BooleanField(default=False)
     is_new_deal = models.BooleanField(default=False)
@@ -146,6 +263,10 @@ class Product(models.Model):
 
 class ProductVariant(models.Model):
     product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='variants')
+    catalog_variant = models.ForeignKey(
+        CatalogVariant, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='offer_variants',
+    )
     sku = models.CharField(max_length=100, blank=True, default='')
     options = models.JSONField(default=dict)
     price = models.DecimalField(max_digits=10, decimal_places=2)
@@ -161,9 +282,9 @@ class ProductVariant(models.Model):
         ordering = ('id',)
         constraints = [
             models.UniqueConstraint(
-                fields=('sku',),
+                fields=('product', 'sku'),
                 condition=~Q(sku=''),
-                name='unique_nonempty_product_variant_sku',
+                name='unique_nonempty_product_variant_sku_per_offer',
             ),
         ]
 

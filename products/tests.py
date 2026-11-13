@@ -1,5 +1,6 @@
 import importlib
 import uuid
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from django.apps import apps
@@ -800,7 +801,7 @@ class FlashSaleBasePricingSerializerTest(TestCase):
         )
         sale = FlashSale.objects.create(
             product=product, flash_price=80000,
-            ends_at='2099-01-01T12:00:00Z', stock_limit=5,
+            ends_at=datetime(2099, 1, 1, 12, 0, tzinfo=timezone.utc), stock_limit=5,
         )
 
         data = FlashSaleSerializer(sale).data

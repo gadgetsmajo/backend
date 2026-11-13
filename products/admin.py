@@ -3,9 +3,14 @@ from django.core.cache import cache
 from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.db.models import Sum
 from django.forms.models import BaseInlineFormSet
+from django.template.response import TemplateResponse
 from django.utils import timezone
 from .cache import invalidate_category_cache
-from .models import Category, CategoryAttribute, Product, ProductVariant, ProductReview, ReviewImage
+from .catalog import merge_catalog_products
+from .models import (
+    CatalogProduct, CatalogVariant, Category, CategoryAttribute, Product, ProductVariant, ProductReview,
+    ReviewImage,
+)
 from traders.models import TraderInventoryItem
 
 
@@ -42,6 +47,15 @@ class ProductVariantInline(admin.TabularInline):
     @admin.display(description='Units sold')
     def sold_quantity(self, obj):
         return obj.sold_quantity or 0
+
+
+class CatalogVariantInline(admin.TabularInline):
+    model = CatalogVariant
+    fields = ('options', 'image_references', 'is_active', 'position')
+    extra = 0
+
+    def has_delete_permission(self, request, obj=None):
+        return False
 
 
 @admin.register(Category)
@@ -121,3 +135,76 @@ class ProductAdmin(admin.ModelAdmin):
 
 admin.site.register(ProductReview)
 admin.site.register(ReviewImage)
+
+
+@admin.register(CatalogProduct)
+class CatalogProductAdmin(admin.ModelAdmin):
+    list_display = ('name', 'brand', 'model', 'category', 'review_status', 'is_active', 'created_at')
+    list_filter = ('review_status', 'is_active', 'category')
+    search_fields = ('name', 'brand', 'model', 'product_type', 'identity_key')
+    readonly_fields = ('identity_key', 'created_by', 'created_at', 'updated_at')
+    inlines = (CatalogVariantInline,)
+    actions = ('approve_catalog_products', 'disable_catalog_products', 'merge_catalog_products_action')
+
+    def save_related(self, request, form, formsets, change):
+        super().save_related(request, form, formsets, change)
+        product = form.instance
+        variants = list(product.variants.filter(is_active=True).values_list('options', flat=True))
+        if variants and variants != product.variant_options:
+            product.variant_options = variants
+            product.save(update_fields=('variant_options', 'updated_at'))
+
+    @admin.action(description='Approve selected catalog products')
+    def approve_catalog_products(self, request, queryset):
+        for product in queryset:
+            for position, options in enumerate(product.variant_options or []):
+                if isinstance(options, dict) and options:
+                    CatalogVariant.objects.get_or_create(
+                        catalog_product=product,
+                        options_key=CatalogVariant.make_options_key(options),
+                        defaults={'options': options, 'position': position},
+                    )
+        queryset.update(review_status='approved', is_active=True, review_note='')
+
+    @admin.action(description='Disable selected catalog products')
+    def disable_catalog_products(self, request, queryset):
+        queryset.update(review_status='disabled', is_active=False)
+
+    @admin.action(description='Merge selected catalog products into one')
+    def merge_catalog_products_action(self, request, queryset):
+        selected_ids = request.POST.getlist('_selected_action')
+        survivor_id = request.POST.get('survivor_id')
+        if request.POST.get('confirm_merge'):
+            if not survivor_id:
+                self.message_user(request, 'Choose the catalog product to keep.', level='error')
+                return None
+            try:
+                survivor, merged_count = merge_catalog_products(
+                    [int(value) for value in selected_ids],
+                    int(survivor_id),
+                )
+            except (TypeError, ValueError, CatalogProduct.DoesNotExist) as exc:
+                self.message_user(request, str(exc), level='error')
+                return None
+            self.message_user(
+                request,
+                f'Merged {merged_count} catalog product(s) into “{survivor.name}”. '
+                'Existing listings and order records were preserved.',
+            )
+            return None
+
+        selected_products = list(queryset.order_by('pk'))
+        if len(selected_products) < 2:
+            self.message_user(request, 'Select at least two catalog products to merge.', level='error')
+            return None
+        return TemplateResponse(
+            request,
+            'admin/products/catalogproduct/merge.html',
+            {
+                **self.admin_site.each_context(request),
+                'opts': self.model._meta,
+                'products': selected_products,
+                'action_name': 'merge_catalog_products_action',
+                'title': 'Merge catalog products',
+            },
+        )

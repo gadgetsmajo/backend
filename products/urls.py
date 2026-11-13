@@ -9,9 +9,12 @@ from .views import (
     ProductReviewEligibilityView, ProductRatingSummaryView,
     MyReviewsView, RecommendedProductsView,
 )
+from .catalog import CatalogProductOffersView, CatalogProductView
 
 urlpatterns = [
     path('', ProductListView.as_view(), name='product-list'),
+    path('catalog/', CatalogProductView.as_view(), name='catalog-product-list'),
+    path('catalog/<int:pk>/offers/', CatalogProductOffersView.as_view(), name='catalog-product-offers'),
     path('recommended/', RecommendedProductsView.as_view(), name='product-recommendations'),
     path('reviews/mine/', MyReviewsView.as_view(), name='my-reviews'),
     path('flash-sales/', FlashSaleListCreateView.as_view(), name='flash-sale-list'),

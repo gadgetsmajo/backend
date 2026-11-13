@@ -13,7 +13,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from orders.models import Order, OrderItem, Payment, ReturnRequest
-from products.models import Category, CategoryAttribute, Product, ProductReview, ProductVariant
+from products.models import CatalogProduct, Category, CategoryAttribute, Product, ProductReview, ProductVariant
 from settings_app.models import PlatformSettings
 from traders.models import (
 	TraderApplication, TraderEarning, TraderFollower, TraderInventoryItem,
@@ -523,9 +523,17 @@ class TraderInventoryStockSyncTests(TestCase):
 		CategoryAttribute.objects.create(
 			category=category, name='Color', key='color', input_type='color', is_variant=True,
 		)
+		catalog_product = CatalogProduct.objects.create(
+			name='Colorful Gadget',
+			category=category,
+			variant_options=[{'color': 'Black'}],
+			review_status='approved',
+			is_active=True,
+		)
 		response = self.client.post(
 			reverse('trader-products', args=[self.trader.uuid]),
 			{
+				'catalog_product_id': catalog_product.pk,
 				'name': 'Colorful Gadget',
 				'price': '1000.00',
 				'stock': 3,
@@ -906,7 +914,7 @@ class TraderInventoryStockSyncTests(TestCase):
 		self.assertEqual(response.status_code, 200)
 		public_product.refresh_from_db()
 		self.assertEqual(public_product.trader_product_id, self.product.pk)
-		self.assertEqual(public_product.name, 'New Product Name')
+		self.assertEqual(public_product.name, 'New product name')
 		self.assertEqual(public_product.stock, 6)
 		self.assertEqual(
 			Product.objects.filter(trader=self.trader).count(),

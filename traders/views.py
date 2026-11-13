@@ -302,7 +302,9 @@ class TraderDashboardView(APIView):
 
         sales = TraderSale.objects.filter(trader=trader)
         expenses = TraderExpense.objects.filter(trader=trader)
-        products = TraderProduct.objects.filter(trader=trader)
+        products = TraderProduct.objects.filter(trader=trader).select_related(
+            'catalog_product',
+        ).prefetch_related('catalog_product__variants')
 
         total_revenue = sum(s.total for s in sales)
         total_expenses = sum(e.amount for e in expenses)
@@ -373,6 +375,11 @@ def _invalidate_product_cache(product, trader_product_id):
 def _sync_to_product(trader_product):
     from products.cache import invalidate_category_cache
 
+    catalog_product = trader_product.catalog_product if trader_product.catalog_product_id else None
+    shared_image_reference = None
+    if catalog_product:
+        selected_references = trader_product.catalog_image_references
+        shared_image_reference = selected_references[0] if selected_references else None
     defaults = {
         'trader': trader_product.trader,
         'name': trader_product.name,
@@ -387,7 +394,8 @@ def _sync_to_product(trader_product):
         'delivery_fee': trader_product.delivery_fee,
         'stock': trader_product.stock,
         'category': trader_product.category,
-        'image': trader_product.image,
+        'image': trader_product.image or shared_image_reference,
+        'catalog_product': catalog_product,
         'is_active': trader_product.is_active,
         'is_featured': trader_product.is_featured,
         'is_new_deal': trader_product.is_new_deal,
@@ -463,6 +471,11 @@ class TraderProductListView(APIView):
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         if not _is_trader_owner(request, trader):
             return Response({'detail': 'Forbidden.'}, status=status.HTTP_403_FORBIDDEN)
+        if not request.data.get('catalog_product_id'):
+            return Response(
+                {'catalog_product_id': 'Select an approved shared catalog product before creating an offer.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         serializer = TraderProductSerializer(data=request.data, context={'request': request})
         serializer.is_valid(raise_exception=True)
         image_file = request.FILES.get('image')

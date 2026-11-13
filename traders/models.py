@@ -116,6 +116,12 @@ class TraderFollower(models.Model):
 class TraderProduct(models.Model):
     uuid        = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
     trader      = models.ForeignKey(TraderApplication, on_delete=models.CASCADE, related_name='products')
+    catalog_product = models.ForeignKey(
+        'products.CatalogProduct', on_delete=models.PROTECT, null=True, blank=True,
+        related_name='trader_offers',
+    )
+    trader_sku = models.CharField(max_length=100, blank=True, default='')
+    catalog_image_references = models.JSONField(default=list, blank=True)
     name        = models.CharField(max_length=255)
     short_description = models.CharField(max_length=300, blank=True, default='')
     long_description  = models.TextField(blank=True, default='')
@@ -126,6 +132,19 @@ class TraderProduct(models.Model):
         choices=(('new', 'New'), ('used', 'Used'), ('refurbished', 'Refurbished')),
         default='new',
     )
+    availability = models.CharField(
+        max_length=20,
+        choices=(
+            ('in_stock', 'In stock'),
+            ('preorder', 'Pre-order'),
+            ('made_to_order', 'Made to order'),
+            ('unavailable', 'Unavailable'),
+        ),
+        default='in_stock',
+    )
+    warranty = models.CharField(max_length=255, blank=True, default='')
+    delivery_options = models.JSONField(default=list, blank=True)
+    package_details = models.TextField(blank=True, default='')
     tags = models.JSONField(default=list, blank=True)
     specifications = models.JSONField(default=dict, blank=True)
     price       = models.DecimalField(max_digits=12, decimal_places=2)
@@ -143,6 +162,13 @@ class TraderProduct(models.Model):
 
     class Meta:
         ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=('trader', 'trader_sku'),
+                condition=~Q(trader_sku=''),
+                name='unique_nonempty_trader_product_sku',
+            ),
+        ]
 
     def save(self, *args, **kwargs):
         update_fields = kwargs.get('update_fields')
