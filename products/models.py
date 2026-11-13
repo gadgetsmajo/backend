@@ -68,6 +68,7 @@ class CatalogProduct(models.Model):
         ('pending_review', 'Pending review'),
         ('approved', 'Approved'),
         ('rejected', 'Rejected'),
+        ('changes_required', 'Changes required'),
         ('disabled', 'Disabled'),
     )
 
@@ -85,6 +86,7 @@ class CatalogProduct(models.Model):
     attributes = models.JSONField(default=dict, blank=True)
     identifiers = models.JSONField(default=dict, blank=True)
     variant_options = models.JSONField(default=list, blank=True)
+    request_offer_details = models.JSONField(default=dict, blank=True)
     # Cloudinary public IDs only: shared assets are referenced, never re-uploaded.
     image_references = models.JSONField(default=list, blank=True)
     review_status = models.CharField(max_length=20, choices=REVIEW_STATUSES, default='pending_review')
@@ -137,6 +139,22 @@ class CatalogProduct(models.Model):
         if variants:
             return [variant.options for variant in variants if variant.is_active]
         return self.variant_options or []
+
+
+class CatalogProductImage(models.Model):
+    catalog_product = models.ForeignKey(
+        CatalogProduct, on_delete=models.CASCADE, related_name='request_images',
+    )
+    image = cloudinary.models.CloudinaryField('image', folder='catalog_products/')
+    variant_options = models.JSONField(default=dict, blank=True)
+    position = models.PositiveSmallIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ('position', 'pk')
+
+    def __str__(self):
+        return f'Image for {self.catalog_product}'
 
 
 class CatalogVariant(models.Model):

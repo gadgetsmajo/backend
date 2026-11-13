@@ -1,11 +1,16 @@
 import importlib
+import json
+from io import BytesIO
 from types import SimpleNamespace
 
+from PIL import Image
 from django.apps import apps
 from django.db import connection
 from django.contrib.auth import get_user_model
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.urls import reverse
 from rest_framework.test import APIClient, APITestCase
+from unittest.mock import patch
 
 from products.catalog import merge_catalog_products
 from products.models import CatalogProduct, CatalogVariant, Category, Product, ProductVariant
@@ -67,6 +72,26 @@ class SharedCatalogAPITests(APITestCase):
             'model': 'BX-1',
             'category_id': self.category.id,
             'specifications': {'voltage': '30V'},
+            'offer_details': {
+                'price': '120000',
+                'original_price': '145000',
+                'stock': 4,
+                'trader_sku': 'BX-1-LOCAL',
+                'delivery_fee': '5000',
+                'condition': 'new',
+                'availability': 'in_stock',
+                'warranty': '12 months',
+                'delivery_options': ['Pickup', 'Courier'],
+                'package_details': 'Power supply, probes, manual',
+                'variants': [{
+                    'sku': 'BX-1-30V',
+                    'options': {'voltage': '30V'},
+                    'price': '120000',
+                    'compare_at_price': '145000',
+                    'stock': 4,
+                    'is_active': True,
+                }],
+            },
         }, format='json')
 
         self.assertEqual(response.status_code, 201)
@@ -77,6 +102,127 @@ class SharedCatalogAPITests(APITestCase):
         self.assertFalse(hasattr(product, 'price'))
         self.assertFalse(hasattr(product, 'stock'))
         self.assertFalse(hasattr(product, 'trader_sku'))
+        self.assertEqual(product.request_offer_details['price'], '120000.00')
+        self.assertEqual(product.request_offer_details['variants'][0]['options'], {'voltage': '30V'})
+
+    def test_requester_can_review_own_request_and_admin_can_approve_it(self):
+        response = self.client.post(reverse('catalog-product-list'), {
+            'name': 'Laboratory Supply P-220',
+            'brand': 'BenchCo',
+            'model': 'P-220',
+            'category_id': self.category.id,
+            'short_description': 'Adjustable power supply',
+            'long_description': 'A laboratory power supply with adjustable voltage.',
+            'offer_details': {
+                'price': '180000',
+                'original_price': '205000',
+                'stock': 3,
+                'condition': 'new',
+                'availability': 'in_stock',
+                'variants': [{
+                    'sku': 'P-220-220V',
+                    'options': {'voltage': '220V'},
+                    'price': '180000',
+                    'compare_at_price': '205000',
+                    'stock': 3,
+                }],
+            },
+        }, format='json')
+        self.assertEqual(response.status_code, 201)
+        request_id = response.data['id']
+
+        own_requests = self.client.get(reverse('catalog-product-requests'))
+        self.assertEqual(own_requests.status_code, 200)
+        self.assertEqual([item['id'] for item in own_requests.data], [request_id])
+        self.assertEqual(
+            self.client.get(reverse('admin-catalog-product-requests')).status_code,
+            403,
+        )
+
+        admin = get_user_model().objects.create_superuser(
+            email='catalog-admin@example.com',
+            password='strong-pass-123',
+            name='Catalog Admin',
+        )
+        self.client.force_authenticate(admin)
+        admin_requests = self.client.get(reverse('admin-catalog-product-requests'))
+        self.assertEqual(admin_requests.status_code, 200)
+        self.assertEqual(admin_requests.data[0]['requester_email'], self.user.email)
+
+        approved = self.client.patch(
+            reverse('admin-catalog-product-request', args=[request_id]),
+            {'review_status': 'approved'},
+            format='json',
+        )
+        self.assertEqual(approved.status_code, 200)
+        product = CatalogProduct.objects.get(pk=request_id)
+        self.assertTrue(product.is_active)
+        self.assertEqual(product.review_status, 'approved')
+        self.assertTrue(product.variants.filter(options={'voltage': '220V'}).exists())
+        self.assertEqual(approved.data['request_offer_details']['price'], '180000.00')
+
+    def test_admin_can_edit_request_before_approval_and_rejection_requires_reason(self):
+        response = self.client.post(reverse('catalog-product-list'), {
+            'name': 'Bench Supply E-100',
+            'brand': 'BenchCo',
+            'model': 'E-100',
+            'offer_details': {'price': '40000'},
+        }, format='json')
+        self.assertEqual(response.status_code, 201)
+        request_id = response.data['id']
+        admin = get_user_model().objects.create_superuser(
+            email='catalog-editor@example.com',
+            password='strong-pass-123',
+            name='Catalog Editor',
+        )
+        self.client.force_authenticate(admin)
+
+        invalid_rejection = self.client.patch(
+            reverse('admin-catalog-product-request', args=[request_id]),
+            {'review_status': 'rejected'},
+            format='json',
+        )
+        self.assertEqual(invalid_rejection.status_code, 400)
+        self.assertIn('review_note', invalid_rejection.data)
+
+        edited = self.client.patch(
+            reverse('admin-catalog-product-request', args=[request_id]),
+            {
+                'name': 'Bench Supply E-100 Updated',
+                'offer_details': {'price': '45000', 'stock': 8},
+            },
+            format='json',
+        )
+        self.assertEqual(edited.status_code, 200)
+        self.assertEqual(edited.data['name'], 'Bench Supply E-100 Updated')
+        self.assertEqual(edited.data['request_offer_details']['price'], '45000.00')
+
+    def test_request_accepts_multipart_images_and_variant_image_indexes(self):
+        image_buffer = BytesIO()
+        Image.new('RGB', (1, 1), color='white').save(image_buffer, format='PNG')
+        image_data = image_buffer.getvalue()
+        payload = {
+            'name': 'Bench Supply Image Test',
+            'brand': 'BenchCo',
+            'model': 'IMG-1',
+            'offer_details': json.dumps({
+                'price': '45000',
+                'variants': [{
+                    'sku': 'IMG-1-RED',
+                    'options': {'color': 'Red'},
+                    'price': '45000',
+                    'stock': 2,
+                }],
+                'variant_image_indexes': [0],
+            }),
+            'images[0]': SimpleUploadedFile('product.png', image_data, content_type='image/png'),
+        }
+        with patch('products.catalog.CatalogProductImage.objects.create') as create_image:
+            response = self.client.post(reverse('catalog-product-list'), payload, format='multipart')
+
+        self.assertEqual(response.status_code, 201)
+        create_image.assert_called_once()
+        self.assertEqual(create_image.call_args.kwargs['variant_options'], {'color': 'Red'})
 
     def test_duplicate_request_is_blocked_by_model_or_identifier_not_trader_sku(self):
         response = self.client.post(reverse('catalog-product-list'), {
@@ -84,6 +230,7 @@ class SharedCatalogAPITests(APITestCase):
             'brand': 'ANENG',
             'model': 'M118A',
             'identifiers': {'barcode': '0123456789012'},
+            'offer_details': {'price': '45000'},
         }, format='json')
 
         self.assertEqual(response.status_code, 409)

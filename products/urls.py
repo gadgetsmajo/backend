@@ -9,11 +9,17 @@ from .views import (
     ProductReviewEligibilityView, ProductRatingSummaryView,
     MyReviewsView, RecommendedProductsView,
 )
-from .catalog import CatalogProductOffersView, CatalogProductView
+from .catalog import (
+    AdminCatalogProductRequestsView, CatalogProductOffersView, CatalogProductRequestsView,
+    CatalogProductView,
+)
 
 urlpatterns = [
     path('', ProductListView.as_view(), name='product-list'),
     path('catalog/', CatalogProductView.as_view(), name='catalog-product-list'),
+    path('catalog/requests/', CatalogProductRequestsView.as_view(), name='catalog-product-requests'),
+    path('catalog/requests/<int:pk>/', AdminCatalogProductRequestsView.as_view(), name='admin-catalog-product-request'),
+    path('catalog/admin/requests/', AdminCatalogProductRequestsView.as_view(), name='admin-catalog-product-requests'),
     path('catalog/<int:pk>/offers/', CatalogProductOffersView.as_view(), name='catalog-product-offers'),
     path('recommended/', RecommendedProductsView.as_view(), name='product-recommendations'),
     path('reviews/mine/', MyReviewsView.as_view(), name='my-reviews'),

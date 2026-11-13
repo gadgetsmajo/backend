@@ -2,14 +2,17 @@ import json
 import re
 from difflib import SequenceMatcher
 
+from django.core.serializers.json import DjangoJSONEncoder
 from django.db import IntegrityError, transaction
 from django.db.models import Q
+from django.shortcuts import get_object_or_404
 from rest_framework import permissions, serializers, status
+from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import CatalogProduct, CatalogVariant, Category, Product, ProductVariant
-from .serializers import ProductSerializer
+from .models import CatalogProduct, CatalogProductImage, CatalogVariant, Category, Product, ProductVariant
+from .serializers import ProductSerializer, ProductVariantSerializer
 from .visibility import public_marketplace_product_filter
 from traders.models import TraderApplication
 
@@ -215,13 +218,20 @@ class CatalogProductRequestSerializer(serializers.ModelSerializer):
         source='category', queryset=Category.objects.filter(is_active=True),
         required=False, allow_null=True,
     )
+    offer_details = serializers.JSONField(write_only=True, required=True)
+    images = serializers.ListField(
+        child=serializers.ImageField(),
+        required=False,
+        write_only=True,
+        max_length=12,
+    )
 
     class Meta:
         model = CatalogProduct
         fields = (
             'name', 'brand', 'model', 'product_type', 'category_id',
             'short_description', 'long_description', 'tags', 'specifications',
-            'attributes', 'identifiers', 'variant_options',
+            'attributes', 'identifiers', 'variant_options', 'offer_details', 'images',
         )
 
     def to_internal_value(self, data):
@@ -263,11 +273,264 @@ class CatalogProductRequestSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({
                 'variant_options': 'Each variant must be an object with non-empty names and simple values.',
             })
+        offer_details = attrs.get('offer_details')
+        if offer_details is not None:
+            offer_serializer = CatalogOfferRequestSerializer(data=offer_details)
+            offer_serializer.is_valid(raise_exception=True)
+            safe_offer_details = json.loads(json.dumps(
+                offer_serializer.validated_data,
+                cls=DjangoJSONEncoder,
+            ))
+            attrs['offer_details'] = safe_offer_details
+            image_indexes = safe_offer_details.get('variant_image_indexes', [])
+            images = attrs.get('images', [])
+            variants = safe_offer_details.get('variants', [])
+            option_keys = [
+                CatalogVariant.make_options_key(variant['options'])
+                for variant in variants
+            ]
+            if len(option_keys) != len(set(option_keys)):
+                raise serializers.ValidationError({
+                    'offer_details': 'Variant options must be unique.',
+                })
+            if image_indexes and len(image_indexes) != len(variants):
+                raise serializers.ValidationError({
+                    'offer_details': 'Provide one variant image index for each variant.',
+                })
+            if any(index is not None and index >= len(images) for index in image_indexes):
+                raise serializers.ValidationError({
+                    'offer_details': 'A variant image refers to a missing uploaded image.',
+                })
+            category = attrs.get('category', getattr(self.instance, 'category', None))
+            if category:
+                required_variants = list(category.attributes.filter(is_required=True, is_variant=True))
+                variants = safe_offer_details.get('variants', [])
+                for attribute in required_variants:
+                    if not variants or any(
+                        attribute.key not in variant.get('options', {})
+                        or variant['options'].get(attribute.key) in (None, '')
+                        for variant in variants
+                    ):
+                        raise serializers.ValidationError({
+                            'offer_details': f'Every variant needs a value for {attribute.name}.',
+                        })
+                required_details = category.attributes.filter(is_required=True, is_variant=False)
+                specifications = attrs.get(
+                    'specifications',
+                    getattr(self.instance, 'specifications', {}),
+                )
+                missing = [
+                    attribute.name
+                    for attribute in required_details
+                    if specifications.get(attribute.key) in (None, '', [])
+                ]
+                if missing:
+                    raise serializers.ValidationError({
+                        'specifications': f'Required details are missing: {", ".join(missing)}.',
+                    })
+        if any(image.size > 10 * 1024 * 1024 for image in attrs.get('images', [])):
+            raise serializers.ValidationError({'images': 'Each product image must be 10 MB or smaller.'})
         return attrs
+
+    def create(self, validated_data):
+        offer_details = validated_data.pop('offer_details')
+        images = validated_data.pop('images', [])
+        request = self.context.get('request')
+        product = CatalogProduct.objects.create(
+            **validated_data,
+            request_offer_details=offer_details,
+            created_by=request.user,
+            review_status='pending_review',
+            is_active=False,
+        )
+        image_indexes = offer_details.get('variant_image_indexes', [])
+        variants = offer_details.get('variants', [])
+        variant_options_by_image = {
+            image_index: variants[index]['options']
+            for index, image_index in enumerate(image_indexes)
+            if image_index is not None
+        }
+        for index, image in enumerate(images):
+            CatalogProductImage.objects.create(
+                catalog_product=product,
+                image=image,
+                position=index,
+                variant_options=variant_options_by_image.get(index, {}),
+            )
+        return product
+
+    def update(self, instance, validated_data):
+        offer_details = validated_data.pop('offer_details', None)
+        images = validated_data.pop('images', [])
+        if offer_details is not None:
+            instance.request_offer_details = offer_details
+        for field, value in validated_data.items():
+            setattr(instance, field, value)
+        instance.save()
+
+        image_indexes = (offer_details or {}).get('variant_image_indexes', [])
+        variants = (offer_details or {}).get('variants', [])
+        variant_options_by_image = {
+            image_index: variants[index]['options']
+            for index, image_index in enumerate(image_indexes)
+            if image_index is not None and index < len(variants)
+        }
+        current_position = instance.request_images.count()
+        for offset, image in enumerate(images):
+            position = current_position + offset
+            CatalogProductImage.objects.create(
+                catalog_product=instance,
+                image=image,
+                position=position,
+                variant_options=variant_options_by_image.get(offset, {}),
+            )
+        return instance
+
+
+class CatalogOfferRequestSerializer(serializers.Serializer):
+    price = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=0)
+    original_price = serializers.DecimalField(
+        max_digits=10, decimal_places=2, min_value=0, required=False, allow_null=True,
+    )
+    delivery_fee = serializers.DecimalField(
+        max_digits=10, decimal_places=2, min_value=0, required=False, default=0,
+    )
+    stock = serializers.IntegerField(min_value=0, required=False, default=0)
+    trader_sku = serializers.CharField(max_length=100, allow_blank=True, required=False, default='')
+    condition = serializers.ChoiceField(choices=Product.CONDITION_CHOICES, default='new')
+    availability = serializers.ChoiceField(
+        choices=(
+            ('in_stock', 'In stock'),
+            ('preorder', 'Pre-order'),
+            ('made_to_order', 'Made to order'),
+            ('unavailable', 'Unavailable'),
+        ),
+        default='in_stock',
+    )
+    warranty = serializers.CharField(max_length=255, allow_blank=True, required=False, default='')
+    delivery_options = serializers.ListField(
+        child=serializers.CharField(max_length=120, allow_blank=False),
+        required=False,
+        default=list,
+    )
+    package_details = serializers.CharField(allow_blank=True, required=False, default='')
+    variants = ProductVariantSerializer(many=True, required=False, default=list)
+    variant_image_indexes = serializers.ListField(
+        child=serializers.IntegerField(min_value=0, allow_null=True),
+        required=False,
+        default=list,
+    )
+
+    def validate(self, attrs):
+        price = attrs['price']
+        if price <= 0:
+            raise serializers.ValidationError({'price': 'Price must be greater than zero.'})
+        original_price = attrs.get('original_price')
+        if original_price is not None and original_price < price:
+            raise serializers.ValidationError({
+                'original_price': 'Original price must be greater than or equal to price.',
+            })
+        return attrs
+
+
+def _catalog_request_data(product, include_owner=False):
+    images = []
+    for image in product.request_images.all():
+        images.append({
+            'id': image.pk,
+            'url': image.image.url if image.image else None,
+            'variant_options': image.variant_options,
+        })
+    data = {
+        'id': product.pk,
+        'name': product.name,
+        'brand': product.brand,
+        'model': product.model,
+        'product_type': product.product_type,
+        'category_id': product.category_id,
+        'category_name': product.category.name if product.category_id else None,
+        'short_description': product.short_description,
+        'long_description': product.long_description,
+        'tags': product.tags,
+        'specifications': product.specifications,
+        'attributes': product.attributes,
+        'identifiers': product.identifiers,
+        'variant_options': product.get_variant_options(),
+        'variants': [
+            {
+                'options': variant.options,
+                'image_references': variant.image_references,
+            }
+            for variant in product.variants.all()
+            if variant.is_active
+        ],
+        'image_references': product.image_references,
+        'request_offer_details': product.request_offer_details,
+        'images': images,
+        'review_status': product.review_status,
+        'review_note': product.review_note,
+        'created_at': product.created_at,
+    }
+    if include_owner:
+        data['requester_email'] = product.created_by.email if product.created_by_id else ''
+        data['requester_name'] = getattr(product.created_by, 'name', '') if product.created_by_id else ''
+    return data
+
+
+def _approve_catalog_request(product):
+    references = list(product.image_references or [])
+    for image in product.request_images.all():
+        reference = getattr(image.image, 'public_id', None) or str(image.image)
+        if reference and reference not in references:
+            references.append(reference)
+        options = image.variant_options if isinstance(image.variant_options, dict) else {}
+        if options:
+            options_key = CatalogVariant.make_options_key(options)
+            variant, created = CatalogVariant.objects.get_or_create(
+                catalog_product=product,
+                options_key=options_key,
+                defaults={
+                    'options': options,
+                    'image_references': [reference] if reference else [],
+                },
+            )
+            if not created and reference and reference not in variant.image_references:
+                variant.image_references = [*(variant.image_references or []), reference]
+                variant.save(update_fields=('image_references',))
+
+    offer_details = product.request_offer_details if isinstance(product.request_offer_details, dict) else {}
+    variants = offer_details.get('variants', [])
+    variant_options = [
+        variant['options']
+        for variant in variants
+        if isinstance(variant, dict) and isinstance(variant.get('options'), dict)
+    ]
+    if not variant_options:
+        variant_options = product.variant_options or []
+    for position, options in enumerate(variant_options):
+        if not isinstance(options, dict) or not options:
+            continue
+        options_key = CatalogVariant.make_options_key(options)
+        CatalogVariant.objects.get_or_create(
+            catalog_product=product,
+            options_key=options_key,
+            defaults={'options': options, 'position': position},
+        )
+
+    product.image_references = references
+    product.variant_options = variant_options
+    product.review_status = 'approved'
+    product.is_active = True
+    product.review_note = ''
+    product.save(update_fields=(
+        'image_references', 'variant_options', 'review_status', 'is_active', 'review_note', 'updated_at',
+    ))
 
 
 class CatalogProductView(APIView):
     """Public search and trader-submitted, admin-reviewed catalog requests."""
+
+    parser_classes = (MultiPartParser, FormParser, JSONParser)
 
     def get_permissions(self):
         if self.request.method == 'GET':
@@ -316,7 +579,10 @@ class CatalogProductView(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        serializer = CatalogProductRequestSerializer(data=request.data)
+        serializer = CatalogProductRequestSerializer(
+            data=request.data,
+            context={'request': request},
+        )
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
         matches = _find_similar_products(data)
@@ -331,11 +597,7 @@ class CatalogProductView(APIView):
 
         try:
             with transaction.atomic():
-                product = serializer.save(
-                    created_by=request.user,
-                    review_status='pending_review',
-                    is_active=False,
-                )
+                product = serializer.save()
         except IntegrityError:
             matches = _find_similar_products(data)
             return Response(
@@ -355,6 +617,102 @@ class CatalogProductView(APIView):
             },
             status=status.HTTP_201_CREATED,
         )
+
+
+class CatalogProductRequestsView(APIView):
+    permission_classes = (permissions.IsAuthenticated,)
+
+    def get(self, request):
+        products = CatalogProduct.objects.filter(
+            created_by=request.user,
+        ).select_related('category').prefetch_related('request_images', 'variants').order_by('-created_at')
+        return Response([_catalog_request_data(product) for product in products])
+
+
+class AdminCatalogProductRequestsView(APIView):
+    permission_classes = (permissions.IsAdminUser,)
+    parser_classes = (MultiPartParser, FormParser, JSONParser)
+
+    def get(self, request):
+        products = CatalogProduct.objects.filter(
+            created_by__isnull=False,
+        ).select_related('category', 'created_by').prefetch_related(
+            'request_images', 'variants',
+        ).order_by('review_status', '-created_at')
+        review_status = request.query_params.get('status')
+        if review_status:
+            products = products.filter(review_status=review_status)
+        return Response([
+            _catalog_request_data(product, include_owner=True)
+            for product in products
+        ])
+
+    def patch(self, request, pk):
+        product = get_object_or_404(
+            CatalogProduct.objects.select_related('category', 'created_by').prefetch_related(
+                'request_images', 'variants',
+            ),
+            pk=pk,
+            created_by__isnull=False,
+        )
+        decision = request.data.get('review_status')
+        review_note = request.data.get('review_note', '')
+        allowed_statuses = {'approved', 'rejected', 'changes_required'}
+        if decision not in (None, '') and (
+            not isinstance(decision, str) or decision not in allowed_statuses
+        ):
+            return Response(
+                {'review_status': 'Choose approved, rejected, or changes_required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not isinstance(review_note, str):
+            return Response(
+                {'review_note': 'Review note must be text.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        review_note = review_note.strip()
+        if decision in {'rejected', 'changes_required'} and not review_note:
+            return Response(
+                {'review_note': 'Provide a reason for this decision.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        editable_fields = set(CatalogProductRequestSerializer.Meta.fields) - {
+            'offer_details', 'images',
+        }
+        edit_data = {
+            key: value for key, value in request.data.items()
+            if key in editable_fields or key in {'offer_details', 'images'}
+        }
+        if edit_data:
+            serializer = CatalogProductRequestSerializer(
+                product,
+                data=edit_data,
+                partial=True,
+                context={'request': request},
+            )
+            serializer.is_valid(raise_exception=True)
+            product = serializer.save()
+
+        if decision == 'approved':
+            offer_serializer = CatalogOfferRequestSerializer(data=product.request_offer_details)
+            if not offer_serializer.is_valid():
+                return Response(
+                    {'offer_details': offer_serializer.errors},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            _approve_catalog_request(product)
+        elif decision:
+            product.review_status = decision
+            product.review_note = review_note
+            product.is_active = False
+            product.save(update_fields=('review_status', 'review_note', 'is_active', 'updated_at'))
+        elif edit_data:
+            product.review_status = 'pending_review'
+            product.is_active = False
+            product.save(update_fields=('review_status', 'is_active', 'updated_at'))
+
+        return Response(_catalog_request_data(product, include_owner=True))
 
 
 class CatalogProductOffersView(APIView):
