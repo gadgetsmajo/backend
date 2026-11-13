@@ -1,4 +1,4 @@
-from django.urls import path
+from django.urls import include, path
 from .views import (
     TraderApplicationCreateView,
     TraderMeView, TraderAgreementView, PublicTraderProfileView, TraderProfileView, TraderDashboardView,
@@ -34,6 +34,7 @@ urlpatterns = [
     path('<uuid:trader_uuid>/wallet/',                                  TraderWalletView.as_view(),            name='trader-wallet'),
     path('<uuid:trader_uuid>/orders/',                                  TraderOrderListView.as_view(),         name='trader-orders'),
     path('<uuid:trader_uuid>/orders/<int:pk>/',                         TraderOrderItemUpdateView.as_view(),   name='trader-order-item-update'),
+    path('<uuid:trader_uuid>/advertising/',                             include('advertising.trader_urls')),
 
     # Admin
     path('admin/',                                                      AdminTraderListView.as_view(),         name='admin-trader-list'),

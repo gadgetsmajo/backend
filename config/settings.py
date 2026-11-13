@@ -40,6 +40,7 @@ INSTALLED_APPS = [
     'inventory',
     'accounting',
     'traders',
+    'advertising',
 ]
 
 MIDDLEWARE = [
@@ -126,6 +127,7 @@ CORS_ALLOW_HEADERS = [
     'accept', 'accept-encoding', 'authorization', 'content-type',
     'dnt', 'origin', 'user-agent', 'x-csrftoken', 'x-requested-with',
     'ngrok-skip-browser-warning',
+    'idempotency-key', 'x-advertising-session',
 ]
 CORS_EXPOSE_HEADERS = ['x-railway-request-id', 'x-hikari-trace']
 CORS_PREFLIGHT_MAX_AGE = 86400
@@ -139,6 +141,12 @@ REST_FRAMEWORK = {
     ),
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
     'PAGE_SIZE': 20,
+    'DEFAULT_THROTTLE_RATES': {
+        'advertising_impressions': '120/hour',
+        'advertising_clicks': '60/hour',
+        'advertising_recharge': '10/hour',
+        'advertising_campaigns': '30/hour',
+    },
 }
 
 SIMPLE_JWT = {
@@ -205,6 +213,12 @@ PESAPAL_BASE_URL = config('PESAPAL_BASE_URL', default='https://cybqa.pesapal.com
 PESAPAL_REFUND_USERNAME = config('PESAPAL_REFUND_USERNAME', default='')
 PESAPAL_IPN_URL = config('PESAPAL_IPN_URL', default='')
 PESAPAL_CALLBACK_URL = config('PESAPAL_CALLBACK_URL', default='')
+
+# Advertising is controlled server-side. Dummy card processing is only enabled
+# when both DEBUG and PAYMENT_MODE=dummy are set.
+ADVERTISING_ENABLED = config('ADVERTISING_ENABLED', default=True, cast=bool)
+ADVERTISING_REQUIRE_APPROVAL = config('ADVERTISING_REQUIRE_APPROVAL', default=True, cast=bool)
+PAYMENT_MODE = config('PAYMENT_MODE', default='')
 
 # Celery
 CELERY_BROKER_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379/0')
