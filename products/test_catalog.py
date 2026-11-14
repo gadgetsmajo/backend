@@ -952,6 +952,46 @@ class SharedCatalogAPITests(APITestCase):
         self.assertEqual(offers.data[0]['id'], listed.pk)
         self.assertIsNone(offers.data[0]['trader_offer_id'])
 
+    def test_recently_updated_catalog_product_is_not_buried_by_old_anchor_timestamp(self):
+        catalog = CatalogProduct.objects.create(
+            name='Recently Added Shared Product',
+            brand='BenchCo',
+            model='RECENT-1',
+            category=self.category,
+            review_status='approved',
+            is_active=True,
+        )
+        anchor = Product.objects.create(
+            name=catalog.name,
+            category=self.category,
+            catalog_product=catalog,
+            price='21000',
+            stock=3,
+            review_status='approved',
+            is_active=True,
+            is_catalog_anchor=True,
+        )
+        catalog.public_product = anchor
+        catalog.save(update_fields=('public_product',))
+        old_created_at = timezone.now() - timedelta(days=30)
+        for index in range(25):
+            older_product = Product.objects.create(
+                name=f'Older Storefront Product {index}',
+                category=self.category,
+                price='1000',
+                stock=2,
+                review_status='approved',
+                is_active=True,
+            )
+            Product.objects.filter(pk=older_product.pk).update(created_at=old_created_at)
+        Product.objects.filter(pk=anchor.pk).update(created_at=old_created_at)
+        CatalogProduct.objects.filter(pk=catalog.pk).update(updated_at=timezone.now())
+
+        response = self.client.get(reverse('product-list'), {'page_size': 20})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(anchor.pk, [item['id'] for item in response.data['results']])
+
     def test_existing_approved_catalog_request_gets_its_saved_offer_backfilled(self):
         catalog = CatalogProduct.objects.create(
             name='Backfilled catalog product',

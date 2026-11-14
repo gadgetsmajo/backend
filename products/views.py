@@ -257,6 +257,12 @@ class ProductListView(generics.ListCreateAPIView):
                 ).select_related('trader'),
             ),
         )
+        qs = qs.annotate(
+            _storefront_updated_at=Coalesce(
+                'catalog_product__updated_at',
+                'created_at',
+            ),
+        )
         qs = annotate_catalog_offer_metrics(qs)
         if not self.request.user.is_staff:
             qs = qs.filter(
@@ -370,7 +376,7 @@ class ProductListView(generics.ListCreateAPIView):
             ).filter(bought_quantity__gt=0)
             ordering = ('-bought_quantity', '-created_at', '-pk')
         else:
-            ordering = ('-created_at', '-pk')
+            ordering = ('-_storefront_updated_at', '-created_at', '-pk')
         qs = qs.order_by(*ordering)
         if not self.request.query_params.get('ordering') and not self.request.user.is_staff:
             qs = diversify_product_queryset(qs, ordering)
@@ -597,12 +603,17 @@ def _get_recommended_products_for_user(user, limit=12):
             ).select_related('trader'),
         ),
     )
-    qs = annotate_catalog_offer_metrics(qs).filter(
+    qs = annotate_catalog_offer_metrics(qs).annotate(
+        _storefront_updated_at=Coalesce(
+            'catalog_product__updated_at',
+            'created_at',
+        ),
+    ).filter(
         Q(catalog_product__isnull=True) | Q(is_catalog_anchor=True),
         Q(is_catalog_anchor=False)
         | Q(_has_available_offer=True)
         | Q(stock__gt=0, price__gt=0),
-    ).order_by('-rating', '-created_at')
+    ).order_by('-rating', '-_storefront_updated_at', '-created_at')
 
     if not user or not user.is_authenticated:
         return list(qs[:limit])
