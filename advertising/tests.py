@@ -271,6 +271,12 @@ class AdvertisingAPITests(TestCase):
         self.assertEqual(first.data['status'], 'valid')
         self.assertEqual(first.data['charged_amount'], '300.00')
         self.assertEqual(AdvertisingWallet.objects.get(trader=self.trader).balance, Decimal('700.00'))
+        dashboard = self.owner_client.get(self.dashboard_url)
+        self.assertEqual(dashboard.status_code, 200)
+        self.assertEqual(dashboard.data['stats']['clicks'], 1)
+        self.assertEqual(dashboard.data['stats']['total_spent'], '300.00')
+        self.assertEqual(dashboard.data['campaigns'][0]['clicks'], 1)
+        self.assertEqual(dashboard.data['campaigns'][0]['spent'], '300')
 
         repeated = self.buyer_client.post(
             '/api/advertising/clicks/',
@@ -374,6 +380,7 @@ class AdvertisingAPITests(TestCase):
             format='json',
         )
         self.assertEqual(response.data['status'], 'invalid')
+        self.assertEqual(response.data['reason'], 'self_click')
         self.assertEqual(AdvertisingWallet.objects.get(trader=self.trader).balance, Decimal('100.00'))
         insufficient = self.buyer_client.post(
             '/api/advertising/clicks/',
