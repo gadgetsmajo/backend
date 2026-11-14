@@ -616,7 +616,7 @@ def _get_recommended_products_for_user(user, limit=12):
     ).order_by('-rating', '-_storefront_updated_at', '-created_at')
 
     if not user or not user.is_authenticated:
-        return list(qs[:limit])
+        return diversify_items(list(qs[:limit]))
 
     behaviour = UserBehaviour.objects.filter(user=user).first()
     category_scores = dict((behaviour.category_scores or {})) if behaviour else {}
@@ -635,7 +635,7 @@ def _get_recommended_products_for_user(user, limit=12):
         seen_product_ids.update(int(pid) for pid in (behaviour.recent_product_ids or []))
 
     if not category_scores:
-        return list(qs.exclude(pk__in=seen_product_ids)[:limit])
+        return diversify_items(list(qs.exclude(pk__in=seen_product_ids)[:limit]))
 
     ranked = []
     for product in qs.exclude(pk__in=seen_product_ids):
@@ -651,7 +651,7 @@ def _get_recommended_products_for_user(user, limit=12):
         ranked.append((score, product))
 
     ranked.sort(key=lambda item: item[0], reverse=True)
-    return [product for _, product in ranked[:limit]]
+    return diversify_items([product for _, product in ranked[:limit]])
 
 
 # ── Flash Sales ─────────────────────────────────────────────────────────────
@@ -666,10 +666,25 @@ class FlashSaleListCreateView(generics.ListCreateAPIView):
 
     def get_queryset(self):
         from django.utils import timezone
+        from traders.models import TraderProduct
+
         qs = FlashSale.objects.select_related(
             'product__category', 'product__trader',
             'product__trader_product__trader', 'product__catalog_product__category',
-        ).prefetch_related('product__images')
+        ).prefetch_related(
+            'product__images',
+            Prefetch(
+                'product__trader_offers',
+                queryset=TraderProduct.objects.filter(
+                    is_active=True,
+                    review_status='approved',
+                    stock__gt=0,
+                    trader__status='approved',
+                    trader__is_visible=True,
+                    trader__is_closed=False,
+                ).select_related('trader'),
+            ),
+        )
         if self.request.method == 'GET':
             qs = qs.filter(
                 product__is_active=True,

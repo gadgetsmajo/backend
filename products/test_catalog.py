@@ -787,6 +787,19 @@ class SharedCatalogAPITests(APITestCase):
         self.assertEqual(len(results), len(offers))
         self.assertEqual(len({item['catalog_product_id'] for item in results}), len(offers))
         self.assertEqual(len({item['catalog_product_id'] for item in results[:3]}), 3)
+        product_ids = [item['id'] for item in results[:3]]
+        first_page_sellers = TraderProduct.objects.filter(
+            listing_product_id__in=product_ids,
+        ).values_list('trader_id', flat=True)
+        self.assertEqual(len(set(first_page_sellers)), 3)
+
+        recommendations = self.client.get(reverse('recommended-products'))
+        self.assertEqual(recommendations.status_code, 200)
+        recommendation_ids = [item['id'] for item in recommendations.data['results'][:3]]
+        recommendation_sellers = TraderProduct.objects.filter(
+            listing_product_id__in=recommendation_ids,
+        ).values_list('trader_id', flat=True)
+        self.assertEqual(len(set(recommendation_sellers)), 3)
 
     def test_flash_sale_list_deduplicates_catalog_products_and_mixes_sellers(self):
         traders = [self.trader, self._create_visible_trader(2), self._create_visible_trader(3)]

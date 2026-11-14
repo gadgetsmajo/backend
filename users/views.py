@@ -1409,10 +1409,12 @@ class RecommendedProductsView(APIView):
 
     def get(self, request):
         import random
+        from django.db.models import Prefetch
         from products.models import Product
         from products.listing import diversify_items
         from products.serializers import ProductSerializer
         from products.visibility import public_marketplace_product_filter
+        from traders.models import TraderProduct
 
         page = max(1, int(request.query_params.get('page', 1)))
         page_size = min(24, int(request.query_params.get('page_size', 12)))
@@ -1437,7 +1439,20 @@ class RecommendedProductsView(APIView):
             public_marketplace_product_filter(),
         ).select_related(
             'category', 'trader', 'trader_product__trader', 'catalog_product__category',
-        ).prefetch_related('images')
+        ).prefetch_related(
+            'images',
+            Prefetch(
+                'trader_offers',
+                queryset=TraderProduct.objects.filter(
+                    is_active=True,
+                    review_status='approved',
+                    stock__gt=0,
+                    trader__status='approved',
+                    trader__is_visible=True,
+                    trader__is_closed=False,
+                ).select_related('trader'),
+            ),
+        )
         if exclude_ids:
             qs = qs.exclude(id__in=exclude_ids)
         if exclude_catalog_ids:
