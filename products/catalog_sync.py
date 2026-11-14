@@ -110,7 +110,20 @@ def _sync_catalog_media(product, catalog_product):
 @transaction.atomic
 def ensure_catalog_public_product(catalog_product):
     if catalog_product.public_product_id:
-        return catalog_product.public_product
+        product = catalog_product.public_product
+        updates = []
+        if not product.is_catalog_anchor:
+            product.is_catalog_anchor = True
+            updates.append('is_catalog_anchor')
+        if product.is_active != catalog_product.is_active:
+            product.is_active = catalog_product.is_active
+            updates.append('is_active')
+        if product.review_status != catalog_product.review_status:
+            product.review_status = catalog_product.review_status
+            updates.append('review_status')
+        if updates:
+            product.save(update_fields=updates)
+        return product
 
     product = Product.objects.filter(
         catalog_product=catalog_product,

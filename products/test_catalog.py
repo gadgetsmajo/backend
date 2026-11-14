@@ -482,6 +482,9 @@ class SharedCatalogAPITests(APITestCase):
         self.assertEqual(offer.catalog_product_id, product.catalog_product_id)
         self.assertEqual(product.catalog_product.review_status, 'approved')
         self.assertTrue(product.catalog_product.is_active)
+        self.assertEqual(offer.review_status, 'approved')
+        self.assertTrue(offer.is_active)
+        self.assertEqual(offer.listing_product_id, product.catalog_product.public_product_id)
 
         catalog_response = APIClient().get(
             reverse('catalog-product-list'),
@@ -492,6 +495,55 @@ class SharedCatalogAPITests(APITestCase):
             [item['id'] for item in catalog_response.data],
             [product.catalog_product_id],
         )
+        self.assertIn(offer.listing_product_id, [
+            item['id'] for item in APIClient().get(reverse('product-list')).data['results']
+        ])
+
+    def test_approving_catalog_offer_repairs_unanchored_public_product(self):
+        public_product = Product.objects.create(
+            name=self.catalog_product.name,
+            category=self.category,
+            price=0,
+            stock=0,
+            catalog_product=self.catalog_product,
+            review_status='approved',
+            is_active=True,
+        )
+        self.catalog_product.public_product = public_product
+        self.catalog_product.save(update_fields=('public_product',))
+        offer = TraderProduct.objects.create(
+            trader=self.trader,
+            catalog_product=self.catalog_product,
+            name=self.catalog_product.name,
+            price='42000',
+            stock=3,
+            category=self.category,
+            review_status='pending_review',
+            is_active=True,
+        )
+        admin = get_user_model().objects.create_superuser(
+            email='offer-review-admin@example.com',
+            password='strong-pass-123',
+            name='Offer Review Admin',
+        )
+        admin_client = APIClient()
+        admin_client.force_authenticate(admin)
+
+        response = admin_client.post(
+            reverse('admin-trader-product-offer-review', args=[offer.uuid]),
+            {'review_status': 'approved'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        offer.refresh_from_db()
+        self.catalog_product.refresh_from_db()
+        self.assertEqual(offer.review_status, 'approved')
+        self.assertTrue(offer.is_active)
+        self.assertEqual(offer.listing_product_id, self.catalog_product.public_product_id)
+        self.assertTrue(offer.listing_product.is_catalog_anchor)
+        listing = APIClient().get(reverse('product-list'))
+        self.assertIn(offer.listing_product_id, [item['id'] for item in listing.data['results']])
 
     def test_trader_offer_does_not_take_ownership_of_shared_public_product(self):
         shared_image = 'catalog/shared-product-image'

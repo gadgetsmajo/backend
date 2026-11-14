@@ -594,6 +594,7 @@ class AdminTraderProductOffersView(APIView):
 class AdminTraderProductReviewView(APIView):
     permission_classes = (permissions.IsAdminUser,)
 
+    @transaction.atomic
     def post(self, request, offer_uuid):
         offer = get_object_or_404(
             TraderProduct.objects.select_related('trader', 'listing_product'),
@@ -624,6 +625,24 @@ class AdminTraderProductReviewView(APIView):
         else:
             offer.is_active = False
         offer.save(update_fields=('review_status', 'review_note', 'is_active', 'updated_at'))
+        if review_status == 'approved':
+            if offer.catalog_product_id:
+                _sync_to_product(offer)
+            else:
+                public_product = _sync_to_product(offer)
+                public_product.review_status = 'approved'
+                public_product.review_note = ''
+                public_product.is_active = offer.is_active
+                public_product.save(update_fields=('review_status', 'review_note', 'is_active'))
+                from products.catalog_sync import (
+                    ensure_catalog_public_product,
+                    sync_product_to_catalog,
+                )
+
+                catalog_product = sync_product_to_catalog(public_product, approve_existing=True)
+                offer.catalog_product = catalog_product
+                offer.listing_product = ensure_catalog_public_product(catalog_product)
+                offer.save(update_fields=('catalog_product', 'listing_product', 'updated_at'))
         from products.cache import invalidate_category_cache
 
         _invalidate_product_cache(offer.listing_product, offer.pk)

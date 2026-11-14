@@ -5,6 +5,7 @@ from html import escape
 from uuid import UUID
 
 from django.core.cache import cache
+from django.db import transaction
 from django.db.models import Avg, Case, Count, Exists, F, IntegerField, OuterRef, Prefetch, Q, Subquery, Sum, Value, When
 from django.db.models.functions import Coalesce, Least
 from django.http import HttpResponse
@@ -472,6 +473,7 @@ class ProductDetailView(generics.RetrieveUpdateDestroyAPIView):
 class ProductReviewStatusView(APIView):
     permission_classes = (permissions.IsAdminUser,)
 
+    @transaction.atomic
     def post(self, request, pk):
         product = get_object_or_404(
             Product.objects.select_related('trader', 'trader_product__trader'),
@@ -509,7 +511,21 @@ class ProductReviewStatusView(APIView):
             product.is_active = False
 
         product.save(update_fields=('review_status', 'review_note', 'is_active'))
-        sync_product_to_catalog(product, approve_existing=True)
+        catalog_product = sync_product_to_catalog(product, approve_existing=True)
+        if product.trader_product_id:
+            offer = product.trader_product
+            offer.review_status = review_status
+            offer.review_note = product.review_note
+            offer.is_active = product.is_active
+            update_fields = ['review_status', 'review_note', 'is_active', 'updated_at']
+            if review_status == 'approved':
+                from .catalog_sync import ensure_catalog_public_product
+
+                public_product = ensure_catalog_public_product(catalog_product)
+                offer.catalog_product = catalog_product
+                offer.listing_product = public_product
+                update_fields.extend(('catalog_product', 'listing_product'))
+            offer.save(update_fields=update_fields)
         invalidate_product_cache(product.pk)
         invalidate_category_cache()
         return Response(ProductSerializer(product, context={'request': request}).data)
