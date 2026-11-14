@@ -5,7 +5,7 @@ from html import escape
 from uuid import UUID
 
 from django.core.cache import cache
-from django.db.models import Avg, Count, Exists, F, IntegerField, OuterRef, Prefetch, Q, Subquery, Sum, Value
+from django.db.models import Avg, Case, Count, Exists, F, IntegerField, OuterRef, Prefetch, Q, Subquery, Sum, Value, When
 from django.db.models.functions import Coalesce
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
@@ -19,6 +19,7 @@ from rest_framework.views import APIView
 from .pagination import ProductPagination
 from .cache import invalidate_category_cache, invalidate_product_cache
 from .catalog_sync import sync_product_to_catalog
+from .listing import diversify_items, diversify_product_queryset
 from .models import Category, CategoryAttribute, Product, ProductImage, ProductVariant, FlashSale, ProductReview, ReviewImage
 from .serializers import (
     CategorySerializer, ProductSerializer, ProductImageSerializer,
@@ -273,8 +274,15 @@ class ProductListView(generics.ListCreateAPIView):
                 visible_seller = Q(trader__uuid=seller_uuid, trader__status='approved', trader__is_visible=True, trader__is_closed=False)
                 visible_seller |= Q(trader_product__trader__uuid=seller_uuid, trader_product__trader__status='approved', trader_product__trader__is_visible=True, trader_product__trader__is_closed=False)
             qs = qs.filter(visible_seller)
-        if not seller_uuid and not self.request.user.is_staff:
-            best_matching_offer = qs.order_by('price', 'pk').filter(
+        if not self.request.user.is_staff:
+            best_matching_offer = qs.annotate(
+                _seller_priority=Case(
+                    When(trader__isnull=False, then=Value(0)),
+                    When(trader_product__trader__isnull=False, then=Value(0)),
+                    default=Value(1),
+                    output_field=IntegerField(),
+                ),
+            ).order_by('_seller_priority', 'price', 'pk').filter(
                 catalog_product_id=OuterRef('catalog_product_id'),
             ).values('pk')[:1]
             qs = qs.filter(
@@ -288,9 +296,13 @@ class ProductListView(generics.ListCreateAPIView):
                     Value(0),
                     output_field=IntegerField(),
                 )
-            ).filter(bought_quantity__gt=0).order_by('-bought_quantity', '-created_at')
+            ).filter(bought_quantity__gt=0)
+            ordering = ('-bought_quantity', '-created_at', '-pk')
         else:
-            qs = qs.order_by('-created_at')
+            ordering = ('-created_at', '-pk')
+        qs = qs.order_by(*ordering)
+        if not self.request.query_params.get('ordering') and not self.request.user.is_staff:
+            qs = diversify_product_queryset(qs, ordering)
         return qs
 
     def perform_create(self, serializer):
@@ -550,7 +562,10 @@ class FlashSaleListCreateView(generics.ListCreateAPIView):
 
     def get_queryset(self):
         from django.utils import timezone
-        qs = FlashSale.objects.select_related('product__category').prefetch_related('product__images')
+        qs = FlashSale.objects.select_related(
+            'product__category', 'product__trader',
+            'product__trader_product__trader', 'product__catalog_product__category',
+        ).prefetch_related('product__images')
         if self.request.method == 'GET':
             qs = qs.filter(
                 product__is_active=True,
@@ -562,6 +577,10 @@ class FlashSaleListCreateView(generics.ListCreateAPIView):
                 qs = qs.filter(Q(product__trader=trader) | Q(product__trader_product__trader=trader))
         if self.request.query_params.get('active') == '1':
             qs = qs.filter(is_active=True, ends_at__gt=timezone.now())
+            qs = diversify_items(
+                qs.order_by('-created_at', '-pk'),
+                product_getter=lambda sale: sale.product,
+            )
         return qs
 
     def perform_create(self, serializer):

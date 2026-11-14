@@ -1323,7 +1323,7 @@ class BehaviourTrackView(APIView):
 
 class RecommendedProductsView(APIView):
     """
-    GET /api/auth/recommended/?page=1&page_size=12&exclude=1,2,3
+    GET /api/auth/recommended/?page=1&page_size=12&exclude=1,2,3&exclude_catalog=4,5
     Returns products ranked by the authenticated user's behaviour scores.
     Falls back to random order for guests.
     """
@@ -1332,7 +1332,9 @@ class RecommendedProductsView(APIView):
     def get(self, request):
         import random
         from products.models import Product
+        from products.listing import diversify_items
         from products.serializers import ProductSerializer
+        from products.visibility import public_marketplace_product_filter
 
         page = max(1, int(request.query_params.get('page', 1)))
         page_size = min(24, int(request.query_params.get('page_size', 12)))
@@ -1343,12 +1345,27 @@ class RecommendedProductsView(APIView):
             except ValueError:
                 pass
 
-        qs = Product.objects.filter(is_active=True).select_related('category').prefetch_related('images')
+        exclude_catalog_ids = set()
+        for x in request.query_params.get('exclude_catalog', '').split(','):
+            try:
+                exclude_catalog_ids.add(int(x.strip()))
+            except ValueError:
+                pass
+
+        qs = Product.objects.filter(
+            is_active=True,
+            review_status='approved',
+        ).filter(
+            public_marketplace_product_filter(),
+        ).select_related(
+            'category', 'trader', 'trader_product__trader', 'catalog_product__category',
+        ).prefetch_related('images')
         if exclude_ids:
             qs = qs.exclude(id__in=exclude_ids)
+        if exclude_catalog_ids:
+            qs = qs.exclude(catalog_product_id__in=exclude_catalog_ids)
 
         products = list(qs)
-        total = len(products)
 
         if request.user and request.user.is_authenticated:
             behaviour = getattr(request.user, 'behaviour', None)
@@ -1363,6 +1380,8 @@ class RecommendedProductsView(APIView):
         else:
             random.shuffle(products)
 
+        products = diversify_items(products)
+        total = len(products)
         start = (page - 1) * page_size
         page_products = products[start:start + page_size]
         has_next = (start + page_size) < total
@@ -1416,7 +1435,7 @@ class BehaviourTrackView(APIView):
 
 class RecommendedProductsView(APIView):
     """
-    GET /api/auth/recommended/?page=1&page_size=12&exclude=1,2,3
+    GET /api/auth/recommended/?page=1&page_size=12&exclude=1,2,3&exclude_catalog=4,5
     Returns products ranked by the authenticated user's behaviour scores.
     Falls back to random order for guests.
     """
@@ -1425,7 +1444,9 @@ class RecommendedProductsView(APIView):
     def get(self, request):
         import random
         from products.models import Product
+        from products.listing import diversify_items
         from products.serializers import ProductSerializer
+        from products.visibility import public_marketplace_product_filter
 
         page = max(1, int(request.query_params.get('page', 1)))
         page_size = min(24, int(request.query_params.get('page_size', 12)))
@@ -1436,12 +1457,27 @@ class RecommendedProductsView(APIView):
             except ValueError:
                 pass
 
-        qs = Product.objects.filter(is_active=True).select_related('category').prefetch_related('images')
+        exclude_catalog_ids = set()
+        for x in request.query_params.get('exclude_catalog', '').split(','):
+            try:
+                exclude_catalog_ids.add(int(x.strip()))
+            except ValueError:
+                pass
+
+        qs = Product.objects.filter(
+            is_active=True,
+            review_status='approved',
+        ).filter(
+            public_marketplace_product_filter(),
+        ).select_related(
+            'category', 'trader', 'trader_product__trader', 'catalog_product__category',
+        ).prefetch_related('images')
         if exclude_ids:
             qs = qs.exclude(id__in=exclude_ids)
+        if exclude_catalog_ids:
+            qs = qs.exclude(catalog_product_id__in=exclude_catalog_ids)
 
         products = list(qs)
-        total = len(products)
 
         if request.user and request.user.is_authenticated:
             behaviour = getattr(request.user, 'behaviour', None)
@@ -1456,6 +1492,8 @@ class RecommendedProductsView(APIView):
         else:
             random.shuffle(products)
 
+        products = diversify_items(products)
+        total = len(products)
         start = (page - 1) * page_size
         page_products = products[start:start + page_size]
         has_next = (start + page_size) < total

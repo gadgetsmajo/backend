@@ -1,5 +1,6 @@
 import importlib
 import json
+from datetime import timedelta
 from io import BytesIO
 from types import SimpleNamespace
 
@@ -9,11 +10,12 @@ from django.db import connection
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.urls import reverse
+from django.utils import timezone
 from rest_framework.test import APIClient, APITestCase
 from unittest.mock import patch
 
 from products.catalog import merge_catalog_products
-from products.models import CatalogProduct, CatalogVariant, Category, Product, ProductVariant
+from products.models import CatalogProduct, CatalogVariant, Category, FlashSale, Product, ProductVariant
 from traders.models import TraderApplication, TraderProduct
 
 
@@ -48,6 +50,40 @@ class SharedCatalogAPITests(APITestCase):
             specifications={'display': 'LCD'},
             identifiers={'mpn': 'M118A-UG'},
             image_references=['catalog/aneng-m118a-front'],
+            review_status='approved',
+            is_active=True,
+        )
+
+    def _create_visible_trader(self, index):
+        return TraderApplication.objects.create(
+            full_name=f'Diversification Seller {index}',
+            email=f'diversification-seller-{index}@example.com',
+            phone=f'07000000{index:02d}',
+            business_name=f'Diversification Shop {index}',
+            business_type='sole_proprietor',
+            location='Kampala',
+            product_categories='Meters',
+            status='approved',
+        )
+
+    def _create_catalog_offer(self, trader, product_index, price='10000'):
+        catalog_product = CatalogProduct.objects.create(
+            name=f'Diversification Product {product_index}',
+            brand='Diversify',
+            model=f'DV-{product_index}',
+            product_type='Test item',
+            category=self.category,
+            review_status='approved',
+            is_active=True,
+        )
+        return Product.objects.create(
+            name=catalog_product.name,
+            brand=catalog_product.brand,
+            category=self.category,
+            price=price,
+            stock=5,
+            trader=trader,
+            catalog_product=catalog_product,
             review_status='approved',
             is_active=True,
         )
@@ -691,6 +727,90 @@ class SharedCatalogAPITests(APITestCase):
         ids = [item['id'] for item in response.data['results']]
         self.assertIn(best_offer.pk, ids)
         self.assertNotIn(other_offer.pk, ids)
+
+    def test_public_product_list_mixes_sellers_across_distinct_catalog_products(self):
+        traders = [self.trader, self._create_visible_trader(2), self._create_visible_trader(3)]
+        offers = [
+            self._create_catalog_offer(trader, f'{trader.pk}-{index}')
+            for trader in traders
+            for index in range(2)
+        ]
+
+        response = self.client.get(reverse('product-list'), {'page_size': 6})
+
+        self.assertEqual(response.status_code, 200)
+        results = response.data['results']
+        self.assertEqual(len(results), len(offers))
+        self.assertEqual(len({item['catalog_product_id'] for item in results}), len(offers))
+        self.assertEqual(len({item['seller_uuid'] for item in results[:3]}), 3)
+
+    def test_flash_sale_list_deduplicates_catalog_products_and_mixes_sellers(self):
+        traders = [self.trader, self._create_visible_trader(2), self._create_visible_trader(3)]
+        offers = [
+            self._create_catalog_offer(trader, f'flash-{trader.pk}-{index}')
+            for trader in traders
+            for index in range(2)
+        ]
+        duplicated_offer = Product.objects.create(
+            name=offers[0].name,
+            brand=offers[0].brand,
+            category=self.category,
+            price='12000',
+            stock=5,
+            trader=traders[1],
+            catalog_product=offers[0].catalog_product,
+            review_status='approved',
+            is_active=True,
+        )
+        for offer in [*offers, duplicated_offer]:
+            FlashSale.objects.create(
+                product=offer,
+                flash_price='9000',
+                ends_at=timezone.now() + timedelta(hours=1),
+                stock_limit=5,
+            )
+        self.client.force_authenticate(user=None)
+
+        response = self.client.get(reverse('flash-sale-list'), {'active': '1'})
+
+        self.assertEqual(response.status_code, 200)
+        results = response.data.get('results', response.data)
+        catalog_ids = [item['product']['catalog_product_id'] for item in results]
+        self.assertEqual(len(catalog_ids), len(set(catalog_ids)))
+        self.assertEqual(len({item['product']['seller_uuid'] for item in results[:3]}), 3)
+
+    def test_recommendations_deduplicate_catalogs_and_exclude_seen_catalogs(self):
+        traders = [self.trader, self._create_visible_trader(2), self._create_visible_trader(3)]
+        offers = [
+            self._create_catalog_offer(trader, f'recommended-{trader.pk}-{index}')
+            for trader in traders
+            for index in range(2)
+        ]
+        duplicate = Product.objects.create(
+            name=offers[0].name,
+            brand=offers[0].brand,
+            category=self.category,
+            price='12000',
+            stock=5,
+            trader=traders[1],
+            catalog_product=offers[0].catalog_product,
+            review_status='approved',
+            is_active=True,
+        )
+        self.client.force_authenticate(user=None)
+
+        response = self.client.get(
+            reverse('recommended-products'),
+            {'page_size': 12, 'exclude_catalog': offers[0].catalog_product_id},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        results = response.data['results']
+        catalog_ids = [item['catalog_product_id'] for item in results]
+        self.assertNotIn(offers[0].catalog_product_id, catalog_ids)
+        self.assertEqual(len(catalog_ids), len(set(catalog_ids)))
+        self.assertEqual(len({item['seller_uuid'] for item in results[:3]}), 3)
+        self.assertNotIn(duplicate.pk, [item['id'] for item in results])
 
     def test_new_trader_offer_requires_an_approved_catalog_product(self):
         response = self.client.post(
