@@ -14,7 +14,7 @@ from unittest.mock import patch
 from rest_framework.test import APIClient
 
 from orders.models import Order, OrderItem
-from products.models import Category, CategoryAttribute, FlashSale, Product, ProductReview, ProductVariant
+from products.models import CatalogProduct, Category, CategoryAttribute, FlashSale, Product, ProductReview, ProductVariant
 from products.serializers import CategoryAttributeSerializer, CategorySerializer, FlashSaleSerializer, ProductSerializer
 from settings_app.models import PlatformSettings
 from traders.models import TraderApplication, TraderProduct
@@ -666,6 +666,55 @@ class FlashSalePermissionAPITest(TestCase):
 
         self.assertEqual(response.status_code, 201)
         self.assertEqual(response.data['product']['id'], self.product.id)
+
+    def test_trader_can_create_flash_sale_for_own_approved_catalog_offer(self):
+        catalog_product = CatalogProduct.objects.create(
+            name='Shared Flash Product',
+            category=self.category,
+            review_status='approved',
+            is_active=True,
+        )
+        anchor = Product.objects.create(
+            name=catalog_product.name,
+            category=self.category,
+            price=120000,
+            stock=10,
+            catalog_product=catalog_product,
+            review_status='approved',
+            is_active=True,
+            is_catalog_anchor=True,
+        )
+        catalog_product.public_product = anchor
+        catalog_product.save(update_fields=('public_product',))
+        offer = TraderProduct.objects.create(
+            trader=self.trader,
+            catalog_product=catalog_product,
+            listing_product=anchor,
+            name=catalog_product.name,
+            price=100000,
+            stock=10,
+            category=self.category,
+            review_status='pending_review',
+            is_active=True,
+        )
+        self.client.force_authenticate(user=self.trader_user)
+        payload = {
+            'product_id': anchor.id,
+            'flash_price': '90000',
+            'ends_at': '2099-01-01T12:00:00Z',
+            'stock_limit': 5,
+            'is_active': True,
+        }
+
+        pending_response = self.client.post(reverse('flash-sale-list'), payload, format='json')
+        self.assertEqual(pending_response.status_code, 403)
+
+        offer.review_status = 'approved'
+        offer.save(update_fields=('review_status',))
+        approved_response = self.client.post(reverse('flash-sale-list'), payload, format='json')
+
+        self.assertEqual(approved_response.status_code, 201)
+        self.assertEqual(approved_response.data['product']['id'], anchor.id)
 
     def test_superadmin_cannot_create_flash_sale_for_trader_product(self):
         self.client.force_authenticate(user=self.admin)

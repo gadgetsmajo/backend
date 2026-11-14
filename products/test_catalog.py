@@ -888,6 +888,28 @@ class SharedCatalogAPITests(APITestCase):
         self.assertEqual(len(catalog_ids), len(set(catalog_ids)))
         self.assertEqual(len({item['product']['catalog_product_id'] for item in results[:3]}), 3)
 
+    def test_trader_flash_sale_list_includes_catalog_anchor_for_its_offer_owner(self):
+        own_anchor = self._create_catalog_offer(self.trader, 'owned-flash-sale')
+        other_anchor = self._create_catalog_offer(self._create_visible_trader(2), 'other-flash-sale')
+        own_sale = FlashSale.objects.create(
+            product=own_anchor,
+            flash_price='9000',
+            ends_at=timezone.now() + timedelta(hours=1),
+            stock_limit=3,
+        )
+        FlashSale.objects.create(
+            product=other_anchor,
+            flash_price='8000',
+            ends_at=timezone.now() + timedelta(hours=1),
+            stock_limit=2,
+        )
+
+        response = self.client.get(reverse('flash-sale-list'))
+
+        self.assertEqual(response.status_code, 200)
+        sales = response.data.get('results', response.data)
+        self.assertEqual([sale['id'] for sale in sales], [own_sale.id])
+
     def test_recommendations_deduplicate_catalogs_and_exclude_seen_catalogs(self):
         traders = [self.trader, self._create_visible_trader(2), self._create_visible_trader(3)]
         offers = [

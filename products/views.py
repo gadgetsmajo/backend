@@ -73,6 +73,13 @@ class IsTraderProductOwner(permissions.BasePermission):
         if trader_app is None:
             return False
 
+        if product.is_catalog_anchor:
+            return product.trader_offers.filter(
+                trader=trader_app,
+                review_status='approved',
+                is_active=True,
+            ).exists()
+
         if product.trader_id == trader_app.id:
             return True
         return bool(product.trader_product and product.trader_product.trader_id == trader_app.id)
@@ -709,7 +716,16 @@ class FlashSaleListCreateView(generics.ListCreateAPIView):
         if self.request.user.is_authenticated and not self.request.user.is_staff:
             trader = getattr(self.request.user, 'trader_application', None)
             if trader:
-                qs = qs.filter(Q(product__trader=trader) | Q(product__trader_product__trader=trader))
+                qs = qs.filter(
+                    Q(product__trader=trader)
+                    | Q(product__trader_product__trader=trader)
+                    | Q(
+                        product__is_catalog_anchor=True,
+                        product__trader_offers__trader=trader,
+                        product__trader_offers__review_status='approved',
+                        product__trader_offers__is_active=True,
+                    )
+                ).distinct()
         if self.request.query_params.get('active') == '1':
             qs = qs.filter(is_active=True, ends_at__gt=timezone.now())
             qs = diversify_items(
