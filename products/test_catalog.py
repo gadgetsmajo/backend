@@ -431,6 +431,43 @@ class SharedCatalogAPITests(APITestCase):
             [product.catalog_product_id],
         )
 
+    def test_trader_offer_does_not_take_ownership_of_shared_public_product(self):
+        shared_image = 'catalog/shared-product-image'
+        shared_product = Product.objects.create(
+            name=self.catalog_product.name,
+            brand=self.catalog_product.brand,
+            category=self.category,
+            catalog_product=self.catalog_product,
+            price='30000',
+            stock=1,
+            image=shared_image,
+            review_status='approved',
+            is_active=True,
+        )
+        offer = TraderProduct.objects.create(
+            trader=self.trader,
+            catalog_product=self.catalog_product,
+            name=self.catalog_product.name,
+            price='49000',
+            stock=4,
+            category=self.category,
+            image=shared_image,
+            catalog_image_references=[shared_image],
+        )
+        sync_to_product = importlib.import_module('traders.views')._sync_to_product
+
+        trader_product = sync_to_product(offer)
+
+        shared_product.refresh_from_db()
+        self.assertNotEqual(trader_product.pk, shared_product.pk)
+        self.assertIsNone(shared_product.trader_id)
+        self.assertIsNone(shared_product.trader_product_id)
+        self.assertEqual(trader_product.trader_id, self.trader.pk)
+        self.assertEqual(trader_product.trader_product_id, offer.pk)
+        self.assertEqual(trader_product.catalog_product_id, self.catalog_product.pk)
+        self.assertEqual(trader_product.price, offer.price)
+        self.assertEqual(trader_product.stock, 4)
+
     def test_catalog_merge_reassigns_offers_without_deleting_public_product_ids(self):
         survivor = self.catalog_product
         duplicate = CatalogProduct.objects.create(

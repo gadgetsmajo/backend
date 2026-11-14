@@ -348,7 +348,8 @@ def _find_public_product_for_trader_product(trader_product):
     for candidate in Product.objects.filter(
         trader_product__isnull=True,
     ).filter(
-        Q(trader=trader_product.trader) | Q(trader__isnull=True)
+        Q(trader=trader_product.trader)
+        | Q(trader__isnull=True, catalog_product__isnull=True)
     ).order_by('pk').iterator():
         if candidate.image and str(candidate.image) == str(trader_product.image):
             image_matches.append(candidate)
