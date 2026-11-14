@@ -9,6 +9,7 @@ from .models import (
     AdvertisingWallet,
     AdvertisingWalletTransaction,
 )
+from .notifications import notify_campaign_status
 
 
 class CampaignOfferInline(admin.TabularInline):
@@ -25,6 +26,16 @@ class AdvertisingCampaignAdmin(admin.ModelAdmin):
     search_fields = ('name', 'trader__business_name', 'trader__email')
     readonly_fields = ('created_at', 'updated_at', 'reviewed_at')
     inlines = (CampaignOfferInline,)
+
+    def save_model(self, request, obj, form, change):
+        previous_status = None
+        if change:
+            previous_status = AdvertisingCampaign.objects.filter(pk=obj.pk).values_list(
+                'status', flat=True,
+            ).first()
+        super().save_model(request, obj, form, change)
+        if previous_status is not None and previous_status != obj.status:
+            notify_campaign_status(obj)
 
 
 @admin.register(AdvertisingWallet)

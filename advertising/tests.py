@@ -6,7 +6,7 @@ from rest_framework.test import APIClient
 
 from products.models import CatalogProduct, Category, Product
 from traders.models import TraderApplication, TraderProduct
-from users.models import User
+from users.models import Notification, User
 
 from .models import (
     AdvertisingCampaign,
@@ -150,6 +150,13 @@ class AdvertisingAPITests(TestCase):
         self.assertEqual(repeated.data['payment']['reference'], response.data['payment']['reference'])
         self.assertEqual(AdvertisingWallet.objects.get(trader=self.trader).balance, Decimal('1000.00'))
         self.assertEqual(AdvertisingPayment.objects.count(), 1)
+        self.assertEqual(
+            Notification.objects.filter(
+                user=self.owner,
+                title='Advertising wallet recharged',
+            ).count(),
+            1,
+        )
         payment_fields = {field.name for field in AdvertisingPayment._meta.fields}
         self.assertFalse({'card_number', 'cvv', 'expiry'}.intersection(payment_fields))
         self.assertEqual(set(response.data), {'payment', 'wallet'})
@@ -210,6 +217,11 @@ class AdvertisingAPITests(TestCase):
         self.assertEqual(row.catalog_product_id, self.catalog.pk)
         self.assertNotEqual(row.trader_offer_id, sibling.pk)
         self.assertEqual(campaign.status, AdvertisingCampaign.Status.PENDING_REVIEW)
+        admin_notification = Notification.objects.get(
+            user=self.admin,
+            title='Advertising campaign needs review',
+        )
+        self.assertEqual(admin_notification.action_url, '/admin/advertising')
 
         approval = self.admin_client.patch(
             f'/api/advertising/admin/campaigns/{campaign.pk}/',
@@ -220,6 +232,35 @@ class AdvertisingAPITests(TestCase):
         self.assertEqual(approval.data['campaign']['status'], AdvertisingCampaign.Status.PAUSED)
         # A campaign cannot spend until there are actual advertising funds.
         self.assertEqual(approval.data['campaign']['pause_reason'], 'insufficient_balance')
+        trader_notification = Notification.objects.get(
+            user=self.owner,
+            title='Advertising campaign paused',
+        )
+        self.assertIn('wallet needs funds', trader_notification.body)
+        self.assertEqual(trader_notification.action_url, f'/trader/{self.trader.uuid}/advertising')
+
+    @override_settings(DEBUG=True, PAYMENT_MODE='dummy', ADVERTISING_ENABLED=True, ADVERTISING_REQUIRE_APPROVAL=True)
+    def test_django_admin_campaign_status_change_notifies_trader(self):
+        from django.contrib import admin as django_admin
+
+        from .admin import AdvertisingCampaignAdmin
+
+        created = self.owner_client.post(
+            self.campaign_url,
+            self.campaign_payload(),
+            format='json',
+        )
+        campaign = AdvertisingCampaign.objects.get(pk=created.data['campaign']['id'])
+        campaign.status = AdvertisingCampaign.Status.REJECTED
+        campaign.rejection_reason = 'Product image needs review.'
+        campaign_admin = AdvertisingCampaignAdmin(AdvertisingCampaign, django_admin.site)
+        campaign_admin.save_model(None, campaign, None, True)
+
+        notification = Notification.objects.get(
+            user=self.owner,
+            title='Advertising campaign rejected',
+        )
+        self.assertIn('Product image needs review.', notification.body)
 
     @override_settings(DEBUG=True, PAYMENT_MODE='dummy', ADVERTISING_ENABLED=True, ADVERTISING_REQUIRE_APPROVAL=True)
     def test_click_charges_once_and_repeat_is_suspicious_without_charge(self):
@@ -433,6 +474,13 @@ class AdvertisingAPITests(TestCase):
         )
         self.assertEqual(response.status_code, 201)
         self.assertEqual(AdvertisingWalletTransaction.objects.get().reason, 'Approved billing correction')
+        self.assertEqual(
+            Notification.objects.filter(
+                user=self.owner,
+                title='Advertising wallet adjusted',
+            ).count(),
+            1,
+        )
         duplicate = self.admin_client.post(
             '/api/advertising/admin/wallet-adjustments/',
             {

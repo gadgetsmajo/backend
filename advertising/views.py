@@ -28,6 +28,11 @@ from .models import (
     AdvertisingWallet,
     AdvertisingWalletTransaction,
 )
+from .notifications import (
+    notify_advertising_admins,
+    notify_campaign_status,
+    notify_wallet_adjustment,
+)
 from .services import (
     IdempotencyConflict,
     PaymentConfigurationError,
@@ -460,6 +465,8 @@ class TraderAdvertisingCampaignsView(APIView):
                     trader_offer=offer,
                     catalog_product=offer.catalog_product,
                 )
+            if campaign.status == AdvertisingCampaign.Status.PENDING_REVIEW:
+                notify_advertising_admins(campaign)
         return Response({
             'campaign': _campaign_collection(
                 AdvertisingCampaign.objects.filter(pk=campaign.pk)
@@ -932,6 +939,7 @@ class AdminAdvertisingCampaignDetailView(APIView):
             campaign.save(update_fields=(
                 'status', 'pause_reason', 'rejection_reason', 'reviewed_by', 'reviewed_at', 'updated_at',
             ))
+            notify_campaign_status(campaign)
         return Response({
             'campaign': _campaign_collection(
                 AdvertisingCampaign.objects.filter(pk=campaign.pk),
@@ -999,6 +1007,12 @@ class AdminAdvertisingWalletAdjustmentsView(APIView):
                 idempotency_key=idempotency_key,
                 reason=reason[:2000],
                 created_by=request.user,
+            )
+            notify_wallet_adjustment(
+                trader,
+                amount=amount,
+                balance=new_balance,
+                reason=reason,
             )
         return Response({
             'transaction': {

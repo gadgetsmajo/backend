@@ -10,6 +10,7 @@ from django.db import IntegrityError, transaction
 from django.db.models import Sum
 from django.utils import timezone
 
+from .notifications import notify_advertising_trader, notify_campaign_status
 from .models import (
     AdvertisingCampaign,
     AdvertisingCampaignOffer,
@@ -76,6 +77,7 @@ def get_wallet(trader, *, lock=False):
 @transaction.atomic
 def reconcile_campaign(campaign_id):
     campaign = AdvertisingCampaign.objects.select_for_update().select_related('trader').get(pk=campaign_id)
+    previous_status = campaign.status
     daily_auto_paused = (
         campaign.status == AdvertisingCampaign.Status.PAUSED
         and campaign.pause_reason == 'daily_budget_exhausted'
@@ -125,6 +127,8 @@ def reconcile_campaign(campaign_id):
         campaign.status = next_status
         campaign.pause_reason = reason
         campaign.save(update_fields=('status', 'pause_reason', 'updated_at'))
+        if campaign.status != previous_status:
+            notify_campaign_status(campaign)
     return campaign
 
 
@@ -206,6 +210,14 @@ def recharge_wallet(trader, *, amount, idempotency_key, card_number, expiry, cvv
         idempotency_key=idempotency_key,
         payment=payment,
         reason='Advertising wallet recharge',
+    )
+    notify_advertising_trader(
+        trader,
+        title='Advertising wallet recharged',
+        body=(
+            f'UGX {amount:,.2f} was added to your advertising wallet. '
+            f'New balance: UGX {new_balance:,.2f}.'
+        ),
     )
     return _payment_result(payment, ledger_entry, previous_balance=new_balance - amount)
 
@@ -311,6 +323,7 @@ def record_click(*, campaign_offer_id, idempotency_key, request):
     if not campaign_offer:
         raise LookupError('Sponsored placement was not found.')
     campaign = AdvertisingCampaign.objects.select_for_update().get(pk=campaign_offer.campaign_id)
+    previous_campaign_status = campaign.status
     campaign_offer = AdvertisingCampaignOffer.objects.select_for_update().select_related(
         'trader_offer__trader', 'trader_offer__catalog_product', 'trader_offer__public_product',
     ).get(pk=campaign_offer.pk)
@@ -435,6 +448,8 @@ def record_click(*, campaign_offer_id, idempotency_key, request):
                     campaign.save(update_fields=('status', 'pause_reason', 'updated_at'))
                 if ledger.amount != -click.charged_amount:
                     raise IntegrityError('Advertising click ledger amount mismatch.')
+    if campaign.status != previous_campaign_status:
+        notify_campaign_status(campaign)
     try:
         public_product = offer.public_product
     except ObjectDoesNotExist:
