@@ -232,6 +232,17 @@ class SharedCatalogAPITests(APITestCase):
         self.assertEqual(product.review_status, 'approved')
         self.assertTrue(product.variants.filter(options={'voltage': '220V'}).exists())
         self.assertEqual(approved.data['request_offer_details']['price'], '180000.00')
+        offer = TraderProduct.objects.get(catalog_product=product, trader=self.trader)
+        self.assertEqual(offer.listing_product, product.public_product)
+        self.assertEqual(offer.price, Decimal('180000.00'))
+        self.assertEqual(offer.stock, 3)
+        self.assertEqual(offer.review_status, 'approved')
+        self.assertTrue(offer.is_active)
+        self.assertEqual(offer.variants.get().catalog_variant.options, {'voltage': '220V'})
+
+        self.client.force_authenticate(user=None)
+        listing = self.client.get(reverse('product-list'))
+        self.assertIn(product.public_product_id, [item['id'] for item in listing.data['results']])
 
     def test_admin_can_edit_request_before_approval_and_rejection_requires_reason(self):
         response = self.client.post(reverse('catalog-product-list'), {
@@ -899,6 +910,84 @@ class SharedCatalogAPITests(APITestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual([offer['id'] for offer in response.data], [listed.pk])
         self.assertEqual([offer['trader_offer_id'] for offer in response.data], [listed_offer.pk])
+
+    def test_in_stock_admin_catalog_anchor_without_trader_offer_is_visible(self):
+        listed = Product.objects.create(
+            name=self.catalog_product.name,
+            brand=self.catalog_product.brand,
+            category=self.category,
+            price='49000',
+            stock=4,
+            catalog_product=self.catalog_product,
+            review_status='approved',
+            is_active=True,
+            is_catalog_anchor=True,
+        )
+        self.catalog_product.public_product = listed
+        self.catalog_product.save(update_fields=('public_product',))
+        self.client.force_authenticate(user=None)
+
+        listing = self.client.get(reverse('product-list'))
+        self.assertEqual(listing.status_code, 200)
+        result = next(item for item in listing.data['results'] if item['id'] == listed.pk)
+        self.assertEqual(result['listed_price'], '49000.00')
+        self.assertEqual(result['stock'], 4)
+        self.assertEqual(result['seller_count'], 1)
+        self.assertEqual(result['seller_name'], 'Majo Gadgets')
+        available = self.client.get(reverse('product-list'), {'available': 'true'})
+        self.assertIn(listed.pk, [item['id'] for item in available.data['results']])
+        recommendations = self.client.get(reverse('recommended-products'))
+        self.assertEqual(recommendations.status_code, 200, recommendations.data)
+        recommendation_items = (
+            recommendations.data if isinstance(recommendations.data, list)
+            else recommendations.data.get('results', [])
+        )
+        self.assertIn(listed.pk, [item['id'] for item in recommendation_items])
+
+        offers = self.client.get(reverse(
+            'catalog-product-offers', kwargs={'pk': self.catalog_product.pk},
+        ))
+        self.assertEqual(offers.status_code, 200)
+        self.assertEqual(len(offers.data), 1)
+        self.assertEqual(offers.data[0]['id'], listed.pk)
+        self.assertIsNone(offers.data[0]['trader_offer_id'])
+
+    def test_existing_approved_catalog_request_gets_its_saved_offer_backfilled(self):
+        catalog = CatalogProduct.objects.create(
+            name='Backfilled catalog product',
+            brand='BenchCo',
+            model='BF-1',
+            category=self.category,
+            request_offer_details={'price': '18000.00', 'stock': 2},
+            review_status='approved',
+            is_active=True,
+            created_by=self.user,
+        )
+        anchor = Product.objects.create(
+            name=catalog.name,
+            category=self.category,
+            catalog_product=catalog,
+            price=0,
+            stock=0,
+            review_status='approved',
+            is_active=True,
+            is_catalog_anchor=True,
+        )
+        catalog.public_product = anchor
+        catalog.save(update_fields=('public_product',))
+        migration = importlib.import_module(
+            'products.migrations.0029_backfill_approved_catalog_request_offers',
+        )
+
+        migration.backfill_approved_catalog_request_offers(
+            apps,
+            SimpleNamespace(connection=connection),
+        )
+
+        offer = TraderProduct.objects.get(catalog_product=catalog, trader=self.trader)
+        self.assertEqual(offer.listing_product, anchor)
+        self.assertEqual(offer.price, Decimal('18000.00'))
+        self.assertEqual(offer.stock, 2)
 
     def test_offer_cannot_override_shared_catalog_details(self):
         response = self.client.post(

@@ -6,7 +6,7 @@ from uuid import UUID
 
 from django.core.cache import cache
 from django.db.models import Avg, Case, Count, Exists, F, IntegerField, OuterRef, Prefetch, Q, Subquery, Sum, Value, When
-from django.db.models.functions import Coalesce
+from django.db.models.functions import Coalesce, Least
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django_redis.exceptions import ConnectionInterrupted
@@ -193,6 +193,15 @@ def annotate_catalog_offer_metrics(queryset):
         _marketplace_price=Case(
             When(
                 is_catalog_anchor=True,
+                stock__gt=0,
+                price__gt=0,
+                then=Least(
+                    F('price'),
+                    Coalesce(Subquery(lowest_price), F('price')),
+                ),
+            ),
+            When(
+                is_catalog_anchor=True,
                 then=Coalesce(Subquery(lowest_price), F('price')),
             ),
             default=F('price'),
@@ -200,7 +209,7 @@ def annotate_catalog_offer_metrics(queryset):
         _marketplace_stock=Case(
             When(
                 is_catalog_anchor=True,
-                then=Coalesce(Subquery(total_stock), Value(0)),
+                then=Coalesce(Subquery(total_stock), F('stock')),
             ),
             default=F('stock'),
             output_field=IntegerField(),
@@ -256,7 +265,9 @@ class ProductListView(generics.ListCreateAPIView):
             ).filter(public_marketplace_product_filter())
             qs = qs.filter(
                 Q(catalog_product__isnull=True) | Q(is_catalog_anchor=True),
-                Q(is_catalog_anchor=False) | Q(_has_available_offer=True),
+                Q(is_catalog_anchor=False)
+                | Q(_has_available_offer=True)
+                | Q(stock__gt=0, price__gt=0),
             )
         category = self.request.query_params.get('category')
         if category:
@@ -289,7 +300,11 @@ class ProductListView(generics.ListCreateAPIView):
             qs = qs.filter(brand__icontains=brand.strip())
         available = self.request.query_params.get('available')
         if available == 'true':
-            qs = qs.filter(Q(is_catalog_anchor=False, stock__gt=0) | Q(_has_available_offer=True))
+            qs = qs.filter(
+                Q(is_catalog_anchor=False, stock__gt=0)
+                | Q(_has_available_offer=True)
+                | Q(is_catalog_anchor=True, stock__gt=0, price__gt=0)
+            )
         min_rating = self.request.query_params.get('min_rating')
         if min_rating:
             qs = qs.filter(rating__gte=min_rating)
@@ -584,7 +599,9 @@ def _get_recommended_products_for_user(user, limit=12):
     )
     qs = annotate_catalog_offer_metrics(qs).filter(
         Q(catalog_product__isnull=True) | Q(is_catalog_anchor=True),
-        Q(is_catalog_anchor=False) | Q(_has_available_offer=True),
+        Q(is_catalog_anchor=False)
+        | Q(_has_available_offer=True)
+        | Q(stock__gt=0, price__gt=0),
     ).order_by('-rating', '-created_at')
 
     if not user or not user.is_authenticated:

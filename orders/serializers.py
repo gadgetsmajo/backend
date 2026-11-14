@@ -126,10 +126,6 @@ class OrderSerializer(serializers.ModelSerializer):
                     raise serializers.ValidationError(
                         {'detail': f'The selected seller offer for "{product.name}" is no longer available.'}
                     )
-                if offer is None and product.is_catalog_anchor:
-                    raise serializers.ValidationError(
-                        {'detail': f'Choose an available seller offer for "{product.name}".'}
-                    )
                 variant = locked_variants.get(cart_item.variant_id)
                 if cart_item.variant_options and not variant:
                     raise serializers.ValidationError(
@@ -153,6 +149,17 @@ class OrderSerializer(serializers.ModelSerializer):
                 if variant and (product.requires_variant_selection or offer_requires_variant) and not product.variant_has_required_options(variant):
                     raise serializers.ValidationError(
                         {'detail': f'The selected option for "{product.name}" is incomplete.'}
+                    )
+                if (
+                    offer is None
+                    and product.is_catalog_anchor
+                    and (
+                        (variant.stock if variant else product.stock) <= 0
+                        or (variant.price if variant else product.price) <= 0
+                    )
+                ):
+                    raise serializers.ValidationError(
+                        {'detail': f'Choose an available seller offer for "{product.name}".'}
                     )
                 available_stock = variant.stock if variant else offer.stock if offer else product.stock
                 if cart_item.quantity < 1 or cart_item.quantity > 100 or available_stock < cart_item.quantity:

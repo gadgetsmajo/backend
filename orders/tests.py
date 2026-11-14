@@ -1211,6 +1211,34 @@ class SharedTraderOfferCheckoutTests(TestCase):
         )
         self.assertFalse(CartItem.objects.filter(user=self.user).exists())
 
+    def test_in_stock_catalog_anchor_can_be_purchased_without_a_trader_offer(self):
+        TraderProduct.objects.filter(pk__in=[offer.pk for offer in self.offers]).delete()
+        self.product.price = Decimal('15000.00')
+        self.product.stock = 4
+        self.product.save(update_fields=('price', 'stock'))
+
+        cart = self.client.post('/api/auth/cart/', {
+            'product_id': self.product.pk,
+            'quantity': 1,
+        }, format='json')
+        self.assertEqual(cart.status_code, 201, cart.data)
+        self.assertIsNone(cart.data['trader_offer_id'])
+
+        quote = self.client.post('/api/orders/quote/', {
+            'district_id': self.district.pk,
+        }, format='json')
+        self.assertEqual(quote.status_code, 200, quote.data)
+        self.assertEqual(quote.data['items'][0]['product_price'], Decimal('15000.00'))
+
+        response = self.client.post('/api/orders/', {
+            'district_id': self.district.pk,
+            'phone': '+256700000000',
+        }, format='json')
+        self.assertEqual(response.status_code, 201, response.data)
+        order_item = Order.objects.get(pk=response.data['id']).items.get()
+        self.assertIsNone(order_item.trader_offer_id)
+        self.assertEqual(order_item.seller_price, Decimal('15000.00'))
+
     @patch('orders.views._send_paid_order_followups')
     @patch('traders.wallet.record_paid_order_earnings')
     @patch('orders.views.http_requests.get')

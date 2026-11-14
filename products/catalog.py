@@ -1,6 +1,7 @@
 import json
 import re
 from difflib import SequenceMatcher
+from decimal import Decimal
 
 from django.core.serializers.json import DjangoJSONEncoder
 from django.db import IntegrityError, transaction
@@ -15,7 +16,7 @@ from .models import CatalogProduct, CatalogProductImage, CatalogVariant, Categor
 from .pagination import ProductPagination
 from .serializers import ProductSerializer, ProductVariantSerializer
 from .visibility import public_marketplace_product_filter
-from traders.models import TraderApplication
+from traders.models import TraderApplication, TraderProduct
 
 
 OFFER_ONLY_FIELDS = {
@@ -506,6 +507,66 @@ def _catalog_request_data(product, include_owner=False):
     return data
 
 
+def _create_initial_trader_offer(product):
+    if not product.created_by_id:
+        return None
+
+    trader = TraderApplication.objects.filter(
+        Q(user_id=product.created_by_id)
+        | Q(email__iexact=product.created_by.email),
+        status='approved',
+    ).filter(
+        Q(agreement_required=False) | Q(agreement_signed_at__isnull=False),
+    ).order_by('-created_at').first()
+    if not trader or TraderProduct.objects.filter(
+        trader=trader,
+        catalog_product=product,
+    ).exists():
+        return None
+
+    serializer = CatalogOfferRequestSerializer(data=product.request_offer_details)
+    serializer.is_valid(raise_exception=True)
+    offer_details = dict(serializer.validated_data)
+    variants = offer_details.pop('variants', [])
+    offer_details.pop('variant_image_indexes', None)
+    offer = TraderProduct.objects.create(
+        trader=trader,
+        catalog_product=product,
+        listing_product=product.public_product,
+        name=product.name,
+        short_description=product.short_description,
+        long_description=product.long_description,
+        description=product.long_description,
+        brand=product.brand,
+        category=product.category,
+        tags=product.tags,
+        specifications=product.specifications,
+        catalog_image_references=list(product.image_references or []),
+        review_status='approved',
+        is_active=True,
+        **offer_details,
+    )
+    created_variants = []
+    for data in variants:
+        variant_data = dict(data)
+        catalog_variant = CatalogVariant.objects.filter(
+            catalog_product=product,
+            options_key=CatalogVariant.make_options_key(variant_data['options']),
+        ).first()
+        variant_data.pop('image', None)
+        created_variants.append(ProductVariant.objects.create(
+            trader_product=offer,
+            catalog_variant=catalog_variant,
+            **variant_data,
+        ))
+    if created_variants:
+        offer.price = min(variant.price for variant in created_variants)
+        offer.stock = sum(variant.stock for variant in created_variants)
+        offer.save(update_fields=('price', 'stock', 'updated_at'))
+    return offer
+
+
+@transaction.atomic
 def _approve_catalog_request(product):
     references = list(product.image_references or [])
     for image in product.request_images.all():
@@ -557,6 +618,7 @@ def _approve_catalog_request(product):
     from .catalog_sync import ensure_catalog_public_product
 
     ensure_catalog_public_product(product)
+    _create_initial_trader_offer(product)
 
 
 class CatalogProductView(APIView):
@@ -779,6 +841,7 @@ class CatalogProductOffersView(APIView):
             catalog_product=catalog_product,
             is_active=True,
             review_status='approved',
+            stock__gt=0,
             trader__status='approved',
             trader__is_visible=True,
             trader__is_closed=False,
@@ -797,4 +860,11 @@ class CatalogProductOffersView(APIView):
                     public_product,
                     context={'request': request, 'trader_offer': offer},
                 ).data)
+        public_product = catalog_product.public_product
+        if public_product and public_product.price > 0 and public_product.stock > 0:
+            data.append(ProductSerializer(
+                public_product,
+                context={'request': request, 'direct_catalog_offer': True},
+            ).data)
+        data.sort(key=lambda item: (Decimal(item['listed_price']), item['id']))
         return Response(data)

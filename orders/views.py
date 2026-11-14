@@ -349,8 +349,6 @@ class CartQuoteView(APIView):
                 offer is None or offer.listing_product_id != product.pk
             ):
                 return Response({'detail': 'The selected seller offer is no longer available.'}, status=status.HTTP_400_BAD_REQUEST)
-            if offer is None and product.is_catalog_anchor:
-                return Response({'detail': 'Choose an available seller offer.'}, status=status.HTTP_400_BAD_REQUEST)
             variant = variants.get(requested_item['variant_id'])
             if requested_item['variant_required'] and not variant:
                 return Response(
@@ -376,6 +374,15 @@ class CartQuoteView(APIView):
                     {'detail': f'The selected option for "{product.name}" is incomplete.'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
+            if (
+                offer is None
+                and product.is_catalog_anchor
+                and (
+                    (variant.stock if variant else product.stock) <= 0
+                    or (variant.price if variant else product.price) <= 0
+                )
+            ):
+                return Response({'detail': 'Choose an available seller offer.'}, status=status.HTTP_400_BAD_REQUEST)
             quantity = requested_item['quantity']
             available_stock = variant.stock if variant else offer.stock if offer else product.stock
             if quantity > available_stock:

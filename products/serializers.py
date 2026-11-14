@@ -436,6 +436,8 @@ class ProductSerializer(serializers.ModelSerializer):
         if offer is not None:
             trader = offer.trader
             return str(trader.uuid) if trader.is_visible and not trader.is_closed else None
+        if self._has_direct_catalog_listing(obj):
+            return None
         trader = obj.trader or (obj.trader_product.trader if obj.trader_product_id else None)
         if (
             not trader
@@ -451,6 +453,10 @@ class ProductSerializer(serializers.ModelSerializer):
         if offer is not None:
             trader = offer.trader
             return trader.business_name if trader.is_visible and not trader.is_closed else None
+        if self.context.get('direct_catalog_offer') and self._has_direct_catalog_listing(obj):
+            return 'Majo Gadgets'
+        if self._has_direct_catalog_listing(obj):
+            return 'Majo Gadgets'
         trader = obj.trader or (obj.trader_product.trader if obj.trader_product_id else None)
         if (
             not trader
@@ -477,20 +483,30 @@ class ProductSerializer(serializers.ModelSerializer):
                 trader__status='approved',
                 trader__is_visible=True,
                 trader__is_closed=False,
+                stock__gt=0,
             ).select_related('trader')
         return [
             offer for offer in prefetched
             if offer.is_active
             and offer.review_status == 'approved'
+            and offer.stock > 0
             and offer.trader.status == 'approved'
             and offer.trader.is_visible
             and not offer.trader.is_closed
         ]
 
+    def _has_direct_catalog_listing(self, obj):
+        return bool(
+            obj.is_catalog_anchor
+            and obj.price > 0
+            and obj.stock > 0
+        )
+
     def get_seller_count(self, obj):
-        if self.context.get('trader_offer') is not None:
+        if self.context.get('trader_offer') is not None or self.context.get('direct_catalog_offer'):
             return 1
-        return len(self._catalog_offers(obj))
+        offers = self._catalog_offers(obj)
+        return len(offers) + int(self._has_direct_catalog_listing(obj))
 
     def get_trader_offer_id(self, obj):
         offer = self.context.get('trader_offer')
@@ -705,6 +721,17 @@ class ProductSerializer(serializers.ModelSerializer):
             rep['variants'] = ProductVariantSerializer(
                 offer.variants.all(), many=True, context=self.context,
             ).data
+        elif self.context.get('direct_catalog_offer'):
+            rep['price'] = str(price_with_platform_charges(instance.price))
+            rep['listed_price'] = str(instance.price)
+            rep['original_price'] = (
+                str(price_with_platform_charges(instance.original_price))
+                if instance.original_price else None
+            )
+            rep['original_listed_price'] = (
+                str(instance.original_price) if instance.original_price else None
+            )
+            rep['stock'] = instance.stock
         elif instance.trader_product_id:
             rep['variants'] = ProductVariantSerializer(
                 instance.trader_product.variants.all(),
@@ -713,19 +740,34 @@ class ProductSerializer(serializers.ModelSerializer):
             ).data
         elif instance.is_catalog_anchor:
             offers = self._catalog_offers(instance)
-            available_offers = [offer for offer in offers if offer.stock > 0]
-            if available_offers:
-                lowest_offer = min(available_offers, key=lambda offer: (offer.price, offer.pk))
-                rep['price'] = str(price_with_platform_charges(lowest_offer.price))
-                rep['listed_price'] = str(lowest_offer.price)
+            direct_listing = instance.price > 0 and instance.stock > 0
+            if offers or direct_listing:
+                lowest_price = min(
+                    [offer.price for offer in offers]
+                    + ([instance.price] if direct_listing else [])
+                )
+                lowest_offer = next(
+                    (offer for offer in offers if offer.price == lowest_price),
+                    None,
+                )
+                rep['price'] = str(price_with_platform_charges(lowest_price))
+                rep['listed_price'] = str(lowest_price)
                 rep['original_price'] = (
                     str(price_with_platform_charges(lowest_offer.original_price))
-                    if lowest_offer.original_price else None
+                    if lowest_offer and lowest_offer.original_price else (
+                        str(price_with_platform_charges(instance.original_price))
+                        if direct_listing and instance.price == lowest_price and instance.original_price else None
+                    )
                 )
                 rep['original_listed_price'] = (
-                    str(lowest_offer.original_price) if lowest_offer.original_price else None
+                    str(lowest_offer.original_price) if lowest_offer and lowest_offer.original_price else (
+                        str(instance.original_price)
+                        if direct_listing and instance.price == lowest_price and instance.original_price else None
+                    )
                 )
-                rep['stock'] = sum(offer.stock for offer in available_offers)
+                rep['stock'] = sum(offer.stock for offer in offers) + (
+                    instance.stock if direct_listing else 0
+                )
             else:
                 rep['price'] = '0.00'
                 rep['listed_price'] = '0.00'

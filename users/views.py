@@ -914,8 +914,6 @@ class CartView(APIView):
                 ).first()
                 if trader_offer is None:
                     return Response({'detail': 'The selected seller offer is unavailable.'}, status=status.HTTP_400_BAD_REQUEST)
-            elif product.is_catalog_anchor:
-                return Response({'detail': 'Choose a seller offer before adding this product to your cart.'}, status=status.HTTP_400_BAD_REQUEST)
 
             variant = None
             if variant_id is not None:
@@ -945,6 +943,15 @@ class CartView(APIView):
                 )
             stock = variant.stock if variant else trader_offer.stock if trader_offer else product.stock
             unit_price = variant.price if variant else trader_offer.price if trader_offer else product.price
+            if (
+                trader_offer is None
+                and product.is_catalog_anchor
+                and (stock <= 0 or unit_price <= 0)
+            ):
+                return Response(
+                    {'detail': 'Choose an available seller offer before adding this product to your cart.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             cart_items = CartItem.objects.select_for_update().filter(
                 user=request.user,
                 product_id=product.pk,
@@ -1023,8 +1030,6 @@ class CartItemView(APIView):
                     or trader_offer.trader.is_closed
                 ):
                     return Response({'detail': 'The selected seller offer is no longer available.'}, status=status.HTTP_400_BAD_REQUEST)
-            elif product.is_catalog_anchor:
-                return Response({'detail': 'Choose an available seller offer.'}, status=status.HTTP_400_BAD_REQUEST)
             if item.variant_options and not item.variant_id:
                 return Response({'detail': 'Select an available product option.'}, status=status.HTTP_400_BAD_REQUEST)
             offer_requires_variant = (
@@ -1051,6 +1056,15 @@ class CartItemView(APIView):
             else:
                 stock = trader_offer.stock if trader_offer else product.stock
                 unit_price = trader_offer.price if trader_offer else product.price
+            if (
+                trader_offer is None
+                and product.is_catalog_anchor
+                and (stock <= 0 or unit_price <= 0)
+            ):
+                return Response(
+                    {'detail': 'Choose an available seller offer.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             if quantity > stock:
                 return Response(
                     {'detail': f'Not enough stock for "{product.name}". Available: {stock}.'},
