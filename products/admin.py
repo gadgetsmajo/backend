@@ -5,8 +5,9 @@ from django.db.models import Sum
 from django.forms.models import BaseInlineFormSet
 from django.template.response import TemplateResponse
 from django.utils import timezone
-from .cache import invalidate_category_cache
+from .cache import invalidate_category_cache, invalidate_product_cache
 from .catalog import merge_catalog_products
+from .catalog_sync import sync_product_to_catalog
 from .models import (
     CatalogProduct, CatalogVariant, Category, CategoryAttribute, Product, ProductVariant, ProductReview,
     ReviewImage,
@@ -123,6 +124,12 @@ class ProductAdmin(admin.ModelAdmin):
                     trader_product.stock = formset.instance.stock
                     trader_product.save(update_fields=('price', 'stock', 'updated_at'))
             invalidate_category_cache()
+
+    def save_related(self, request, form, formsets, change):
+        super().save_related(request, form, formsets, change)
+        if form.instance.trader_id is None and form.instance.trader_product_id is None:
+            sync_product_to_catalog(form.instance)
+        invalidate_product_cache(form.instance.pk)
 
     def delete_model(self, request, obj):
         super().delete_model(request, obj)

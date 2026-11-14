@@ -112,21 +112,23 @@ class CatalogProduct(models.Model):
 
     @staticmethod
     def normalize_identity(value):
-        return ' '.join(re.findall(r'[a-z0-9]+', (value or '').casefold()))
+        return ' '.join(re.findall(r'[a-z0-9]+', str(value or '').casefold()))
+
+    @classmethod
+    def make_identity_key(cls, name, brand='', model='', identifiers=None):
+        brand_key = cls.normalize_identity(brand)
+        identifiers = identifiers if isinstance(identifiers, dict) else {}
+        for key in ('gtin', 'barcode', 'ean', 'isbn', 'mpn', 'manufacturer_part_number'):
+            value = cls.normalize_identity(identifiers.get(key))
+            if value:
+                return f'{key}|{value}'[:255]
+        model_key = cls.normalize_identity(model) or cls.normalize_identity(name)
+        return f'{brand_key}|{model_key}'[:255]
 
     def save(self, *args, **kwargs):
-        brand_key = self.normalize_identity(self.brand)
-        identifiers = self.identifiers if isinstance(self.identifiers, dict) else {}
-        identity = ''
-        for key in ('gtin', 'barcode', 'ean', 'isbn', 'mpn', 'manufacturer_part_number'):
-            value = self.normalize_identity(identifiers.get(key))
-            if value:
-                identity = f'{key}|{value}'
-                break
-        if not identity:
-            model_key = self.normalize_identity(self.model) or self.normalize_identity(self.name)
-            identity = f'{brand_key}|{model_key}'
-        self.identity_key = identity[:255]
+        self.identity_key = self.make_identity_key(
+            self.name, self.brand, self.model, self.identifiers,
+        )
         super().save(*args, **kwargs)
 
     def __str__(self):

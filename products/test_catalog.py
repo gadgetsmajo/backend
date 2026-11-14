@@ -282,6 +282,134 @@ class SharedCatalogAPITests(APITestCase):
         self.assertEqual(legacy.catalog_product.variant_options, [{'color': 'Red'}])
         self.assertEqual(offer.catalog_image_references, ['catalog/legacy-m118a-front'])
 
+    def test_follow_up_migration_links_products_created_after_original_backfill(self):
+        offer = TraderProduct.objects.create(
+            trader=self.trader,
+            name='Post-backfill multimeter offer',
+            price='45000',
+            stock=3,
+            category=self.category,
+        )
+        product = Product.objects.create(
+            name='Post-backfill multimeter',
+            brand='BenchCo',
+            category=self.category,
+            price='45000',
+            stock=3,
+            trader=self.trader,
+            trader_product=offer,
+            specifications={'model_number': 'POST-BACKFILL-1'},
+            review_status='approved',
+            is_active=True,
+        )
+        Product.objects.filter(pk=product.pk).update(image='catalog/post-backfill-front')
+        ProductVariant.objects.create(
+            product=product,
+            sku='POST-BACKFILL-RED',
+            options={'color': 'Red'},
+            price='45000',
+            stock=3,
+        )
+        migration = importlib.import_module(
+            'products.migrations.0027_link_products_to_shared_catalog'
+        )
+
+        migration.link_products_to_shared_catalog(apps, SimpleNamespace(connection=connection))
+
+        product.refresh_from_db()
+        offer.refresh_from_db()
+        self.assertIsNotNone(product.catalog_product_id)
+        self.assertEqual(offer.catalog_product_id, product.catalog_product_id)
+        self.assertEqual(product.catalog_product.image_references, ['catalog/post-backfill-front'])
+        self.assertEqual(product.catalog_product.variant_options, [{'color': 'Red'}])
+        self.assertEqual(offer.catalog_image_references, ['catalog/post-backfill-front'])
+
+    def test_admin_product_creation_adds_product_to_shared_catalog(self):
+        admin = get_user_model().objects.create_superuser(
+            email='catalog-product-admin@example.com',
+            password='strong-pass-123',
+            name='Catalog Product Admin',
+        )
+        self.client.force_authenticate(admin)
+
+        response = self.client.post(reverse('product-list'), {
+            'name': 'Admin Shared Catalog Tester',
+            'brand': 'BenchCo',
+            'category_id': self.category.id,
+            'price': '45000',
+            'stock': 3,
+            'specifications': {'model_number': 'ADMIN-TEST-1'},
+        }, format='json')
+
+        self.assertEqual(response.status_code, 201, response.data)
+        product = Product.objects.get(pk=response.data['id'])
+        self.assertIsNotNone(product.catalog_product_id)
+        self.assertEqual(product.catalog_product.model, 'ADMIN-TEST-1')
+        self.assertEqual(product.catalog_product.review_status, 'approved')
+
+        new_trader_client = APIClient()
+        new_trader_client.force_authenticate(self.user)
+        catalog_response = new_trader_client.get(
+            reverse('catalog-product-list'),
+            {'q': 'ADMIN-TEST-1'},
+        )
+        self.assertEqual(catalog_response.status_code, 200)
+        self.assertEqual(
+            [item['id'] for item in catalog_response.data],
+            [product.catalog_product_id],
+        )
+
+    def test_approved_trader_product_is_added_to_shared_catalog(self):
+        offer = TraderProduct.objects.create(
+            trader=self.trader,
+            name='Trader Shared Catalog Tester',
+            price='45000',
+            stock=3,
+            category=self.category,
+        )
+        product = Product.objects.create(
+            name='Trader Shared Catalog Tester',
+            brand='BenchCo',
+            category=self.category,
+            price='45000',
+            stock=3,
+            trader=self.trader,
+            trader_product=offer,
+            specifications={'model_number': 'TRADER-TEST-1'},
+            review_status='pending_review',
+            is_active=False,
+        )
+        admin = get_user_model().objects.create_superuser(
+            email='catalog-review-admin@example.com',
+            password='strong-pass-123',
+            name='Catalog Review Admin',
+        )
+        self.client.force_authenticate(admin)
+
+        response = self.client.post(
+            reverse('product-review-status', args=[product.pk]),
+            {'review_status': 'approved'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        product.refresh_from_db()
+        offer.refresh_from_db()
+        self.assertIsNotNone(product.catalog_product_id)
+        self.assertEqual(offer.catalog_product_id, product.catalog_product_id)
+        self.assertEqual(product.catalog_product.review_status, 'approved')
+        self.assertTrue(product.catalog_product.is_active)
+
+        catalog_response = APIClient().get(
+            reverse('catalog-product-list'),
+            {'q': 'TRADER-TEST-1'},
+        )
+        self.assertEqual(catalog_response.status_code, 200)
+        self.assertEqual(
+            [item['id'] for item in catalog_response.data],
+            [product.catalog_product_id],
+        )
+
     def test_catalog_merge_reassigns_offers_without_deleting_public_product_ids(self):
         survivor = self.catalog_product
         duplicate = CatalogProduct.objects.create(

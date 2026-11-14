@@ -17,7 +17,8 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .pagination import ProductPagination
-from .cache import invalidate_category_cache
+from .cache import invalidate_category_cache, invalidate_product_cache
+from .catalog_sync import sync_product_to_catalog
 from .models import Category, CategoryAttribute, Product, ProductImage, ProductVariant, FlashSale, ProductReview, ReviewImage
 from .serializers import (
     CategorySerializer, ProductSerializer, ProductImageSerializer,
@@ -32,15 +33,6 @@ from users.models import UserBehaviour
 
 CATEGORY_CACHE_TTL = 60 * 30  # 30 minutes
 logger = logging.getLogger(__name__)
-
-
-def _invalidate_product_cache(product_id=None):
-    try:
-        cache.delete('products:list')
-        if product_id is not None:
-            cache.delete(f'products:detail:{product_id}')
-    except (ConnectionInterrupted, RedisError):
-        logger.exception('Product cache invalidation failed for product %s.', product_id)
 
 
 class IsTraderProductOwner(permissions.BasePermission):
@@ -306,6 +298,9 @@ class ProductListView(generics.ListCreateAPIView):
         product = serializer.save(**(({'image': cover}) if cover else {}))
         for i, img in enumerate(self.request.FILES.getlist('images')):
             ProductImage.objects.create(product=product, image=img, order=i)
+        if self.request.user.is_staff:
+            sync_product_to_catalog(product)
+        invalidate_product_cache(product.pk)
         invalidate_category_cache()
 
 
@@ -373,13 +368,15 @@ class ProductDetailView(generics.RetrieveUpdateDestroyAPIView):
             start = product.images.count()
             for i, img in enumerate(files):
                 ProductImage.objects.create(product=product, image=img, order=start + i)
-        _invalidate_product_cache(product.pk)
+        if self.request.user.is_staff:
+            sync_product_to_catalog(product)
+        invalidate_product_cache(product.pk)
         invalidate_category_cache()
 
     def perform_destroy(self, instance):
         product_id = instance.pk
         instance.delete()
-        _invalidate_product_cache(product_id)
+        invalidate_product_cache(product_id)
         invalidate_category_cache()
 
 
@@ -423,7 +420,9 @@ class ProductReviewStatusView(APIView):
             product.is_active = False
 
         product.save(update_fields=('review_status', 'review_note', 'is_active'))
-        _invalidate_product_cache(product.pk)
+        sync_product_to_catalog(product, approve_existing=True)
+        invalidate_product_cache(product.pk)
+        invalidate_category_cache()
         return Response(ProductSerializer(product, context={'request': request}).data)
 
 
