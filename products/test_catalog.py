@@ -957,6 +957,16 @@ class SharedCatalogAPITests(APITestCase):
             review_status='approved',
             is_active=True,
         )
+        unlinked_offer = TraderProduct.objects.create(
+            trader=self._create_visible_trader(2),
+            catalog_product=self.catalog_product,
+            name=self.catalog_product.name,
+            price='47000',
+            stock=6,
+            category=self.category,
+            review_status='approved',
+            is_active=True,
+        )
         TraderProduct.objects.create(
             trader=self.trader,
             catalog_product=self.catalog_product,
@@ -973,8 +983,12 @@ class SharedCatalogAPITests(APITestCase):
         ))
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual([offer['id'] for offer in response.data], [listed.pk])
-        self.assertEqual([offer['trader_offer_id'] for offer in response.data], [listed_offer.pk])
+        self.assertEqual([offer['id'] for offer in response.data], [listed.pk, listed.pk])
+        self.assertEqual(
+            [offer['trader_offer_id'] for offer in response.data],
+            [listed_offer.pk, unlinked_offer.pk],
+        )
+        self.assertEqual(response.data[1]['seller_name'], unlinked_offer.trader.business_name)
 
     def test_in_stock_admin_catalog_anchor_without_trader_offer_is_visible(self):
         listed = Product.objects.create(

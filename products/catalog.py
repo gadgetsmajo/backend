@@ -854,7 +854,11 @@ class CatalogProductOffersView(APIView):
         ).order_by('price', 'pk')
         data = []
         for offer in offers:
-            public_product = offer.listing_product or offer.public_product
+            public_product = (
+                offer.listing_product
+                or offer.public_product
+                or catalog_product.public_product
+            )
             if public_product:
                 data.append(ProductSerializer(
                     public_product,
