@@ -705,8 +705,18 @@ class SponsoredPlacementsView(APIView):
                 continue
             product = _linked_public_product(row.trader_offer)
             candidates.append((row, product, _placement_relevance(row, q.split())))
+        seen_offer_ids = set(AdvertisingImpression.objects.filter(
+            campaign_offer_id__in=[row.pk for row, _, _ in candidates],
+            visitor_hash=visitor_hash(request),
+            impression_date=timezone.localdate(),
+        ).values_list('campaign_offer_id', flat=True))
         candidates.sort(
-            key=lambda item: (-item[2], -item[0].campaign.max_cpc, item[0].pk)
+            key=lambda item: (
+                item[0].pk in seen_offer_ids,
+                -item[2],
+                -item[0].campaign.max_cpc,
+                item[0].pk,
+            )
         )
         results = []
         for row, product, _ in candidates[:limit]:

@@ -291,6 +291,73 @@ class AdvertisingAPITests(TestCase):
         self.assertEqual(AdvertisingClick.objects.filter(status='valid').count(), 1)
 
     @override_settings(DEBUG=True, PAYMENT_MODE='dummy', ADVERTISING_ENABLED=True, ADVERTISING_REQUIRE_APPROVAL=True)
+    def test_public_placements_prioritize_offers_without_a_viewer_impression(self):
+        second_catalog = CatalogProduct.objects.create(
+            name='Test USB power adapter',
+            brand='Majo',
+            model='USB-12V',
+            category=self.category,
+            image_references=['https://images.example.test/adapter.jpg'],
+            review_status='approved',
+            is_active=True,
+        )
+        second_offer = TraderProduct.objects.create(
+            trader=self.trader,
+            catalog_product=second_catalog,
+            name='Test USB power adapter',
+            price=Decimal('25000.00'),
+            stock=5,
+            category=self.category,
+            image_url='https://images.example.test/adapter.jpg',
+            is_active=True,
+        )
+        Product.objects.create(
+            name=second_offer.name,
+            category=self.category,
+            price=second_offer.price,
+            stock=second_offer.stock,
+            trader=self.trader,
+            trader_product=second_offer,
+            catalog_product=second_catalog,
+            is_active=True,
+            review_status='approved',
+        )
+        self._recharge()
+        created = self.owner_client.post(
+            self.campaign_url,
+            self.campaign_payload(offer_ids=[self.offer.pk, second_offer.pk]),
+            format='json',
+        )
+        campaign_id = created.data['campaign']['id']
+        self.admin_client.patch(
+            f'/api/advertising/admin/campaigns/{campaign_id}/',
+            {'action': 'approve'},
+            format='json',
+        )
+        campaign_offers = {
+            row.trader_offer_id: row
+            for row in AdvertisingCampaignOffer.objects.filter(campaign_id=campaign_id)
+        }
+        seen_offer = campaign_offers[self.offer.pk]
+        unseen_offer = campaign_offers[second_offer.pk]
+        session_header = {'HTTP_X_ADVERTISING_SESSION': 'rotation-session'}
+        self.buyer_client.post(
+            '/api/advertising/impressions/',
+            {'campaign_offer_ids': [seen_offer.pk]},
+            format='json',
+            **session_header,
+        )
+
+        response = self.buyer_client.get(
+            f'/api/advertising/placements/?product={self.public_product.slug}&limit=2',
+            **session_header,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.data['results']), 2)
+        self.assertEqual(response.data['results'][0]['campaign_offer_id'], unseen_offer.pk)
+
+    @override_settings(DEBUG=True, PAYMENT_MODE='dummy', ADVERTISING_ENABLED=True, ADVERTISING_REQUIRE_APPROVAL=True)
     def test_self_click_and_insufficient_funds_do_not_charge(self):
         self._recharge(amount='100.00', key='small-deposit')
         created = self.owner_client.post(self.campaign_url, self.campaign_payload(), format='json')
