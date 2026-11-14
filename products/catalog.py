@@ -12,6 +12,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import CatalogProduct, CatalogProductImage, CatalogVariant, Category, Product, ProductVariant
+from .pagination import ProductPagination
 from .serializers import ProductSerializer, ProductVariantSerializer
 from .visibility import public_marketplace_product_filter
 from traders.models import TraderApplication
@@ -617,6 +618,22 @@ class CatalogProductView(APIView):
             },
             status=status.HTTP_201_CREATED,
         )
+
+
+class CatalogProductBrowseView(APIView):
+    """Paginated view of approved catalog products available to traders."""
+
+    permission_classes = (permissions.AllowAny,)
+
+    def get(self, request):
+        products = CatalogProduct.objects.filter(
+            review_status='approved',
+            is_active=True,
+        ).select_related('category').prefetch_related('variants').order_by('-updated_at', '-pk')
+        paginator = ProductPagination()
+        page = paginator.paginate_queryset(products, request, view=self)
+        serializer = CatalogProductSerializer(page, many=True)
+        return paginator.get_paginated_response(serializer.data)
 
 
 class CatalogProductRequestsView(APIView):

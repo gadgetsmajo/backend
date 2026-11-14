@@ -65,6 +65,27 @@ class SharedCatalogAPITests(APITestCase):
         self.assertEqual([item['id'] for item in response.data], [self.catalog_product.id])
         self.assertEqual(response.data[0]['image_references'], ['catalog/aneng-m118a-front'])
 
+    def test_browse_returns_approved_catalog_products_and_hides_unapproved(self):
+        CatalogProduct.objects.create(
+            name='Pending Product',
+            model='PENDING-1',
+            review_status='pending_review',
+            is_active=False,
+        )
+        CatalogProduct.objects.create(
+            name='Disabled Product',
+            model='DISABLED-1',
+            review_status='disabled',
+            is_active=False,
+        )
+
+        response = self.client.get(reverse('catalog-product-browse'))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['count'], 1)
+        self.assertEqual([item['id'] for item in response.data['results']], [self.catalog_product.id])
+        self.assertEqual(response.data['results'][0]['image_references'], ['catalog/aneng-m118a-front'])
+
     def test_new_catalog_requests_are_pending_and_exclude_offer_fields(self):
         response = self.client.post(reverse('catalog-product-list'), {
             'name': 'Bench Power Supply BX-1',

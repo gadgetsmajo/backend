@@ -10,13 +10,14 @@ from .views import (
     MyReviewsView, RecommendedProductsView,
 )
 from .catalog import (
-    AdminCatalogProductRequestsView, CatalogProductOffersView, CatalogProductRequestsView,
-    CatalogProductView,
+    AdminCatalogProductRequestsView, CatalogProductBrowseView, CatalogProductOffersView,
+    CatalogProductRequestsView, CatalogProductView,
 )
 
 urlpatterns = [
     path('', ProductListView.as_view(), name='product-list'),
     path('catalog/', CatalogProductView.as_view(), name='catalog-product-list'),
+    path('catalog/browse/', CatalogProductBrowseView.as_view(), name='catalog-product-browse'),
     path('catalog/requests/', CatalogProductRequestsView.as_view(), name='catalog-product-requests'),
     path('catalog/requests/<int:pk>/', AdminCatalogProductRequestsView.as_view(), name='admin-catalog-product-request'),
     path('catalog/admin/requests/', AdminCatalogProductRequestsView.as_view(), name='admin-catalog-product-requests'),
