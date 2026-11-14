@@ -7,7 +7,7 @@ from django.template.response import TemplateResponse
 from django.utils import timezone
 from .cache import invalidate_category_cache, invalidate_product_cache
 from .catalog import merge_catalog_products
-from .catalog_sync import sync_product_to_catalog
+from .catalog_sync import ensure_catalog_public_product, sync_product_to_catalog
 from .models import (
     CatalogProduct, CatalogVariant, Category, CategoryAttribute, Product, ProductVariant, ProductReview,
     ReviewImage,
@@ -172,6 +172,8 @@ class CatalogProductAdmin(admin.ModelAdmin):
                         defaults={'options': options, 'position': position},
                     )
         queryset.update(review_status='approved', is_active=True, review_note='')
+        for product in queryset:
+            ensure_catalog_public_product(product)
 
     @admin.action(description='Disable selected catalog products')
     def disable_catalog_products(self, request, queryset):

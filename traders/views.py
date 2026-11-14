@@ -12,6 +12,7 @@ from django.core.exceptions import ObjectDoesNotExist
 from django.core.serializers.json import DjangoJSONEncoder
 from django.db import transaction
 from django.db.models import Sum
+from django.shortcuts import get_object_or_404
 from django.http import HttpResponse
 from django.db.models import Avg, Count, F, Q
 from django_redis.exceptions import ConnectionInterrupted
@@ -375,8 +376,35 @@ def _invalidate_product_cache(product, trader_product_id):
 @transaction.atomic
 def _sync_to_product(trader_product):
     from products.cache import invalidate_category_cache
+    from products.catalog_sync import ensure_catalog_public_product
 
     catalog_product = trader_product.catalog_product if trader_product.catalog_product_id else None
+    if catalog_product:
+        product = ensure_catalog_public_product(catalog_product)
+        if trader_product.listing_product_id != product.pk:
+            trader_product.listing_product = product
+            trader_product.save(update_fields=('listing_product', 'updated_at'))
+
+        submitted_variants = getattr(trader_product, '_submitted_variants', None)
+        if submitted_variants is not None:
+            sync_product_variants(trader_product, submitted_variants)
+            if submitted_variants:
+                trader_product.price = min(variant['price'] for variant in submitted_variants)
+                trader_product.stock = sum(variant['stock'] for variant in submitted_variants)
+                trader_product.save(update_fields=('price', 'stock', 'updated_at'))
+
+        submit_for_review = getattr(trader_product, '_submit_for_review', None)
+        if submit_for_review is not None and trader_product.review_status in (
+            'draft', 'rejected', 'changes_required',
+        ):
+            trader_product.review_status = 'pending_review' if submit_for_review else 'draft'
+            trader_product.review_note = ''
+            trader_product.save(update_fields=('review_status', 'review_note', 'updated_at'))
+
+        _invalidate_product_cache(product, trader_product.pk)
+        invalidate_category_cache()
+        return product
+
     shared_image_reference = None
     if catalog_product:
         selected_references = trader_product.catalog_image_references
@@ -439,15 +467,14 @@ def _sync_to_product(trader_product):
 
     submitted_variants = getattr(trader_product, '_submitted_variants', None)
     if submitted_variants is not None:
-        sync_product_variants(product, submitted_variants)
+        sync_product_variants(trader_product, submitted_variants)
         if submitted_variants:
-            product.price = min(variant['price'] for variant in submitted_variants)
-            product.stock = sum(variant['stock'] for variant in submitted_variants)
+            trader_product.price = min(variant['price'] for variant in submitted_variants)
+            trader_product.stock = sum(variant['stock'] for variant in submitted_variants)
+            trader_product.save(update_fields=('price', 'stock', 'updated_at'))
+            product.price = trader_product.price
+            product.stock = trader_product.stock
             product.save(update_fields=('price', 'stock'))
-            if trader_product.price != product.price or trader_product.stock != product.stock:
-                trader_product.price = product.price
-                trader_product.stock = product.stock
-                trader_product.save(update_fields=('price', 'stock', 'updated_at'))
 
     _invalidate_product_cache(product, trader_product.pk)
     invalidate_category_cache()
@@ -477,7 +504,10 @@ class TraderProductListView(APIView):
                 {'catalog_product_id': 'Select an approved shared catalog product before creating an offer.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        serializer = TraderProductSerializer(data=request.data, context={'request': request})
+        serializer = TraderProductSerializer(
+            data=request.data,
+            context={'request': request, 'trader': trader},
+        )
         serializer.is_valid(raise_exception=True)
         image_file = request.FILES.get('image')
         extra = {'image': image_file} if image_file else {}
@@ -513,7 +543,12 @@ class TraderProductDetailView(APIView):
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         if not _is_trader_owner(request, trader):
             return Response({'detail': 'Forbidden.'}, status=status.HTTP_403_FORBIDDEN)
-        serializer = TraderProductSerializer(product, data=request.data, partial=True, context={'request': request})
+        serializer = TraderProductSerializer(
+            product,
+            data=request.data,
+            partial=True,
+            context={'request': request, 'trader': trader},
+        )
         serializer.is_valid(raise_exception=True)
         image_file = request.FILES.get('image')
         extra = {'image': image_file} if image_file else {}
@@ -529,14 +564,71 @@ class TraderProductDetailView(APIView):
             return Response({'detail': 'Forbidden.'}, status=status.HTTP_403_FORBIDDEN)
         with transaction.atomic():
             pub = _find_public_product_for_trader_product(product)
-            if pub:
+            product.is_active = False
+            product.review_status = 'disabled'
+            product.save(update_fields=('is_active', 'review_status', 'updated_at'))
+            if pub and not pub.is_catalog_anchor:
                 pub.is_active = False
-                pub.save(update_fields=['is_active'])
-            product.delete()
+                pub.review_status = 'disabled'
+                pub.trader_product = None
+                pub.save(update_fields=('is_active', 'review_status', 'trader_product', 'updated_at'))
             from products.cache import invalidate_category_cache
             invalidate_category_cache()
         _invalidate_product_cache(pub, product.pk)
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class AdminTraderProductOffersView(APIView):
+    permission_classes = (permissions.IsAdminUser,)
+
+    def get(self, request):
+        offers = TraderProduct.objects.select_related(
+            'trader', 'catalog_product', 'listing_product',
+        ).prefetch_related('variants').order_by('-created_at')
+        status_filter = request.query_params.get('status')
+        if status_filter:
+            offers = offers.filter(review_status=status_filter)
+        return Response(TraderProductSerializer(offers, many=True, context={'request': request}).data)
+
+
+class AdminTraderProductReviewView(APIView):
+    permission_classes = (permissions.IsAdminUser,)
+
+    def post(self, request, offer_uuid):
+        offer = get_object_or_404(
+            TraderProduct.objects.select_related('trader', 'listing_product'),
+            uuid=offer_uuid,
+        )
+        review_status = request.data.get('review_status')
+        allowed_statuses = {'approved', 'rejected', 'changes_required', 'disabled', 'archived'}
+        if review_status not in allowed_statuses:
+            return Response(
+                {'review_status': 'Choose an allowed review status.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        review_note = str(request.data.get('review_note', '')).strip()
+        if review_status in {'rejected', 'changes_required'} and not review_note:
+            return Response(
+                {'review_note': 'Provide a reason for this decision.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        offer.review_status = review_status
+        offer.review_note = review_note if review_status in {'rejected', 'changes_required'} else ''
+        if review_status == 'approved':
+            offer.is_active = bool(
+                offer.is_active
+                and offer.trader.is_visible
+                and not offer.trader.is_closed
+            )
+        else:
+            offer.is_active = False
+        offer.save(update_fields=('review_status', 'review_note', 'is_active', 'updated_at'))
+        from products.cache import invalidate_category_cache
+
+        _invalidate_product_cache(offer.listing_product, offer.pk)
+        invalidate_category_cache()
+        return Response(TraderProductSerializer(offer, context={'request': request}).data)
 
 
 # ── Trader: sales ─────────────────────────────────────────────────────────────
@@ -891,10 +983,10 @@ class TraderInventoryListView(APIView):
             if not public_product:
                 return Response({'detail': 'Product options are not available yet.'}, status=status.HTTP_400_BAD_REQUEST)
             try:
-                variant = ProductVariant.objects.get(pk=int(variant_id), product=public_product)
+                variant = ProductVariant.objects.get(pk=int(variant_id), trader_product=product)
             except (ProductVariant.DoesNotExist, TypeError, ValueError):
                 return Response({'detail': 'Select a valid product option.'}, status=status.HTTP_400_BAD_REQUEST)
-        elif public_product and public_product.variants.exists():
+        elif product.variants.exists():
             return Response({'detail': 'Select a product option to track its inventory separately.'}, status=status.HTTP_400_BAD_REQUEST)
         try:
             quantity = int(request.data.get('quantity', 0))
@@ -991,16 +1083,24 @@ def _sync_inventory_stock(item):
         variant = item.variant
         variant.stock = item.quantity
         variant.save(update_fields=('stock', 'updated_at'))
-        public_product = variant.product
-        variants = list(public_product.variants.all())
-        public_product.stock = sum(entry.stock for entry in variants)
-        if variants:
-            public_product.price = min(entry.price for entry in variants)
-        public_product.save(update_fields=('stock', 'price'))
-        item.product.stock = public_product.stock
-        item.product.price = public_product.price
-        item.product.save(update_fields=('stock', 'price', 'updated_at'))
-        _sync_to_product(item.product)
+        if variant.trader_product_id:
+            owner = variant.trader_product
+            variants = list(owner.variants.all())
+            owner.stock = sum(entry.stock for entry in variants)
+            if variants:
+                owner.price = min(entry.price for entry in variants)
+            owner.save(update_fields=('stock', 'price', 'updated_at'))
+        else:
+            public_product = variant.product
+            variants = list(public_product.variants.all())
+            public_product.stock = sum(entry.stock for entry in variants)
+            if variants:
+                public_product.price = min(entry.price for entry in variants)
+            public_product.save(update_fields=('stock', 'price'))
+            item.product.stock = public_product.stock
+            item.product.price = public_product.price
+            item.product.save(update_fields=('stock', 'price', 'updated_at'))
+            _sync_to_product(item.product)
         return
 
     item.product.stock = item.quantity
@@ -1070,12 +1170,13 @@ class TraderAccountView(APIView):
 
             try:
                 if trader.is_visible and not trader.is_closed:
-                    for trader_product in TraderProduct.objects.filter(trader=trader).select_related('public_product'):
-                        try:
-                            public_product = trader_product.public_product
-                        except Product.DoesNotExist:
+                    for trader_product in TraderProduct.objects.filter(trader=trader).select_related(
+                        'listing_product', 'legacy_public_product',
+                    ):
+                        public_product = trader_product.public_product
+                        if not public_product:
                             continue
-                        if public_product.is_active != trader_product.is_active:
+                        if trader_product.listing_product_id is None and public_product.is_active != trader_product.is_active:
                             public_product.is_active = trader_product.is_active
                             public_product.save(update_fields=['is_active'])
 
@@ -1231,7 +1332,7 @@ class TraderOrderListView(APIView):
             Q(trader=trader) | Q(trader_product__trader=trader)
         ).values_list('id', flat=True)
         order_items = OrderItem.objects.filter(
-            product_id__in=trader_product_ids,
+            Q(product_id__in=trader_product_ids) | Q(trader_offer__trader=trader),
             order__payment__status='completed',
             order__status__in=['pending', 'processing', 'shipped', 'delivered'],
         ).select_related('order', 'product')
@@ -1249,7 +1350,7 @@ class TraderOrderListView(APIView):
             trader=trader,
             order_item__order__payment__status='completed',
         ).select_related(
-            'order_item__order', 'order_item__product'
+            'order_item__order', 'order_item__product', 'order_item__trader_offer'
         ).order_by('-order_item__order__created_at')
 
         status_filter = request.query_params.get('status')

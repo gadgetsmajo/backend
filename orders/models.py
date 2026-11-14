@@ -112,6 +112,10 @@ class ReturnRequest(models.Model):
 class OrderItem(models.Model):
     order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name='items')
     product = models.ForeignKey(Product, on_delete=models.SET_NULL, null=True)
+    trader_offer = models.ForeignKey(
+        'traders.TraderProduct', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='order_items',
+    )
     variant = models.ForeignKey(
         'products.ProductVariant', on_delete=models.SET_NULL,
         null=True, blank=True, related_name='order_items',

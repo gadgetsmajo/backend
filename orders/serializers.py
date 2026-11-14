@@ -21,6 +21,7 @@ class PaymentSerializer(serializers.ModelSerializer):
 class OrderItemSerializer(serializers.ModelSerializer):
     product = ProductSerializer(read_only=True)
     variant_id = serializers.IntegerField(read_only=True)
+    trader_offer_id = serializers.IntegerField(read_only=True)
     variant_options = serializers.JSONField(read_only=True)
     variant_sku = serializers.CharField(read_only=True)
     product_id = serializers.PrimaryKeyRelatedField(
@@ -33,7 +34,7 @@ class OrderItemSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = OrderItem
-        fields = ('id', 'product', 'product_id', 'variant_id', 'variant_options', 'variant_sku', 'quantity', 'price')
+        fields = ('id', 'product', 'product_id', 'trader_offer_id', 'variant_id', 'variant_options', 'variant_sku', 'quantity', 'price')
 
 
 class OrderSerializer(serializers.ModelSerializer):
@@ -78,8 +79,9 @@ class OrderSerializer(serializers.ModelSerializer):
         with transaction.atomic():
             cart_items = list(
                 CartItem.objects.select_for_update()
+                .select_related('trader_offer')
                 .filter(user=user)
-                .order_by('product_id', 'variant_id')
+                .order_by('product_id', 'trader_offer_id', 'variant_id')
             )
             if not cart_items:
                 raise serializers.ValidationError({'detail': 'Your cart is empty.'})
@@ -96,6 +98,20 @@ class OrderSerializer(serializers.ModelSerializer):
                 variant.pk: variant
                 for variant in ProductVariant.objects.select_for_update().filter(pk__in=variant_ids)
             }
+            from traders.models import TraderProduct
+
+            offer_ids = [item.trader_offer_id for item in cart_items if item.trader_offer_id]
+            locked_offers = {
+                offer.pk: offer
+                for offer in TraderProduct.objects.select_for_update().select_related('trader').filter(
+                    pk__in=offer_ids,
+                    is_active=True,
+                    review_status='approved',
+                    trader__status='approved',
+                    trader__is_visible=True,
+                    trader__is_closed=False,
+                )
+            }
 
             for cart_item in cart_items:
                 product = locked.get(cart_item.product_id)
@@ -103,6 +119,17 @@ class OrderSerializer(serializers.ModelSerializer):
                     raise serializers.ValidationError({
                         'detail': 'A product in your cart is no longer available. Please refresh your cart.'
                     })
+                offer = locked_offers.get(cart_item.trader_offer_id)
+                if cart_item.trader_offer_id and (
+                    not offer or offer.listing_product_id != product.pk
+                ):
+                    raise serializers.ValidationError(
+                        {'detail': f'The selected seller offer for "{product.name}" is no longer available.'}
+                    )
+                if offer is None and product.is_catalog_anchor:
+                    raise serializers.ValidationError(
+                        {'detail': f'Choose an available seller offer for "{product.name}".'}
+                    )
                 variant = locked_variants.get(cart_item.variant_id)
                 if cart_item.variant_options and not variant:
                     raise serializers.ValidationError(
@@ -113,17 +140,21 @@ class OrderSerializer(serializers.ModelSerializer):
                         {'detail': f'Select all required options for "{product.name}" before ordering.'}
                     )
                 if variant and (
-                    variant.product_id != product.pk
+                    (variant.trader_product_id != offer.pk if offer else variant.product_id != product.pk)
                     or not variant.is_active
                 ):
                     raise serializers.ValidationError(
                         {'detail': f'The selected option for "{product.name}" is no longer available.'}
                     )
-                if variant and product.requires_variant_selection and not product.variant_has_required_options(variant):
+                offer_requires_variant = (
+                    product.requires_variant_selection_for(offer.variants.filter(is_active=True))
+                    if offer else False
+                )
+                if variant and (product.requires_variant_selection or offer_requires_variant) and not product.variant_has_required_options(variant):
                     raise serializers.ValidationError(
                         {'detail': f'The selected option for "{product.name}" is incomplete.'}
                     )
-                available_stock = variant.stock if variant else product.stock
+                available_stock = variant.stock if variant else offer.stock if offer else product.stock
                 if cart_item.quantity < 1 or cart_item.quantity > 100 or available_stock < cart_item.quantity:
                     raise serializers.ValidationError(
                         {'detail': f'Not enough stock for "{product.name}". Available: {available_stock}.'}
@@ -132,7 +163,9 @@ class OrderSerializer(serializers.ModelSerializer):
             platform_settings = PlatformSettings.get()
             item_prices = {
                 item.pk: price_with_platform_charges(
-                    locked_variants[item.variant_id].price if item.variant_id else locked[item.product_id].price,
+                    locked_variants[item.variant_id].price if item.variant_id
+                    else locked_offers[item.trader_offer_id].price if item.trader_offer_id
+                    else locked[item.product_id].price,
                     platform_settings,
                 )
                 for item in cart_items
@@ -155,11 +188,13 @@ class OrderSerializer(serializers.ModelSerializer):
 
             for cart_item in cart_items:
                 product = locked[cart_item.product_id]
+                offer = locked_offers.get(cart_item.trader_offer_id)
                 variant = locked_variants.get(cart_item.variant_id)
-                seller_price = variant.price if variant else product.price
+                seller_price = variant.price if variant else offer.price if offer else product.price
                 OrderItem.objects.create(
                     order=order,
                     product=product,
+                    trader_offer=offer,
                     variant=variant,
                     variant_options=variant.options if variant else cart_item.variant_options,
                     variant_sku=variant.sku if variant else '',

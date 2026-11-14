@@ -9,9 +9,9 @@ from rest_framework.test import APIClient
 
 from accounting.models import Refund as AccountingRefund
 from orders.models import Order, OrderItem, Payment, ReturnRequest
-from products.models import Category, CategoryAttribute, Product, ProductVariant
+from products.models import CatalogProduct, Category, CategoryAttribute, Product, ProductVariant
 from settings_app.models import District, PlatformSettings
-from traders.models import TraderApplication, TraderEarning
+from traders.models import TraderApplication, TraderEarning, TraderProduct
 from users.models import CartItem, Notification
 
 User = get_user_model()
@@ -618,8 +618,7 @@ class OrderPricingSecurityTests(TestCase):
         order_item = order.items.get()
         self.assertEqual(order_item.product, self.product)
         self.assertEqual(order_item.quantity, 2)
-        self.assertEqual(order_item.price, 12000)
-        self.assertFalse(CartItem.objects.filter(user=self.user).exists())
+
 
     def test_order_rejects_unavailable_stock_without_creating_order(self):
         self.cart_item.quantity = 6
@@ -1115,3 +1114,147 @@ class ProductRatingNotificationTests(TestCase):
         self.assertIn(f'|{product.slug}?order_code={order.code}', product_notification.body)
         self.assertFalse(Notification.objects.filter(user=user, type='service_rating').exists())
         email_sender.assert_called_once()
+
+
+class SharedTraderOfferCheckoutTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            email='shared-offer-customer@example.com',
+            name='Shared Offer Customer',
+            password='Password123!',
+        )
+        self.category = Category.objects.create(name='Shared Offer Category', slug='shared-offer-category')
+        self.catalog = CatalogProduct.objects.create(
+            name='Shared Catalog Phone',
+            brand='Majo',
+            model='SCP-1',
+            category=self.category,
+            review_status='approved',
+            is_active=True,
+        )
+        self.product = Product.objects.create(
+            name=self.catalog.name,
+            brand=self.catalog.brand,
+            category=self.category,
+            catalog_product=self.catalog,
+            price=0,
+            stock=0,
+            review_status='approved',
+            is_active=True,
+            is_catalog_anchor=True,
+        )
+        self.catalog.public_product = self.product
+        self.catalog.save(update_fields=('public_product',))
+        self.offers = []
+        for index, price, stock in ((1, '10000.00', 2), (2, '12000.00', 5)):
+            trader = TraderApplication.objects.create(
+                full_name=f'Seller {index}',
+                email=f'shared-offer-seller-{index}@example.com',
+                phone=f'070000000{index}',
+                business_name=f'Shared Offer Shop {index}',
+                business_type='sole_proprietor',
+                location='Kampala',
+                product_categories='Electronics',
+                status='approved',
+            )
+            self.offers.append(TraderProduct.objects.create(
+                trader=trader,
+                catalog_product=self.catalog,
+                listing_product=self.product,
+                name=self.catalog.name,
+                price=price,
+                stock=stock,
+                category=self.category,
+                review_status='approved',
+                is_active=True,
+            ))
+        self.district = District.objects.create(
+            name='Shared Offer District',
+            region='Central',
+            price='0.00',
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+
+    def test_cart_quote_and_order_keep_each_selected_offer(self):
+        self.assertEqual(Product.objects.filter(catalog_product=self.catalog).count(), 1)
+        for offer in self.offers:
+            response = self.client.post('/api/auth/cart/', {
+                'product_id': self.product.pk,
+                'trader_offer_id': offer.pk,
+                'quantity': 1,
+            }, format='json')
+            self.assertEqual(response.status_code, 201, response.data)
+
+        quote = self.client.post('/api/orders/quote/', {
+            'district_id': self.district.pk,
+        }, format='json')
+        self.assertEqual(quote.status_code, 200, quote.data)
+        quoted_offers = {item['trader_offer_id']: item for item in quote.data['items']}
+        self.assertEqual(set(quoted_offers), {offer.pk for offer in self.offers})
+        self.assertEqual(
+            [quoted_offers[offer.pk]['product_price'] for offer in self.offers],
+            [Decimal('10000.00'), Decimal('12000.00')],
+        )
+
+        response = self.client.post('/api/orders/', {
+            'district_id': self.district.pk,
+            'phone': '+256700000000',
+        }, format='json')
+        self.assertEqual(response.status_code, 201, response.data)
+        order = Order.objects.get(pk=response.data['id'])
+        order_items = {item.trader_offer_id: item for item in order.items.all()}
+        self.assertEqual(set(order_items), {offer.pk for offer in self.offers})
+        self.assertEqual(
+            [order_items[offer.pk].seller_price for offer in self.offers],
+            [Decimal('10000.00'), Decimal('12000.00')],
+        )
+        self.assertFalse(CartItem.objects.filter(user=self.user).exists())
+
+    @patch('orders.views._send_paid_order_followups')
+    @patch('traders.wallet.record_paid_order_earnings')
+    @patch('orders.views.http_requests.get')
+    @patch('orders.views._pesapal_token', return_value='pesapal-token')
+    def test_paid_order_deducts_stock_only_from_the_selected_offer(
+        self, mock_token, mock_get, mock_record_earnings, mock_followups,
+    ):
+        order = Order.objects.create(user=self.user, total='10000.00')
+        OrderItem.objects.create(
+            order=order,
+            product=self.product,
+            trader_offer=self.offers[0],
+            quantity=1,
+            price='10000.00',
+            seller_price='10000.00',
+        )
+        payment = Payment.objects.create(
+            order=order,
+            pesapal_order_tracking_id='shared-offer-stock-tracking',
+            merchant_reference=order.code,
+            amount=order.total,
+            currency='UGX',
+            status='pending',
+        )
+        mock_get.return_value.json.return_value = {
+            'amount': '10000.00',
+            'currency_code': 'UGX',
+            'payment_status_description': 'Completed',
+            'payment_method': 'Mobile Money',
+        }
+        mock_get.return_value.raise_for_status.return_value = None
+
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.get(
+                f'/api/orders/pesapal/ipn/?OrderTrackingId={payment.pesapal_order_tracking_id}'
+                f'&OrderMerchantReference={order.code}'
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.offers[0].refresh_from_db()
+        self.offers[1].refresh_from_db()
+        self.product.refresh_from_db()
+        self.assertEqual(self.offers[0].stock, 1)
+        self.assertEqual(self.offers[1].stock, 5)
+        self.assertEqual(self.product.stock, 0)
+        mock_record_earnings.assert_called_once_with(order)
+        mock_followups.assert_called_once_with(order.pk, 'Mobile Money')

@@ -170,6 +170,44 @@ class CategoryDetailView(generics.RetrieveUpdateDestroyAPIView):
         CategoryListView._invalidate_category_cache()
 
 
+def annotate_catalog_offer_metrics(queryset):
+    from traders.models import TraderProduct
+
+    offers = TraderProduct.objects.filter(
+        Q(listing_product_id=OuterRef('pk'))
+        | Q(catalog_product__public_product_id=OuterRef('pk'))
+        | Q(legacy_public_product__pk=OuterRef('pk')),
+        is_active=True,
+        review_status='approved',
+        stock__gt=0,
+        trader__status='approved',
+        trader__is_visible=True,
+        trader__is_closed=False,
+    )
+    lowest_price = offers.order_by('price', 'pk').values('price')[:1]
+    total_stock = offers.values('listing_product_id').annotate(
+        total=Sum('stock'),
+    ).values('total')[:1]
+    return queryset.annotate(
+        _has_available_offer=Exists(offers),
+        _marketplace_price=Case(
+            When(
+                is_catalog_anchor=True,
+                then=Coalesce(Subquery(lowest_price), F('price')),
+            ),
+            default=F('price'),
+        ),
+        _marketplace_stock=Case(
+            When(
+                is_catalog_anchor=True,
+                then=Coalesce(Subquery(total_stock), Value(0)),
+            ),
+            default=F('stock'),
+            output_field=IntegerField(),
+        ),
+    )
+
+
 class ProductListView(generics.ListCreateAPIView):
     serializer_class = ProductSerializer
     permission_classes = (IsAdminOrReadOnly,)
@@ -182,7 +220,7 @@ class ProductListView(generics.ListCreateAPIView):
     ordering_fields = ('price', 'rating', 'created_at')
 
     def get_queryset(self):
-        from traders.models import TraderInventoryItem
+        from traders.models import TraderInventoryItem, TraderProduct
 
         variant_queryset = ProductVariant.objects.select_related(
             'product__trader', 'product__trader_product__trader',
@@ -195,12 +233,31 @@ class ProductListView(generics.ListCreateAPIView):
         qs = Product.objects.all().select_related(
             'category', 'trader', 'trader_product__trader',
             'catalog_product__category', 'trader_product__catalog_product',
-        ).prefetch_related('images', Prefetch('variants', queryset=variant_queryset))
+        ).prefetch_related(
+            'images',
+            Prefetch('variants', queryset=variant_queryset),
+            Prefetch(
+                'trader_offers',
+                queryset=TraderProduct.objects.filter(
+                    is_active=True,
+                    review_status='approved',
+                    stock__gt=0,
+                    trader__status='approved',
+                    trader__is_visible=True,
+                    trader__is_closed=False,
+                ).select_related('trader'),
+            ),
+        )
+        qs = annotate_catalog_offer_metrics(qs)
         if not self.request.user.is_staff:
             qs = qs.filter(
                 is_active=True,
                 review_status='approved',
             ).filter(public_marketplace_product_filter())
+            qs = qs.filter(
+                Q(catalog_product__isnull=True) | Q(is_catalog_anchor=True),
+                Q(is_catalog_anchor=False) | Q(_has_available_offer=True),
+            )
         category = self.request.query_params.get('category')
         if category:
             selected = Category.objects.filter(slug=category, is_active=True).first()
@@ -223,16 +280,16 @@ class ProductListView(generics.ListCreateAPIView):
             qs = qs.filter(category_id__in=descendants)
         price_min = self.request.query_params.get('price_min')
         if price_min:
-            qs = qs.filter(price__gte=price_min)
+            qs = qs.filter(_marketplace_price__gte=price_min)
         price_max = self.request.query_params.get('price_max')
         if price_max:
-            qs = qs.filter(price__lte=price_max)
+            qs = qs.filter(_marketplace_price__lte=price_max)
         brand = self.request.query_params.get('brand')
         if brand:
             qs = qs.filter(brand__icontains=brand.strip())
         available = self.request.query_params.get('available')
         if available == 'true':
-            qs = qs.filter(stock__gt=0)
+            qs = qs.filter(Q(is_catalog_anchor=False, stock__gt=0) | Q(_has_available_offer=True))
         min_rating = self.request.query_params.get('min_rating')
         if min_rating:
             qs = qs.filter(rating__gte=min_rating)
@@ -249,6 +306,13 @@ class ProductListView(generics.ListCreateAPIView):
                             f'variants__options__{key}__iexact': value,
                             'variants__is_active': True,
                             'variants__stock__gt': 0,
+                        })
+                        variant_filter |= Q(**{
+                            f'trader_offers__variants__options__{key}__iexact': value,
+                            'trader_offers__variants__is_active': True,
+                            'trader_offers__variants__stock__gt': 0,
+                            'trader_offers__is_active': True,
+                            'trader_offers__review_status': 'approved',
                         })
                         qs = qs.filter(spec_filter | variant_filter).distinct()
                     else:
@@ -270,25 +334,17 @@ class ProductListView(generics.ListCreateAPIView):
                     trader_product__trader__is_visible=True,
                     trader_product__trader__is_closed=False,
                 )
+                visible_seller |= Q(
+                    trader_offers__trader__business_name__icontains=seller_uuid,
+                    trader_offers__trader__status='approved',
+                    trader_offers__trader__is_visible=True,
+                    trader_offers__trader__is_closed=False,
+                )
             else:
                 visible_seller = Q(trader__uuid=seller_uuid, trader__status='approved', trader__is_visible=True, trader__is_closed=False)
                 visible_seller |= Q(trader_product__trader__uuid=seller_uuid, trader_product__trader__status='approved', trader_product__trader__is_visible=True, trader_product__trader__is_closed=False)
+                visible_seller |= Q(trader_offers__trader__uuid=seller_uuid, trader_offers__trader__status='approved', trader_offers__trader__is_visible=True, trader_offers__trader__is_closed=False)
             qs = qs.filter(visible_seller)
-        if not self.request.user.is_staff:
-            best_matching_offer = qs.annotate(
-                _seller_priority=Case(
-                    When(trader__isnull=False, then=Value(0)),
-                    When(trader_product__trader__isnull=False, then=Value(0)),
-                    default=Value(1),
-                    output_field=IntegerField(),
-                ),
-            ).order_by('_seller_priority', 'price', 'pk').filter(
-                catalog_product_id=OuterRef('catalog_product_id'),
-            ).values('pk')[:1]
-            qs = qs.filter(
-                Q(catalog_product__isnull=True)
-                | Q(pk=Subquery(best_matching_offer))
-            )
         if self.request.query_params.get('top_bought') == 'true':
             qs = qs.annotate(
                 bought_quantity=Coalesce(
@@ -504,12 +560,32 @@ class RecommendedProductsView(APIView):
 
 
 def _get_recommended_products_for_user(user, limit=12):
+    from traders.models import TraderProduct
+
     qs = Product.objects.filter(
         is_active=True,
         review_status='approved',
     ).filter(
         public_marketplace_product_filter(),
-    ).select_related('category').prefetch_related('images', 'variants').order_by('-rating', '-created_at')
+    ).select_related('category').prefetch_related(
+        'images',
+        'variants',
+        Prefetch(
+            'trader_offers',
+            queryset=TraderProduct.objects.filter(
+                is_active=True,
+                review_status='approved',
+                stock__gt=0,
+                trader__status='approved',
+                trader__is_visible=True,
+                trader__is_closed=False,
+            ).select_related('trader'),
+        ),
+    )
+    qs = annotate_catalog_offer_metrics(qs).filter(
+        Q(catalog_product__isnull=True) | Q(is_catalog_anchor=True),
+        Q(is_catalog_anchor=False) | Q(_has_available_offer=True),
+    ).order_by('-rating', '-created_at')
 
     if not user or not user.is_authenticated:
         return list(qs[:limit])
@@ -618,8 +694,8 @@ class ProductReviewListCreateView(APIView):
 
     def get(self, request, slug):
         product = get_object_or_404(Product, slug=slug)
-        qs = ProductReview.objects.filter(
-            product=product, status='published'
+        qs = _reviews_for_product(product).filter(
+            status='published',
         ).prefetch_related('images').select_related('user').order_by('-created_at')
 
         star = request.query_params.get('star')
@@ -639,8 +715,7 @@ class ProductReviewListCreateView(APIView):
 
         product = get_object_or_404(Product, slug=slug)
 
-        delivered_items = OrderItem.objects.filter(
-            product=product,
+        delivered_items = _order_items_for_product(product).filter(
             order__user=request.user,
             order__status='delivered',
         ).select_related('order')
@@ -662,7 +737,10 @@ class ProductReviewListCreateView(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        if ProductReview.objects.filter(product=product, user=request.user, order_id=delivered_item.order_id).exists():
+        if _reviews_for_product(product).filter(
+            user=request.user,
+            order_id=delivered_item.order_id,
+        ).exists():
             return Response(
                 {'detail': 'You have already reviewed this product for this order.'},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -699,7 +777,7 @@ class ProductReviewDetailView(APIView):
 
     def delete(self, request, slug, pk):
         product = get_object_or_404(Product, slug=slug)
-        review = get_object_or_404(ProductReview, pk=pk, product=product)
+        review = get_object_or_404(_reviews_for_product(product), pk=pk)
         review.delete()
         _update_product_rating(product)
         return Response(status=status.HTTP_204_NO_CONTENT)
@@ -712,8 +790,7 @@ class ProductReviewEligibilityView(APIView):
     def get(self, request, slug):
         product = get_object_or_404(Product, slug=slug)
 
-        delivered_items = OrderItem.objects.filter(
-            product=product,
+        delivered_items = _order_items_for_product(product).filter(
             order__user=request.user,
             order__status='delivered',
         ).select_related('order')
@@ -723,8 +800,7 @@ class ProductReviewEligibilityView(APIView):
             delivered_item = delivered_items.order_by('-order__created_at').first()
         else:
             all_delivered_items = delivered_items
-            reviewed_order_ids = ProductReview.objects.filter(
-                product=product,
+            reviewed_order_ids = _reviews_for_product(product).filter(
                 user=request.user,
                 order__isnull=False,
             ).values_list('order_id', flat=True)
@@ -737,8 +813,8 @@ class ProductReviewEligibilityView(APIView):
         if not delivered_item:
             return Response({'eligible': False, 'reason': 'no_delivered_order'})
 
-        existing = ProductReview.objects.filter(
-            product=product, user=request.user, order=delivered_item.order
+        existing = _reviews_for_product(product).filter(
+            user=request.user, order=delivered_item.order,
         ).first()
 
         if existing:
@@ -758,7 +834,7 @@ class ProductRatingSummaryView(APIView):
 
     def get(self, request, slug):
         product = get_object_or_404(Product, slug=slug)
-        qs = ProductReview.objects.filter(product=product, status='published')
+        qs = _reviews_for_product(product).filter(status='published')
         total = qs.count()
         breakdown = {}
         for star in range(1, 6):
@@ -788,11 +864,38 @@ class MyReviewsView(generics.ListAPIView):
 
 def _update_product_rating(product):
     from django.db.models import Avg
-    avg = ProductReview.objects.filter(
-        product=product, status='published'
+    avg = _reviews_for_product(product).filter(
+        status='published',
     ).aggregate(v=Avg('overall_rating'))['v'] or 0
-    product.rating = round(float(avg), 1)
-    product.save(update_fields=['rating'])
+    rating = round(float(avg), 1)
+    if product.is_catalog_anchor and product.catalog_product_id:
+        Product.objects.filter(
+            catalog_product_id=product.catalog_product_id,
+            is_catalog_anchor=True,
+        ).update(rating=rating)
+    else:
+        product.rating = rating
+        product.save(update_fields=['rating'])
+
+
+def _reviews_for_product(product):
+    queryset = ProductReview.objects.all()
+    if product.is_catalog_anchor and product.catalog_product_id:
+        return queryset.filter(
+            Q(product=product)
+            | Q(product__catalog_product_id=product.catalog_product_id)
+        )
+    return queryset.filter(product=product)
+
+
+def _order_items_for_product(product):
+    queryset = OrderItem.objects.all()
+    if product.is_catalog_anchor and product.catalog_product_id:
+        return queryset.filter(
+            Q(product=product)
+            | Q(product__catalog_product_id=product.catalog_product_id)
+        )
+    return queryset.filter(product=product)
 
 
 # ── Share view ───────────────────────────────────────────────────────────────

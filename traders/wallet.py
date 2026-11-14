@@ -18,12 +18,13 @@ def record_paid_order_earnings(order):
     order_items = order.items.select_related(
         'product__trader',
         'product__trader_product__trader',
+        'trader_offer__trader',
     )
     for item in order_items:
-        if not item.product:
-            continue
-        trader = item.product.trader
-        if trader is None and item.product.trader_product_id:
+        trader = item.trader_offer.trader if item.trader_offer_id else (
+            item.product.trader if item.product else None
+        )
+        if trader is None and item.product and item.product.trader_product_id:
             trader = item.product.trader_product.trader
         if trader is None or item.seller_price is None:
             continue
@@ -34,7 +35,7 @@ def record_paid_order_earnings(order):
                 'trader': trader,
                 'order': order,
                 'order_code': order.code,
-                'product_name': item.product.name,
+                'product_name': item.product.name if item.product else item.trader_offer.name,
                 'quantity': item.quantity,
                 'listed_unit_price': item.seller_price,
                 'seller_amount': item.seller_price * item.quantity,

@@ -152,6 +152,10 @@ class EmailMfaTrustedDevice(models.Model):
 class CartItem(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='cart_items')
     product_id = models.IntegerField()
+    trader_offer = models.ForeignKey(
+        'traders.TraderProduct', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='cart_items',
+    )
     variant = models.ForeignKey(
         'products.ProductVariant', on_delete=models.SET_NULL,
         null=True, blank=True, related_name='cart_items',
@@ -170,13 +174,31 @@ class CartItem(models.Model):
         constraints = [
             models.UniqueConstraint(
                 fields=('user', 'product_id'),
-                condition=models.Q(variant__isnull=True, variant_options={}),
+                condition=models.Q(
+                    trader_offer__isnull=True,
+                    variant__isnull=True,
+                    variant_options={},
+                ),
                 name='unique_cart_base_product',
             ),
             models.UniqueConstraint(
                 fields=('user', 'product_id', 'variant'),
-                condition=models.Q(variant__isnull=False),
+                condition=models.Q(trader_offer__isnull=True, variant__isnull=False),
                 name='unique_cart_product_variant',
+            ),
+            models.UniqueConstraint(
+                fields=('user', 'product_id', 'trader_offer'),
+                condition=models.Q(
+                    trader_offer__isnull=False,
+                    variant__isnull=True,
+                    variant_options={},
+                ),
+                name='unique_cart_base_offer',
+            ),
+            models.UniqueConstraint(
+                fields=('user', 'product_id', 'trader_offer', 'variant'),
+                condition=models.Q(trader_offer__isnull=False, variant__isnull=False),
+                name='unique_cart_offer_variant',
             ),
         ]
 

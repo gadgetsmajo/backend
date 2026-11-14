@@ -76,11 +76,23 @@ def _restore_stock(order):
         return
     items = order.items.select_related('product', 'variant').all()
     for item in items:
-        if item.product:
+        if item.trader_offer_id:
+            from traders.models import TraderProduct
+
+            if item.variant_id:
+                _adjust_variant_stock(item, item.quantity)
+            else:
+                TraderProduct.objects.filter(pk=item.trader_offer_id).update(
+                    stock=models.F('stock') + item.quantity,
+                    updated_at=timezone.now(),
+                )
+        elif item.product:
             Product.objects.filter(pk=item.product.pk).update(
                 stock=models.F('stock') + item.quantity
             )
-        if item.variant_id:
+            if item.variant_id:
+                _adjust_variant_stock(item, item.quantity)
+        elif item.variant_id:
             _adjust_variant_stock(item, item.quantity)
 
 
@@ -94,8 +106,11 @@ def _adjust_variant_stock(item, quantity_delta):
         quantity=models.F('quantity') + quantity_delta,
         updated_at=timezone.now(),
     )
-    if item.product and item.product.trader_product_id:
-        TraderProduct.objects.filter(pk=item.product.trader_product_id).update(
+    offer_id = item.trader_offer_id or (
+        item.product.trader_product_id if item.product else None
+    )
+    if offer_id:
+        TraderProduct.objects.filter(pk=offer_id).update(
             stock=models.F('stock') + quantity_delta,
             updated_at=timezone.now(),
         )
@@ -106,6 +121,7 @@ def _send_paid_order_followups(order_id, payment_method):
         order = Order.objects.select_related('user').prefetch_related(
             'items__product__trader__user',
             'items__product__trader_product__trader__user',
+            'items__trader_offer__trader__user',
         ).get(pk=order_id)
     except Order.DoesNotExist:
         logger.error('Cannot send paid-order notifications: order %s no longer exists', order_id)
@@ -148,7 +164,7 @@ def _send_paid_order_followups(order_id, payment_method):
         product = item.product
         if not product:
             continue
-        trader = product.trader
+        trader = item.trader_offer.trader if item.trader_offer_id else product.trader
         if trader is None and product.trader_product_id:
             trader = product.trader_product.trader
         if trader is None:
@@ -233,12 +249,13 @@ class CartQuoteView(APIView):
 
         if request.user.is_authenticated:
             cart_items = list(
-                CartItem.objects.select_related('variant')
+                CartItem.objects.select_related('variant', 'trader_offer')
                 .filter(user=request.user)
-                .order_by('product_id', 'variant_id')
+                .order_by('product_id', 'trader_offer_id', 'variant_id')
             )
             requested_items = [{
                 'product_id': item.product_id,
+                'trader_offer_id': item.trader_offer_id,
                 'quantity': item.quantity,
                 'cart_item_id': item.pk,
                 'variant_id': item.variant_id,
@@ -260,6 +277,7 @@ class CartQuoteView(APIView):
                 try:
                     product_id = int(raw_item.get('product_id'))
                     quantity = int(raw_item.get('quantity'))
+                    trader_offer_id = int(raw_item['trader_offer_id']) if raw_item.get('trader_offer_id') not in (None, '') else None
                     variant_id = int(raw_item['variant_id']) if raw_item.get('variant_id') not in (None, '') else None
                     cart_item_id = int(raw_item['id']) if raw_item.get('id') not in (None, '') else None
                 except (TypeError, ValueError):
@@ -270,6 +288,7 @@ class CartQuoteView(APIView):
                     return Response({'detail': 'Invalid product option.'}, status=status.HTTP_400_BAD_REQUEST)
                 requested_items.append({
                     'product_id': product_id,
+                    'trader_offer_id': trader_offer_id,
                     'quantity': quantity,
                     'cart_item_id': cart_item_id,
                     'variant_id': variant_id,
@@ -278,7 +297,7 @@ class CartQuoteView(APIView):
                 })
 
         if len({
-            (item['product_id'], item['variant_id'])
+            (item['product_id'], item['trader_offer_id'], item['variant_id'])
             for item in requested_items
         }) != len(requested_items):
             return Response({'detail': 'Duplicate product options are not allowed in the cart.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -302,6 +321,22 @@ class CartQuoteView(APIView):
             variant.pk: variant
             for variant in ProductVariant.objects.filter(pk__in=variant_ids, is_active=True)
         }
+        from traders.models import TraderProduct
+
+        trader_offers = {
+            offer.pk: offer
+            for offer in TraderProduct.objects.filter(
+                pk__in={
+                    item['trader_offer_id'] for item in requested_items
+                    if item['trader_offer_id'] is not None
+                },
+                is_active=True,
+                review_status='approved',
+                trader__status='approved',
+                trader__is_visible=True,
+                trader__is_closed=False,
+            ).select_related('trader')
+        }
 
         items = []
         subtotal = 0
@@ -309,39 +344,56 @@ class CartQuoteView(APIView):
         platform_settings = PlatformSettings.get()
         for requested_item in requested_items:
             product = products[requested_item['product_id']]
+            offer = trader_offers.get(requested_item['trader_offer_id'])
+            if requested_item['trader_offer_id'] is not None and (
+                offer is None or offer.listing_product_id != product.pk
+            ):
+                return Response({'detail': 'The selected seller offer is no longer available.'}, status=status.HTTP_400_BAD_REQUEST)
+            if offer is None and product.is_catalog_anchor:
+                return Response({'detail': 'Choose an available seller offer.'}, status=status.HTTP_400_BAD_REQUEST)
             variant = variants.get(requested_item['variant_id'])
             if requested_item['variant_required'] and not variant:
                 return Response(
                     {'detail': f'Select an available option for "{product.name}".'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-            if not variant and product.requires_variant_selection:
+            offer_requires_variant = (
+                product.requires_variant_selection_for(offer.variants.filter(is_active=True))
+                if offer else False
+            )
+            if not variant and (product.requires_variant_selection or offer_requires_variant):
                 return Response(
                     {'detail': f'Select all required options for "{product.name}".'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-            if variant and variant.product_id != product.pk:
+            if variant and (
+                variant.trader_product_id != offer.pk if offer
+                else variant.product_id != product.pk
+            ):
                 return Response({'detail': 'The selected option does not belong to this product.'}, status=status.HTTP_400_BAD_REQUEST)
-            if variant and product.requires_variant_selection and not product.variant_has_required_options(variant):
+            if variant and (product.requires_variant_selection or offer_requires_variant) and not product.variant_has_required_options(variant):
                 return Response(
                     {'detail': f'The selected option for "{product.name}" is incomplete.'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
             quantity = requested_item['quantity']
-            available_stock = variant.stock if variant else product.stock
+            available_stock = variant.stock if variant else offer.stock if offer else product.stock
             if quantity > available_stock:
                 return Response(
                     {'detail': f'Not enough stock for "{product.name}". Available: {available_stock}.'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-            base_price = variant.price if variant else product.price
+            base_price = variant.price if variant else offer.price if offer else product.price
             product_price = price_with_platform_charges(base_price, platform_settings)
             line_total = product_price * quantity
             subtotal += line_total
-            product_delivery_total += product.delivery_fee
+            delivery_fee = offer.delivery_fee if offer else product.delivery_fee
+            product_delivery_total += delivery_fee
             items.append({
                 'id': requested_item['cart_item_id'] or requested_item['product_id'],
                 'product_id': requested_item['product_id'],
+                'trader_offer_id': offer.pk if offer else None,
+                'seller_name': offer.trader.business_name if offer else None,
                 'variant_id': variant.pk if variant else None,
                 'variant_options': variant.options if variant else {},
                 'variant_sku': variant.sku if variant else '',
@@ -355,7 +407,7 @@ class CartQuoteView(APIView):
                 'product_category': product.category.name if product.category else '',
                 'product_rating': product.rating,
                 'quantity': quantity,
-                'delivery_fee': product.delivery_fee,
+                'delivery_fee': delivery_fee,
                 'line_total': line_total,
             })
 
@@ -1026,12 +1078,22 @@ def _sync_pesapal_payment(payment, data):
             from traders.wallet import record_paid_order_earnings
             record_paid_order_earnings(order)
             for item in order.items.select_related('product').all():
-                if item.product:
+                if item.trader_offer_id:
+                    from traders.models import TraderProduct
+
+                    if item.variant_id:
+                        _adjust_variant_stock(item, -item.quantity)
+                    else:
+                        TraderProduct.objects.filter(pk=item.trader_offer_id).update(
+                            stock=models.F('stock') - item.quantity,
+                            updated_at=timezone.now(),
+                        )
+                elif item.product:
                     Product.objects.filter(pk=item.product.pk).update(
                         stock=models.F('stock') - item.quantity
                     )
-                if item.variant_id:
-                    _adjust_variant_stock(item, -item.quantity)
+                    if item.variant_id:
+                        _adjust_variant_stock(item, -item.quantity)
             if order.status == 'pending':
                 order.status = 'processing'
                 order.save(update_fields=['status', 'updated_at'])
@@ -1188,12 +1250,22 @@ class PesapalIPNView(APIView):
                         from traders.wallet import record_paid_order_earnings
                         record_paid_order_earnings(order)
                         for item in order.items.select_related('product').all():
-                            if item.product:
+                            if item.trader_offer_id:
+                                from traders.models import TraderProduct
+
+                                if item.variant_id:
+                                    _adjust_variant_stock(item, -item.quantity)
+                                else:
+                                    TraderProduct.objects.filter(pk=item.trader_offer_id).update(
+                                        stock=models.F('stock') - item.quantity,
+                                        updated_at=timezone.now(),
+                                    )
+                            elif item.product:
                                 Product.objects.filter(pk=item.product.pk).update(
                                     stock=models.F('stock') - item.quantity
                                 )
-                            if item.variant_id:
-                                _adjust_variant_stock(item, -item.quantity)
+                                if item.variant_id:
+                                    _adjust_variant_stock(item, -item.quantity)
                         if order.status == 'pending':
                             order.status = 'processing'
                             order.save(update_fields=['status', 'updated_at'])

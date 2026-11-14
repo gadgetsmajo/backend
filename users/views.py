@@ -874,7 +874,7 @@ class CartView(APIView):
     permission_classes = (permissions.IsAuthenticated,)
 
     def get(self, request):
-        items = CartItem.objects.select_related('variant').filter(user=request.user)
+        items = CartItem.objects.select_related('variant', 'trader_offer').filter(user=request.user)
         return Response(CartItemSerializer(items, many=True).data)
 
     def post(self, request):
@@ -883,6 +883,9 @@ class CartView(APIView):
             variant_id = serializers.IntegerField(min_value=1, allow_null=True).run_validation(
                 request.data.get('variant_id')
             ) if request.data.get('variant_id') not in (None, '') else None
+            trader_offer_id = serializers.IntegerField(min_value=1, allow_null=True).run_validation(
+                request.data.get('trader_offer_id')
+            ) if request.data.get('trader_offer_id') not in (None, '') else None
             quantity = serializers.IntegerField(min_value=1, max_value=100).run_validation(
                 request.data.get('quantity', 1)
             )
@@ -894,29 +897,58 @@ class CartView(APIView):
                 product = Product.objects.select_for_update().get(pk=product_id, is_active=True)
             except Product.DoesNotExist:
                 return Response({'detail': 'Product not found.'}, status=status.HTTP_404_NOT_FOUND)
+            trader_offer = None
+            if trader_offer_id is not None:
+                from traders.models import TraderProduct
+
+                trader_offer = TraderProduct.objects.select_for_update().select_related(
+                    'trader',
+                ).filter(
+                    pk=trader_offer_id,
+                    listing_product=product,
+                    is_active=True,
+                    review_status='approved',
+                    trader__status='approved',
+                    trader__is_visible=True,
+                    trader__is_closed=False,
+                ).first()
+                if trader_offer is None:
+                    return Response({'detail': 'The selected seller offer is unavailable.'}, status=status.HTTP_400_BAD_REQUEST)
+            elif product.is_catalog_anchor:
+                return Response({'detail': 'Choose a seller offer before adding this product to your cart.'}, status=status.HTTP_400_BAD_REQUEST)
+
             variant = None
             if variant_id is not None:
                 try:
-                    variant = ProductVariant.objects.select_for_update().get(
-                        pk=variant_id, product=product, is_active=True,
+                    variants = ProductVariant.objects.select_for_update().filter(
+                        pk=variant_id, is_active=True,
+                    )
+                    variant = (
+                        variants.filter(trader_product=trader_offer).get()
+                        if trader_offer else variants.filter(product=product).get()
                     )
                 except ProductVariant.DoesNotExist:
                     return Response({'detail': 'The selected product option is unavailable.'}, status=status.HTTP_400_BAD_REQUEST)
-            if variant is None and product.requires_variant_selection:
+            offer_requires_variant = (
+                product.requires_variant_selection_for(trader_offer.variants.filter(is_active=True))
+                if trader_offer else False
+            )
+            if variant is None and (product.requires_variant_selection or offer_requires_variant):
                 return Response(
                     {'detail': f'Select all required options for "{product.name}" before adding it to your cart.'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-            if variant and product.requires_variant_selection and not product.variant_has_required_options(variant):
+            if variant and (product.requires_variant_selection or offer_requires_variant) and not product.variant_has_required_options(variant):
                 return Response(
                     {'detail': f'The selected option for "{product.name}" is incomplete.'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-            stock = variant.stock if variant else product.stock
-            unit_price = variant.price if variant else product.price
+            stock = variant.stock if variant else trader_offer.stock if trader_offer else product.stock
+            unit_price = variant.price if variant else trader_offer.price if trader_offer else product.price
             cart_items = CartItem.objects.select_for_update().filter(
                 user=request.user,
                 product_id=product.pk,
+                trader_offer=trader_offer,
                 variant=variant,
             )
             item = cart_items.first() if variant else cart_items.filter(variant_options={}).first()
@@ -953,6 +985,7 @@ class CartView(APIView):
                 item = CartItem.objects.create(
                     user=request.user,
                     product_id=product.pk,
+                    trader_offer=trader_offer,
                     variant=variant,
                     **canonical_values,
                 )
@@ -979,25 +1012,45 @@ class CartItemView(APIView):
                 item.delete()
                 return Response(status=status.HTTP_204_NO_CONTENT)
             product = Product.objects.get(pk=item.product_id, is_active=True)
+            trader_offer = item.trader_offer
+            if trader_offer:
+                if (
+                    trader_offer.listing_product_id != product.pk
+                    or not trader_offer.is_active
+                    or trader_offer.review_status != 'approved'
+                    or trader_offer.trader.status != 'approved'
+                    or not trader_offer.trader.is_visible
+                    or trader_offer.trader.is_closed
+                ):
+                    return Response({'detail': 'The selected seller offer is no longer available.'}, status=status.HTTP_400_BAD_REQUEST)
+            elif product.is_catalog_anchor:
+                return Response({'detail': 'Choose an available seller offer.'}, status=status.HTTP_400_BAD_REQUEST)
             if item.variant_options and not item.variant_id:
                 return Response({'detail': 'Select an available product option.'}, status=status.HTTP_400_BAD_REQUEST)
-            if not item.variant_id and product.requires_variant_selection:
+            offer_requires_variant = (
+                product.requires_variant_selection_for(trader_offer.variants.filter(is_active=True))
+                if trader_offer else False
+            )
+            if not item.variant_id and (product.requires_variant_selection or offer_requires_variant):
                 return Response(
                     {'detail': f'Select all required options for "{product.name}" before updating your cart.'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
             if item.variant_id:
                 variant = ProductVariant.objects.get(
-                    pk=item.variant_id, product=product, is_active=True,
+                    pk=item.variant_id,
+                    trader_product=trader_offer if trader_offer else None,
+                    product=None if trader_offer else product,
+                    is_active=True,
                 )
-                if product.requires_variant_selection and not product.variant_has_required_options(variant):
+                if (product.requires_variant_selection or offer_requires_variant) and not product.variant_has_required_options(variant):
                     return Response({'detail': f'The selected option for "{product.name}" is incomplete.'}, status=status.HTTP_400_BAD_REQUEST)
                 stock = variant.stock
                 unit_price = variant.price
                 item.variant_options = variant.options
             else:
-                stock = product.stock
-                unit_price = product.price
+                stock = trader_offer.stock if trader_offer else product.stock
+                unit_price = trader_offer.price if trader_offer else product.price
             if quantity > stock:
                 return Response(
                     {'detail': f'Not enough stock for "{product.name}". Available: {stock}.'},
@@ -1039,7 +1092,9 @@ class CartReminderView(APIView):
         with transaction.atomic():
             user = User.objects.select_for_update().get(pk=request.user.pk)
             cart_items = list(
-                CartItem.objects.select_related('variant').filter(user=user).order_by('product_id', 'variant_id')
+                CartItem.objects.select_related('variant', 'trader_offer').filter(user=user).order_by(
+                    'product_id', 'trader_offer_id', 'variant_id',
+                )
             )
             if not cart_items:
                 return Response({'sent': False, 'reason': 'empty_cart'})
@@ -1058,10 +1113,15 @@ class CartReminderView(APIView):
             for item in cart_items:
                 product = products.get(item.product_id)
                 item_price = price_with_platform_charges(
-                    item.variant.price if item.variant_id else product.price if product else item.product_price,
+                    item.variant.price if item.variant_id
+                    else item.trader_offer.price if item.trader_offer_id
+                    else product.price if product else item.product_price,
                     platform_settings,
                 )
-                item_delivery = product.delivery_fee if product else 0
+                item_delivery = (
+                    item.trader_offer.delivery_fee if item.trader_offer_id
+                    else product.delivery_fee if product else 0
+                )
                 option_summary = ', '.join(
                     f'{key.replace("_", " ")}: {value}'
                     for key, value in (item.variant.options if item.variant_id else item.variant_options).items()
@@ -1069,15 +1129,19 @@ class CartReminderView(APIView):
                 item_name = f'{item.product_name} ({option_summary})' if option_summary else item.product_name
                 subtotal += item_price * item.quantity
                 delivery += item_delivery
-                items.append({
+                reminder_item = {
                     'name': item_name,
                     'image': item.product_image or '',
                     'slug': item.product_slug,
-                    'variant_options': item.variant.options if item.variant_id else item.variant_options,
                     'quantity': item.quantity,
                     'price': item_price,
                     'delivery_fee': item_delivery,
-                })
+                }
+                if item.variant_id or item.variant_options:
+                    reminder_item['variant_options'] = (
+                        item.variant.options if item.variant_id else item.variant_options
+                    )
+                items.append(reminder_item)
                 fingerprint_data.append({
                     'product_id': item.product_id,
                     'variant_id': item.variant_id,

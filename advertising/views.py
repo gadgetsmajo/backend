@@ -182,7 +182,8 @@ def _load_campaigns(queryset):
         queryset.select_related('trader', 'trader__advertising_wallet')
         .prefetch_related(
             'offers__trader_offer__catalog_product',
-            'offers__trader_offer__public_product',
+            'offers__trader_offer__listing_product',
+            'offers__trader_offer__legacy_public_product',
         )
     )
     metrics = _campaign_metrics(campaigns)
@@ -251,7 +252,11 @@ class TraderAdvertisingView(APIView):
             reconcile_campaign(campaign_id)
         all_campaigns = list(
             queryset.select_related('trader')
-            .prefetch_related('offers__trader_offer__catalog_product', 'offers__trader_offer__public_product')
+            .prefetch_related(
+                'offers__trader_offer__catalog_product',
+                'offers__trader_offer__listing_product',
+                'offers__trader_offer__legacy_public_product',
+            )
         )
         metrics = _campaign_metrics(all_campaigns)
         transactions = AdvertisingWalletTransaction.objects.filter(wallet=wallet)[:20]
@@ -294,7 +299,8 @@ class TraderAdvertisingOffersView(APIView):
         offers = TraderProduct.objects.filter(trader=trader).select_related(
             'catalog_product',
             'catalog_product__category',
-            'public_product',
+            'listing_product',
+            'legacy_public_product',
         ).order_by('name')
         results = []
         for offer in offers:
@@ -423,7 +429,9 @@ class TraderAdvertisingCampaignsView(APIView):
             TraderProduct.objects.filter(
                 pk__in=payload['offer_ids'],
                 trader=trader,
-            ).select_related('trader', 'catalog_product', 'public_product')
+            ).select_related(
+                'trader', 'catalog_product', 'listing_product', 'legacy_public_product',
+            )
         )
         if len(offers) != len(payload['offer_ids']):
             return Response({'detail': 'One or more offers are missing or do not belong to this trader.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -510,7 +518,11 @@ class TraderAdvertisingCampaignDetailView(APIView):
                 elif get_wallet(trader).balance <= ZERO:
                     return Response({'detail': 'Insufficient advertising wallet balance.'}, status=status.HTTP_409_CONFLICT)
                 else:
-                    offer_rows = list(campaign.offers.select_related('trader_offer__catalog_product', 'trader_offer__public_product'))
+                    offer_rows = list(campaign.offers.select_related(
+                        'trader_offer__catalog_product',
+                        'trader_offer__listing_product',
+                        'trader_offer__legacy_public_product',
+                    ))
                     for row in offer_rows:
                         ok, reason = eligible_offer(row.trader_offer)
                         if not ok:
@@ -566,7 +578,8 @@ def _placement_queryset(request):
         'campaign',
         'campaign__trader',
         'trader_offer',
-        'trader_offer__public_product',
+        'trader_offer__listing_product',
+        'trader_offer__legacy_public_product',
         'trader_offer__category',
         'trader_offer__catalog_product',
         'trader_offer__catalog_product__category',
@@ -583,7 +596,11 @@ def _placement_queryset(request):
         except ValueError:
             return queryset.none(), q
         if excluded_ids:
-            queryset = queryset.exclude(trader_offer__public_product__pk__in=excluded_ids)
+            queryset = queryset.exclude(
+                Q(trader_offer__listing_product__pk__in=excluded_ids)
+                | Q(trader_offer__legacy_public_product__pk__in=excluded_ids)
+                | Q(trader_offer__catalog_product__public_product_id__in=excluded_ids)
+            )
     if q:
         terms = [term for term in q.split() if term][:6]
         query = Q()
@@ -634,7 +651,11 @@ def _placement_queryset(request):
     if exact_product_value:
         if not exact_product_value.isdigit() or int(exact_product_value) <= 0:
             return queryset.none(), q
-        queryset = queryset.filter(trader_offer__public_product__pk=int(exact_product_value))
+        queryset = queryset.filter(
+            Q(trader_offer__listing_product__pk=int(exact_product_value))
+            | Q(trader_offer__legacy_public_product__pk=int(exact_product_value))
+            | Q(trader_offer__catalog_product__public_product_id=int(exact_product_value))
+        )
     return queryset, q
 
 
@@ -767,7 +788,10 @@ class AdvertisingImpressionsView(APIView):
             campaign__end_date__gte=timezone.localdate(),
             trader_offer__trader_id=F('campaign__trader_id'),
             trader_offer__catalog_product_id=F('catalog_product_id'),
-        ).select_related('campaign', 'trader_offer__catalog_product', 'trader_offer__public_product')
+        ).select_related(
+            'campaign', 'trader_offer__catalog_product',
+            'trader_offer__listing_product', 'trader_offer__legacy_public_product',
+        )
         visitor = visitor_hash(request)
         today = timezone.localdate()
         entries = []
@@ -865,7 +889,11 @@ class AdminAdvertisingCampaignDetailView(APIView):
             campaign = get_object_or_404(
                 AdvertisingCampaign.objects.select_for_update()
                 .select_related('trader')
-                .prefetch_related('offers__trader_offer__catalog_product', 'offers__trader_offer__public_product'),
+                .prefetch_related(
+                    'offers__trader_offer__catalog_product',
+                    'offers__trader_offer__listing_product',
+                    'offers__trader_offer__legacy_public_product',
+                ),
                 pk=pk,
             )
             if action == 'approve':

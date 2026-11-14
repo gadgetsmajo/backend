@@ -182,6 +182,7 @@ class TraderProductSerializer(serializers.ModelSerializer):
     )
     review_status = serializers.SerializerMethodField()
     review_note = serializers.SerializerMethodField()
+    trader_name = serializers.CharField(source='trader.business_name', read_only=True)
     variant_list = serializers.SerializerMethodField()
     variants = ProductVariantSerializer(many=True, required=False, write_only=True)
     submit_for_review = serializers.BooleanField(required=False, default=True, write_only=True)
@@ -201,6 +202,7 @@ class TraderProductSerializer(serializers.ModelSerializer):
             'catalog_product', 'catalog_image_references',
             'image_url', 'is_active', 'is_featured', 'is_new_deal',
             'review_status', 'review_note', 'variants', 'variant_list', 'submit_for_review',
+            'trader_name',
             'created_at', 'updated_at',
         )
         read_only_fields = (
@@ -240,6 +242,7 @@ class TraderProductSerializer(serializers.ModelSerializer):
         variants = validated_data.pop('variants', None)
         submit_for_review = validated_data.pop('submit_for_review', True)
         catalog_product = validated_data.get('catalog_product')
+        validated_data['review_status'] = 'pending_review' if submit_for_review else 'draft'
         if catalog_product:
             self._inherit_catalog_fields(validated_data, catalog_product)
         product = super().create(validated_data)
@@ -257,6 +260,11 @@ class TraderProductSerializer(serializers.ModelSerializer):
             })
         if catalog_product:
             self._inherit_catalog_fields(validated_data, catalog_product, instance=instance)
+        if submit_for_review is not None and instance.review_status in (
+            'draft', 'rejected', 'changes_required',
+        ):
+            validated_data['review_status'] = 'pending_review' if submit_for_review else 'draft'
+            validated_data['review_note'] = ''
         product = super().update(instance, validated_data)
         product._submitted_variants = variants
         product._submit_for_review = submit_for_review
@@ -274,6 +282,20 @@ class TraderProductSerializer(serializers.ModelSerializer):
                 'catalog_product_id': 'An attached catalog product cannot be replaced or removed.',
             })
         if catalog_product:
+            trader = self.instance.trader if self.instance else self.context.get('trader')
+            existing_offer = TraderProduct.objects.filter(
+                trader=trader,
+                catalog_product=catalog_product,
+                is_active=True,
+            )
+            if self.instance:
+                existing_offer = existing_offer.exclude(pk=self.instance.pk)
+            if existing_offer.exists() and attrs.get(
+                'is_active', getattr(self.instance, 'is_active', True),
+            ):
+                raise serializers.ValidationError({
+                    'catalog_product_id': 'You already have an active offer for this product. Edit your existing offer instead.',
+                })
             if catalog_product.review_status != 'approved' or not catalog_product.is_active:
                 raise serializers.ValidationError({'catalog_product_id': 'This catalog product is unavailable.'})
             field_map = {
@@ -305,12 +327,6 @@ class TraderProductSerializer(serializers.ModelSerializer):
         category = attrs.get('category', getattr(self.instance, 'category', None))
         specifications = attrs.get('specifications', getattr(self.instance, 'specifications', {}))
         variants = attrs.get('variants')
-        public_product = None
-        if self.instance:
-            try:
-                public_product = self.instance.public_product
-            except ObjectDoesNotExist:
-                pass
         if not isinstance(specifications, dict):
             raise serializers.ValidationError({'specifications': 'Specifications must be an object.'})
         tags = attrs.get('tags', getattr(self.instance, 'tags', []))
@@ -333,7 +349,7 @@ class TraderProductSerializer(serializers.ModelSerializer):
             ]
             if len(option_sets) != len(set(option_sets)):
                 raise serializers.ValidationError({'variants': 'Variant option combinations must be unique.'})
-            validate_variant_removals(public_product, variants)
+            validate_variant_removals(self.instance, variants)
             if catalog_product:
                 catalog_options = catalog_product.get_variant_options()
                 if variants and not catalog_options:
@@ -363,15 +379,15 @@ class TraderProductSerializer(serializers.ModelSerializer):
                 or 'category' in attrs
                 or (
                     variants is not None
-                    and (bool(variants) or (public_product and public_product.variants.exists()))
+                    and (bool(variants) or (self.instance and self.instance.variants.exists()))
                 )
             )
             variant_data = variants
             if variant_data is None and self.instance and validate_variants:
                 variant_data = [
                     {'options': variant.options}
-                    for variant in public_product.variants.all()
-                ] if public_product else []
+                    for variant in self.instance.variants.all()
+                ] if self.instance else []
             for attribute in category.attributes.filter(is_required=True):
                 if attribute.is_variant:
                     if validate_variants and (
@@ -452,34 +468,23 @@ class TraderProductSerializer(serializers.ModelSerializer):
         }
 
     def get_public_product_id(self, obj):
-        try:
-            return obj.public_product.pk
-        except ObjectDoesNotExist:
-            return None
+        public_product = obj.public_product
+        return public_product.pk if public_product else None
 
     def get_review_status(self, obj):
-        try:
-            return obj.public_product.review_status
-        except ObjectDoesNotExist:
-            return 'pending_review'
+        return obj.review_status
 
     def get_review_note(self, obj):
-        try:
-            return obj.public_product.review_note
-        except ObjectDoesNotExist:
-            return ''
+        return obj.review_note
 
     def get_variant_list(self, obj):
-        try:
-            variants = ProductVariant.objects.filter(product=obj.public_product).annotate(
-                sold_quantity=Sum('order_items__quantity'),
-                has_inventory_item=Exists(
-                    TraderInventoryItem.objects.filter(variant_id=OuterRef('pk')),
-                ),
-            )
-            return ProductVariantSerializer(variants, many=True, context=self.context).data
-        except ObjectDoesNotExist:
-            return []
+        variants = ProductVariant.objects.filter(trader_product=obj).annotate(
+            sold_quantity=Sum('order_items__quantity'),
+            has_inventory_item=Exists(
+                TraderInventoryItem.objects.filter(variant_id=OuterRef('pk')),
+            ),
+        )
+        return ProductVariantSerializer(variants, many=True, context=self.context).data
 
 
 class TraderSaleSerializer(serializers.ModelSerializer):

@@ -95,9 +95,37 @@ def merge_catalog_products(source_ids, survivor_id):
     )
     from traders.models import TraderProduct
 
+    catalog_anchor = survivor.public_product
+    if catalog_anchor is None:
+        catalog_anchor = next(
+            (source.public_product for source in sources if source.public_product_id),
+            None,
+        )
+        if catalog_anchor:
+            survivor.public_product = catalog_anchor
+            survivor.save(update_fields=('public_product', 'updated_at'))
+    if catalog_anchor:
+        Product.objects.filter(
+            catalog_product_id=survivor.pk,
+        ).exclude(pk=catalog_anchor.pk).update(is_catalog_anchor=False)
+        Product.objects.filter(pk=catalog_anchor.pk).update(is_catalog_anchor=True)
+        TraderProduct.objects.filter(catalog_product_id=survivor.pk).update(
+            listing_product_id=catalog_anchor.pk,
+        )
+    for source in sources:
+        if source.public_product_id:
+            source.public_product.is_catalog_anchor = False
+            source.public_product.save(update_fields=('is_catalog_anchor',))
+            source.public_product = None
+            source.save(update_fields=('public_product', 'updated_at'))
+
     TraderProduct.objects.filter(catalog_product_id__in=source_pk_list).update(
         catalog_product_id=survivor.pk,
     )
+    if catalog_anchor:
+        TraderProduct.objects.filter(catalog_product_id=survivor.pk).update(
+            listing_product_id=catalog_anchor.pk,
+        )
     CatalogProduct.objects.filter(pk__in=source_pk_list).update(
         review_status='disabled',
         is_active=False,
@@ -526,6 +554,9 @@ def _approve_catalog_request(product):
     product.save(update_fields=(
         'image_references', 'variant_options', 'review_status', 'is_active', 'review_note', 'updated_at',
     ))
+    from .catalog_sync import ensure_catalog_public_product
+
+    ensure_catalog_public_product(product)
 
 
 class CatalogProductView(APIView):
@@ -742,14 +773,28 @@ class CatalogProductOffersView(APIView):
         if not catalog_product:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
 
-        offers = Product.objects.filter(
+        from traders.models import TraderProduct
+
+        offers = TraderProduct.objects.filter(
             catalog_product=catalog_product,
             is_active=True,
             review_status='approved',
-        ).filter(public_marketplace_product_filter()).select_related(
-            'category', 'trader', 'trader_product',
-            'catalog_product__category', 'trader_product__catalog_product',
+            trader__status='approved',
+            trader__is_visible=True,
+            trader__is_closed=False,
+        ).select_related(
+            'trader', 'catalog_product__category', 'listing_product__category',
+            'listing_product__catalog_product__category', 'legacy_public_product__category',
         ).prefetch_related(
-            'variants', 'images',
+            'variants', 'listing_product__images', 'listing_product__variants',
+            'legacy_public_product__images', 'legacy_public_product__variants',
         ).order_by('price', 'pk')
-        return Response(ProductSerializer(offers, many=True, context={'request': request}).data)
+        data = []
+        for offer in offers:
+            public_product = offer.listing_product or offer.public_product
+            if public_product:
+                data.append(ProductSerializer(
+                    public_product,
+                    context={'request': request, 'trader_offer': offer},
+                ).data)
+        return Response(data)

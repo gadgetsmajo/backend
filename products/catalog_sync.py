@@ -108,6 +108,45 @@ def _sync_catalog_media(product, catalog_product):
 
 
 @transaction.atomic
+def ensure_catalog_public_product(catalog_product):
+    if catalog_product.public_product_id:
+        return catalog_product.public_product
+
+    product = Product.objects.filter(
+        catalog_product=catalog_product,
+        trader__isnull=True,
+        trader_product__isnull=True,
+    ).order_by('pk').first()
+    if product is None:
+        references = catalog_product.image_references or []
+        product = Product.objects.create(
+            name=catalog_product.name,
+            brand=catalog_product.brand,
+            category=catalog_product.category,
+            tags=catalog_product.tags,
+            specifications=catalog_product.specifications,
+            short_description=catalog_product.short_description,
+            long_description=catalog_product.long_description,
+            image=references[0] if references else None,
+            price=0,
+            stock=0,
+            catalog_product=catalog_product,
+            is_active=catalog_product.is_active,
+            review_status=catalog_product.review_status,
+            is_catalog_anchor=True,
+        )
+    else:
+        product.is_catalog_anchor = True
+        product.is_active = catalog_product.is_active
+        product.review_status = catalog_product.review_status
+        product.save(update_fields=('is_catalog_anchor', 'is_active', 'review_status'))
+
+    catalog_product.public_product = product
+    catalog_product.save(update_fields=('public_product', 'updated_at'))
+    return product
+
+
+@transaction.atomic
 def sync_product_to_catalog(product, *, approve_existing=False):
     """Make an approved public Product discoverable through the shared catalog."""
     catalog_product = product.catalog_product if product.catalog_product_id else None
@@ -168,6 +207,14 @@ def sync_product_to_catalog(product, *, approve_existing=False):
     if product.catalog_product_id != catalog_product.pk:
         Product.objects.filter(pk=product.pk).update(catalog_product_id=catalog_product.pk)
         product.catalog_product = catalog_product
+    if is_catalog_owner and not catalog_product.public_product_id:
+        product.is_catalog_anchor = True
+        product.save(update_fields=('is_catalog_anchor',))
+        catalog_product.public_product = product
+        catalog_product.save(update_fields=('public_product', 'updated_at'))
+    elif catalog_product.public_product_id == product.pk and not product.is_catalog_anchor:
+        product.is_catalog_anchor = True
+        product.save(update_fields=('is_catalog_anchor',))
     if product.trader_product_id:
         TraderProduct.objects.filter(
             pk=product.trader_product_id,

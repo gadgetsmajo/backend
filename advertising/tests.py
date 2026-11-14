@@ -66,6 +66,7 @@ class AdvertisingAPITests(TestCase):
             category=self.category,
             image_url='https://images.example.test/esp32.jpg',
             is_active=True,
+            review_status='approved',
         )
         self.public_product = Product.objects.create(
             name='Test ESP32 board',
@@ -77,7 +78,12 @@ class AdvertisingAPITests(TestCase):
             catalog_product=self.catalog,
             is_active=True,
             review_status='approved',
+            is_catalog_anchor=True,
         )
+        self.catalog.public_product = self.public_product
+        self.catalog.save(update_fields=('public_product',))
+        self.offer.listing_product = self.public_product
+        self.offer.save(update_fields=('listing_product',))
         self.owner_client = APIClient()
         self.owner_client.force_authenticate(self.owner)
         self.buyer_client = APIClient()
@@ -111,7 +117,7 @@ class AdvertisingAPITests(TestCase):
             stock=5,
             category=self.category,
             image_url='https://images.example.test/esp32.jpg',
-            is_active=True,
+            is_active=False,
         )
         response = self.owner_client.get(
             f'/api/traders/{self.trader.uuid}/advertising/offers/'
@@ -199,9 +205,18 @@ class AdvertisingAPITests(TestCase):
 
     @override_settings(DEBUG=True, PAYMENT_MODE='dummy', ADVERTISING_ENABLED=True, ADVERTISING_REQUIRE_APPROVAL=True)
     def test_campaign_is_bound_to_exact_trader_offer_and_admin_approval(self):
+        sibling_catalog = CatalogProduct.objects.create(
+            name='Sibling ESP32 board',
+            brand='Majo',
+            model='ESP32-SIBLING',
+            category=self.category,
+            image_references=['https://images.example.test/esp32.jpg'],
+            review_status='approved',
+            is_active=True,
+        )
         sibling = TraderProduct.objects.create(
             trader=self.trader,
-            catalog_product=self.catalog,
+            catalog_product=sibling_catalog,
             name='Sibling seller offer',
             price=Decimal('49000.00'),
             stock=8,

@@ -1,4 +1,5 @@
 import cloudinary.models
+from django.core.exceptions import ObjectDoesNotExist
 from django.db import models
 from django.db.models import Q
 from django.conf import settings
@@ -120,6 +121,10 @@ class TraderProduct(models.Model):
         'products.CatalogProduct', on_delete=models.PROTECT, null=True, blank=True,
         related_name='trader_offers',
     )
+    listing_product = models.ForeignKey(
+        'products.Product', on_delete=models.PROTECT, null=True, blank=True,
+        related_name='trader_offers',
+    )
     trader_sku = models.CharField(max_length=100, blank=True, default='')
     catalog_image_references = models.JSONField(default=list, blank=True)
     name        = models.CharField(max_length=255)
@@ -155,6 +160,20 @@ class TraderProduct(models.Model):
     image_url   = models.URLField(blank=True)  # legacy
     image       = cloudinary.models.CloudinaryField('image', folder='trader_products/', blank=True, null=True)
     is_active   = models.BooleanField(default=True)
+    review_status = models.CharField(
+        max_length=20,
+        choices=(
+            ('draft', 'Draft'),
+            ('pending_review', 'Pending review'),
+            ('approved', 'Approved'),
+            ('rejected', 'Rejected'),
+            ('changes_required', 'Changes required'),
+            ('disabled', 'Disabled'),
+            ('archived', 'Archived'),
+        ),
+        default='pending_review',
+    )
+    review_note = models.TextField(blank=True, default='')
     is_featured = models.BooleanField(default=False)
     is_new_deal = models.BooleanField(default=False)
     created_at  = models.DateTimeField(auto_now_add=True)
@@ -167,6 +186,11 @@ class TraderProduct(models.Model):
                 fields=('trader', 'trader_sku'),
                 condition=~Q(trader_sku=''),
                 name='unique_nonempty_trader_product_sku',
+            ),
+            models.UniqueConstraint(
+                fields=('trader', 'catalog_product'),
+                condition=Q(catalog_product__isnull=False, is_active=True),
+                name='unique_active_trader_catalog_offer',
             ),
         ]
 
@@ -181,6 +205,22 @@ class TraderProduct(models.Model):
 
     def __str__(self):
         return f'{self.trader.business_name} — {self.name}'
+
+    @property
+    def public_product(self):
+        if self.listing_product_id:
+            return self.listing_product
+        try:
+            legacy_product = self.legacy_public_product
+        except ObjectDoesNotExist:
+            legacy_product = None
+        if legacy_product:
+            return legacy_product
+        return (
+            self.catalog_product.public_product
+            if self.catalog_product_id and self.catalog_product.public_product_id
+            else None
+        )
 
 
 class TraderSale(models.Model):

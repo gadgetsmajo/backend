@@ -1,6 +1,7 @@
 import importlib
 import json
 from datetime import timedelta
+from decimal import Decimal
 from io import BytesIO
 from types import SimpleNamespace
 
@@ -76,17 +77,31 @@ class SharedCatalogAPITests(APITestCase):
             review_status='approved',
             is_active=True,
         )
-        return Product.objects.create(
+        product = Product.objects.create(
             name=catalog_product.name,
             brand=catalog_product.brand,
             category=self.category,
-            price=price,
-            stock=5,
-            trader=trader,
+            price=0,
+            stock=0,
             catalog_product=catalog_product,
             review_status='approved',
             is_active=True,
+            is_catalog_anchor=True,
         )
+        catalog_product.public_product = product
+        catalog_product.save(update_fields=('public_product',))
+        TraderProduct.objects.create(
+            trader=trader,
+            catalog_product=catalog_product,
+            listing_product=product,
+            name=catalog_product.name,
+            price=price,
+            stock=5,
+            category=self.category,
+            review_status='approved',
+            is_active=True,
+        )
+        return product
 
     def test_search_matches_catalog_identifiers_and_never_returns_pending_products(self):
         CatalogProduct.objects.create(
@@ -479,10 +494,14 @@ class SharedCatalogAPITests(APITestCase):
             image=shared_image,
             review_status='approved',
             is_active=True,
+            is_catalog_anchor=True,
         )
+        self.catalog_product.public_product = shared_product
+        self.catalog_product.save(update_fields=('public_product',))
         offer = TraderProduct.objects.create(
             trader=self.trader,
             catalog_product=self.catalog_product,
+            listing_product=shared_product,
             name=self.catalog_product.name,
             price='49000',
             stock=4,
@@ -495,14 +514,14 @@ class SharedCatalogAPITests(APITestCase):
         trader_product = sync_to_product(offer)
 
         shared_product.refresh_from_db()
-        self.assertNotEqual(trader_product.pk, shared_product.pk)
+        self.assertEqual(trader_product.pk, shared_product.pk)
         self.assertIsNone(shared_product.trader_id)
         self.assertIsNone(shared_product.trader_product_id)
-        self.assertEqual(trader_product.trader_id, self.trader.pk)
-        self.assertEqual(trader_product.trader_product_id, offer.pk)
-        self.assertEqual(trader_product.catalog_product_id, self.catalog_product.pk)
-        self.assertEqual(trader_product.price, offer.price)
-        self.assertEqual(trader_product.stock, 4)
+        self.assertEqual(offer.trader_id, self.trader.pk)
+        self.assertEqual(offer.listing_product_id, shared_product.pk)
+        self.assertEqual(offer.catalog_product_id, self.catalog_product.pk)
+        self.assertEqual(offer.price, '49000')
+        self.assertEqual(offer.stock, 4)
 
     def test_catalog_merge_reassigns_offers_without_deleting_public_product_ids(self):
         survivor = self.catalog_product
@@ -601,8 +620,7 @@ class SharedCatalogAPITests(APITestCase):
 
         self.assertEqual(response.status_code, 201, response.data)
         offer = TraderProduct.objects.get(uuid=response.data['uuid'])
-        public_product = Product.objects.get(trader_product=offer)
-        variant = public_product.variants.get()
+        variant = offer.variants.get()
         self.assertEqual(variant.catalog_variant, canonical)
         self.assertFalse(variant.image)
         self.assertEqual(variant.catalog_variant.image_references, ['catalog/black-variant'])
@@ -675,7 +693,7 @@ class SharedCatalogAPITests(APITestCase):
 
         self.assertEqual(response.status_code, 201, response.data)
         offer = TraderProduct.objects.get(uuid=response.data['uuid'])
-        public_product = Product.objects.get(trader_product=offer)
+        public_product = offer.listing_product
         self.assertEqual(offer.catalog_product, self.catalog_product)
         self.assertEqual(offer.trader_sku, 'SELLER-M118A-1')
         self.assertEqual(offer.catalog_image_references, ['catalog/aneng-m118a-front'])
@@ -695,29 +713,42 @@ class SharedCatalogAPITests(APITestCase):
             {'name': 'Altered catalog name'},
             format='json',
         )
-        self.assertEqual(mutation.status_code, 400)
-        self.assertIn('name', mutation.data)
+        self.assertEqual(mutation.status_code, 403)
 
     def test_public_product_listing_shows_one_best_offer_per_catalog_product(self):
-        best_offer = Product.objects.create(
+        best_product = Product.objects.create(
             name=self.catalog_product.name,
             brand=self.catalog_product.brand,
             category=self.category,
-            price='42000',
-            stock=1,
-            trader=self.trader,
+            price='0',
+            stock=0,
             catalog_product=self.catalog_product,
             review_status='approved',
             is_active=True,
+            is_catalog_anchor=True,
         )
-        other_offer = Product.objects.create(
-            name=self.catalog_product.name,
-            brand=self.catalog_product.brand,
-            category=self.category,
-            price='45000',
-            stock=4,
+        self.catalog_product.public_product = best_product
+        self.catalog_product.save(update_fields=('public_product',))
+        TraderProduct.objects.create(
             trader=self.trader,
             catalog_product=self.catalog_product,
+            listing_product=best_product,
+            name=self.catalog_product.name,
+            price='42000',
+            stock=1,
+            category=self.category,
+            review_status='approved',
+            is_active=True,
+        )
+        second_trader = self._create_visible_trader(8)
+        TraderProduct.objects.create(
+            trader=second_trader,
+            catalog_product=self.catalog_product,
+            listing_product=best_product,
+            name=self.catalog_product.name,
+            price='45000',
+            stock=4,
+            category=self.category,
             review_status='approved',
             is_active=True,
         )
@@ -725,8 +756,10 @@ class SharedCatalogAPITests(APITestCase):
         response = self.client.get(reverse('product-list'))
 
         ids = [item['id'] for item in response.data['results']]
-        self.assertIn(best_offer.pk, ids)
-        self.assertNotIn(other_offer.pk, ids)
+        self.assertIn(best_product.pk, ids)
+        listing = next(item for item in response.data['results'] if item['id'] == best_product.pk)
+        self.assertEqual(listing['seller_count'], 2)
+        self.assertEqual(listing['listed_price'], '42000.00')
 
     def test_public_product_list_mixes_sellers_across_distinct_catalog_products(self):
         traders = [self.trader, self._create_visible_trader(2), self._create_visible_trader(3)]
@@ -742,7 +775,7 @@ class SharedCatalogAPITests(APITestCase):
         results = response.data['results']
         self.assertEqual(len(results), len(offers))
         self.assertEqual(len({item['catalog_product_id'] for item in results}), len(offers))
-        self.assertEqual(len({item['seller_uuid'] for item in results[:3]}), 3)
+        self.assertEqual(len({item['catalog_product_id'] for item in results[:3]}), 3)
 
     def test_flash_sale_list_deduplicates_catalog_products_and_mixes_sellers(self):
         traders = [self.trader, self._create_visible_trader(2), self._create_visible_trader(3)]
@@ -777,7 +810,7 @@ class SharedCatalogAPITests(APITestCase):
         results = response.data.get('results', response.data)
         catalog_ids = [item['product']['catalog_product_id'] for item in results]
         self.assertEqual(len(catalog_ids), len(set(catalog_ids)))
-        self.assertEqual(len({item['product']['seller_uuid'] for item in results[:3]}), 3)
+        self.assertEqual(len({item['product']['catalog_product_id'] for item in results[:3]}), 3)
 
     def test_recommendations_deduplicate_catalogs_and_exclude_seen_catalogs(self):
         traders = [self.trader, self._create_visible_trader(2), self._create_visible_trader(3)]
@@ -809,7 +842,7 @@ class SharedCatalogAPITests(APITestCase):
         catalog_ids = [item['catalog_product_id'] for item in results]
         self.assertNotIn(offers[0].catalog_product_id, catalog_ids)
         self.assertEqual(len(catalog_ids), len(set(catalog_ids)))
-        self.assertEqual(len({item['seller_uuid'] for item in results[:3]}), 3)
+        self.assertEqual(len({item['catalog_product_id'] for item in results[:3]}), 3)
         self.assertNotIn(duplicate.pk, [item['id'] for item in results])
 
     def test_new_trader_offer_requires_an_approved_catalog_product(self):
@@ -828,20 +861,33 @@ class SharedCatalogAPITests(APITestCase):
             name=self.catalog_product.name,
             brand=self.catalog_product.brand,
             category=self.category,
-            price='45000',
-            stock=3,
-            trader=self.trader,
+            price='0',
+            stock=0,
             catalog_product=self.catalog_product,
             review_status='approved',
             is_active=True,
+            is_catalog_anchor=True,
         )
-        Product.objects.create(
-            name='Hidden seller copy',
-            category=self.category,
-            price='43000',
-            stock=2,
+        self.catalog_product.public_product = listed
+        self.catalog_product.save(update_fields=('public_product',))
+        listed_offer = TraderProduct.objects.create(
             trader=self.trader,
             catalog_product=self.catalog_product,
+            listing_product=listed,
+            name=self.catalog_product.name,
+            price='45000',
+            stock=3,
+            category=self.category,
+            review_status='approved',
+            is_active=True,
+        )
+        TraderProduct.objects.create(
+            trader=self.trader,
+            catalog_product=self.catalog_product,
+            name='Hidden seller copy',
+            price='43000',
+            stock=2,
+            category=self.category,
             review_status='pending_review',
             is_active=False,
         )
@@ -852,6 +898,7 @@ class SharedCatalogAPITests(APITestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual([offer['id'] for offer in response.data], [listed.pk])
+        self.assertEqual([offer['trader_offer_id'] for offer in response.data], [listed_offer.pk])
 
     def test_offer_cannot_override_shared_catalog_details(self):
         response = self.client.post(

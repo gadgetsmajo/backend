@@ -552,11 +552,11 @@ class TraderInventoryStockSyncTests(TestCase):
 		self.assertEqual(response.status_code, 201, response.data)
 		self.assertEqual(response.data['review_status'], 'pending_review')
 		trader_product = TraderProduct.objects.get(uuid=response.data['uuid'])
-		public_product = Product.objects.get(trader_product=trader_product)
-		self.assertFalse(public_product.is_active)
-		self.assertEqual(public_product.review_status, 'pending_review')
-		self.assertEqual(public_product.stock, 2)
-		self.assertEqual(public_product.variants.count(), 1)
+		public_product = trader_product.listing_product
+		self.assertTrue(public_product.is_catalog_anchor)
+		self.assertTrue(public_product.is_active)
+		self.assertEqual(trader_product.stock, 2)
+		self.assertEqual(trader_product.variants.count(), 1)
 		public_list = APIClient().get(reverse('product-list'))
 		self.assertNotIn(public_product.pk, [item['id'] for item in public_list.data['results']])
 
@@ -572,11 +572,10 @@ class TraderInventoryStockSyncTests(TestCase):
 		)
 
 		self.assertEqual(response.status_code, 200, response.data)
-		public_product = Product.objects.get(trader_product=self.product)
-		self.assertEqual(public_product.variants.count(), 1)
-		self.assertEqual(public_product.variants.get().options, {'color': 'Red'})
+		self.assertEqual(self.product.variants.count(), 1)
+		self.assertEqual(self.product.variants.get().options, {'color': 'Red'})
 		self.assertEqual(response.data['variant_list'][0]['options'], {'color': 'Red'})
-		variant = public_product.variants.get()
+		variant = self.product.variants.get()
 		inventory_item = TraderInventoryItem.objects.create(
 			trader=self.trader,
 			product=self.product,
@@ -623,14 +622,14 @@ class TraderInventoryStockSyncTests(TestCase):
 			trader_product=self.product,
 		)
 		selected = ProductVariant.objects.create(
-			product=public_product,
+			trader_product=self.product,
 			sku='INVENTORY-SHOE-42',
 			options={'size': '42', 'color': 'Black'},
 			price=25000,
 			stock=2,
 		)
 		other = ProductVariant.objects.create(
-			product=public_product,
+			trader_product=self.product,
 			sku='INVENTORY-SHOE-43',
 			options={'size': '43', 'color': 'Black'},
 			price=25000,
@@ -649,7 +648,7 @@ class TraderInventoryStockSyncTests(TestCase):
 		self.product.refresh_from_db()
 		self.assertEqual(selected.stock, 7)
 		self.assertEqual(other.stock, 3)
-		self.assertEqual(public_product.stock, 10)
+		self.assertEqual(public_product.stock, 5)
 		self.assertEqual(self.product.stock, 10)
 		self.assertEqual(added.data['variant_options'], {'size': '42', 'color': 'Black'})
 
@@ -664,19 +663,12 @@ class TraderInventoryStockSyncTests(TestCase):
 		self.product.refresh_from_db()
 		self.assertEqual(selected.stock, 5)
 		self.assertEqual(other.stock, 3)
-		self.assertEqual(public_product.stock, 8)
+		self.assertEqual(public_product.stock, 5)
 		self.assertEqual(self.product.stock, 8)
 
 	def test_variant_products_reject_product_level_inventory(self):
-		public_product = Product.objects.create(
-			name=self.product.name,
-			price=25000,
-			stock=5,
-			trader=self.trader,
-			trader_product=self.product,
-		)
 		ProductVariant.objects.create(
-			product=public_product,
+			trader_product=self.product,
 			options={'size': '42'},
 			price=25000,
 			stock=5,
@@ -990,7 +982,7 @@ class TraderInventoryStockSyncTests(TestCase):
 			)
 
 		self.assertEqual(response.status_code, 204)
-		self.assertFalse(TraderProduct.objects.filter(pk=self.product.pk).exists())
+		self.assertFalse(TraderProduct.objects.get(pk=self.product.pk).is_active)
 		public_product.refresh_from_db()
 		self.assertFalse(public_product.is_active)
 		self.assertIsNone(public_product.trader_product_id)

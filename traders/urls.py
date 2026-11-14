@@ -11,6 +11,7 @@ from .views import (
     AdminTraderFinanceView, AdminTraderWithdrawalUpdateView,
     AdminTraderApproveView, AdminTraderRejectView,
     AdminTraderDocumentView,
+    AdminTraderProductOffersView, AdminTraderProductReviewView,
 )
 
 urlpatterns = [
@@ -39,6 +40,8 @@ urlpatterns = [
     # Admin
     path('admin/',                                                      AdminTraderListView.as_view(),         name='admin-trader-list'),
     path('admin/finance/',                                              AdminTraderFinanceView.as_view(),      name='admin-trader-finance'),
+    path('admin/offers/',                                               AdminTraderProductOffersView.as_view(), name='admin-trader-product-offers'),
+    path('admin/offers/<uuid:offer_uuid>/review/',                     AdminTraderProductReviewView.as_view(), name='admin-trader-product-offer-review'),
     path('admin/withdrawals/<int:pk>/',                                 AdminTraderWithdrawalUpdateView.as_view(), name='admin-trader-withdrawal-update'),
     path('admin/<int:pk>/documents/<str:document_type>/',              AdminTraderDocumentView.as_view(),      name='admin-trader-document'),
     path('admin/<int:pk>/',                                             AdminTraderDetailView.as_view(),       name='admin-trader-detail'),

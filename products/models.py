@@ -79,6 +79,10 @@ class CatalogProduct(models.Model):
     category = models.ForeignKey(
         Category, on_delete=models.SET_NULL, null=True, blank=True, related_name='catalog_products',
     )
+    public_product = models.OneToOneField(
+        'products.Product', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='catalog_identity',
+    )
     short_description = models.CharField(max_length=300, blank=True, default='')
     long_description = models.TextField(blank=True, default='')
     tags = models.JSONField(default=list, blank=True)
@@ -233,11 +237,12 @@ class Product(models.Model):
     )
     trader_product = models.OneToOneField(
         'traders.TraderProduct', on_delete=models.SET_NULL,
-        null=True, blank=True, related_name='public_product'
+        null=True, blank=True, related_name='legacy_public_product'
     )
     catalog_product = models.ForeignKey(
         CatalogProduct, on_delete=models.PROTECT, null=True, blank=True, related_name='public_offers',
     )
+    is_catalog_anchor = models.BooleanField(default=False)
     is_featured = models.BooleanField(default=False)
     is_new_deal = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -256,10 +261,13 @@ class Product(models.Model):
 
     @property
     def requires_variant_selection(self):
+        return self.requires_variant_selection_for(self.variants.all())
+
+    def requires_variant_selection_for(self, variants):
         required_keys = self.required_variant_keys
         if not required_keys:
             return False
-        variants = list(self.variants.all())
+        variants = list(variants)
         return any(
             isinstance(variant.options, dict) and required_keys.issubset(variant.options)
             for variant in variants
@@ -282,7 +290,13 @@ class Product(models.Model):
 
 
 class ProductVariant(models.Model):
-    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='variants')
+    product = models.ForeignKey(
+        Product, on_delete=models.CASCADE, null=True, blank=True, related_name='variants',
+    )
+    trader_product = models.ForeignKey(
+        'traders.TraderProduct', on_delete=models.CASCADE, null=True, blank=True,
+        related_name='variants',
+    )
     catalog_variant = models.ForeignKey(
         CatalogVariant, on_delete=models.SET_NULL, null=True, blank=True,
         related_name='offer_variants',
@@ -306,11 +320,28 @@ class ProductVariant(models.Model):
                 condition=~Q(sku=''),
                 name='unique_nonempty_product_variant_sku_per_offer',
             ),
+            models.UniqueConstraint(
+                fields=('trader_product', 'sku'),
+                condition=Q(trader_product__isnull=False) & ~Q(sku=''),
+                name='unique_trader_offer_variant_sku',
+            ),
+            models.CheckConstraint(
+                condition=(
+                    Q(product__isnull=False, trader_product__isnull=True)
+                    | Q(product__isnull=True, trader_product__isnull=False)
+                ),
+                name='product_variant_has_one_owner',
+            ),
         ]
 
     def __str__(self):
         values = ' / '.join(str(value) for value in self.options.values())
-        return f'{self.product.name} — {values or self.sku or self.pk}'
+        owner_name = (
+            self.product.name if self.product_id
+            else self.trader_product.name if self.trader_product_id
+            else 'Product'
+        )
+        return f'{owner_name} — {values or self.sku or self.pk}'
 
 
 class FlashSale(models.Model):

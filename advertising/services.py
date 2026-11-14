@@ -104,7 +104,8 @@ def reconcile_campaign(campaign_id):
         else:
             for row in campaign.offers.select_related(
                 'trader_offer__catalog_product',
-                'trader_offer__public_product',
+                'trader_offer__listing_product',
+                'trader_offer__legacy_public_product',
             ):
                 valid, eligibility_reason = eligible_offer(row.trader_offer)
                 if not valid or row.trader_offer.trader_id != campaign.trader_id or row.catalog_product_id != row.trader_offer.catalog_product_id:
@@ -228,6 +229,8 @@ def eligible_offer(offer, *, require_public_approval=True):
         return False, 'Trader is not eligible to advertise.'
     if not offer.is_active or offer.availability != 'in_stock' or offer.stock <= 0:
         return False, 'Offer is inactive or out of stock.'
+    if offer.review_status != 'approved':
+        return False, 'Offer is not approved.'
     if offer.price <= ZERO:
         return False, 'Offer must have a valid price.'
     catalog = offer.catalog_product
@@ -315,7 +318,8 @@ def record_click(*, campaign_offer_id, idempotency_key, request):
             'campaign__trader__user',
             'trader_offer__trader',
             'trader_offer__catalog_product',
-            'trader_offer__public_product',
+            'trader_offer__listing_product',
+            'trader_offer__legacy_public_product',
         )
         .filter(pk=campaign_offer_id)
         .first()
@@ -325,7 +329,8 @@ def record_click(*, campaign_offer_id, idempotency_key, request):
     campaign = AdvertisingCampaign.objects.select_for_update().get(pk=campaign_offer.campaign_id)
     previous_campaign_status = campaign.status
     campaign_offer = AdvertisingCampaignOffer.objects.select_for_update().select_related(
-        'trader_offer__trader', 'trader_offer__catalog_product', 'trader_offer__public_product',
+        'trader_offer__trader', 'trader_offer__catalog_product',
+        'trader_offer__listing_product', 'trader_offer__legacy_public_product',
     ).get(pk=campaign_offer.pk)
     key = {'campaign_offer': campaign_offer, 'idempotency_key': idempotency_key}
     existing_click = AdvertisingClick.objects.filter(**key).first()

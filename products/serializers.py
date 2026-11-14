@@ -217,13 +217,18 @@ class ProductVariantSerializer(serializers.ModelSerializer):
             return False
         if user.is_staff:
             return True
-        product = obj.product
-        trader = product.trader
-        if not trader and product.trader_product_id:
-            try:
-                trader = product.trader_product.trader
-            except ObjectDoesNotExist:
-                return False
+        if obj.trader_product_id:
+            trader = obj.trader_product.trader
+        elif obj.product_id:
+            product = obj.product
+            trader = product.trader
+            if not trader and product.trader_product_id:
+                try:
+                    trader = product.trader_product.trader
+                except ObjectDoesNotExist:
+                    return False
+        else:
+            return False
         return bool(
             trader
             and (
@@ -274,6 +279,11 @@ def validate_variant_removals(product, variants):
 
 def sync_product_variants(product, variants):
     existing = list(product.variants.all())
+    offer_owner = product._meta.model_name == 'traderproduct'
+    owner_fields = (
+        {'trader_product': product}
+        if offer_owner else {'product': product}
+    )
     by_options = {
         json.dumps(variant.options, sort_keys=True, separators=(',', ':')): variant
         for variant in existing
@@ -292,15 +302,16 @@ def sync_product_variants(product, variants):
 
     for data, variant in submitted:
         if variant is None:
-            variant = ProductVariant.objects.create(product=product, **data)
+            variant = ProductVariant.objects.create(**owner_fields, **data)
         else:
             for field, value in data.items():
                 setattr(variant, field, value)
             variant.save()
-        if product.catalog_product_id:
+        catalog_product_id = getattr(product, 'catalog_product_id', None)
+        if catalog_product_id:
             options_key = CatalogVariant.make_options_key(variant.options)
             catalog_variant = CatalogVariant.objects.filter(
-                catalog_product_id=product.catalog_product_id,
+                catalog_product_id=catalog_product_id,
                 options_key=options_key,
             ).first()
             catalog_product = product.catalog_product
@@ -356,6 +367,8 @@ class ProductSerializer(serializers.ModelSerializer):
     reviews_count = serializers.SerializerMethodField()
     seller_uuid = serializers.SerializerMethodField()
     seller_name = serializers.SerializerMethodField()
+    seller_count = serializers.SerializerMethodField()
+    trader_offer_id = serializers.SerializerMethodField()
     variants = ProductVariantSerializer(many=True, required=False)
     availability = serializers.SerializerMethodField()
     warranty = serializers.SerializerMethodField()
@@ -370,6 +383,7 @@ class ProductSerializer(serializers.ModelSerializer):
                   'price', 'listed_price', 'original_price', 'original_listed_price', 'image_url', 'images',
                   'short_description', 'long_description', 'delivery_fee',
                   'rating', 'stock', 'is_active', 'is_featured', 'is_new_deal', 'seller_uuid', 'seller_name',
+                  'seller_count', 'trader_offer_id',
                   'availability', 'warranty', 'delivery_options', 'package_details',
                   'created_at', 'reviews_count')
         read_only_fields = (
@@ -410,9 +424,18 @@ class ProductSerializer(serializers.ModelSerializer):
         return super().to_internal_value(data)
 
     def get_reviews_count(self, obj):
+        if obj.catalog_product_id:
+            return ProductReview.objects.filter(
+                product__catalog_product_id=obj.catalog_product_id,
+                status='published',
+            ).count()
         return obj.reviews.filter(status='published').count()
 
     def get_seller_uuid(self, obj):
+        offer = self.context.get('trader_offer')
+        if offer is not None:
+            trader = offer.trader
+            return str(trader.uuid) if trader.is_visible and not trader.is_closed else None
         trader = obj.trader or (obj.trader_product.trader if obj.trader_product_id else None)
         if (
             not trader
@@ -424,6 +447,10 @@ class ProductSerializer(serializers.ModelSerializer):
         return str(trader.uuid)
 
     def get_seller_name(self, obj):
+        offer = self.context.get('trader_offer')
+        if offer is not None:
+            trader = offer.trader
+            return trader.business_name if trader.is_visible and not trader.is_closed else None
         trader = obj.trader or (obj.trader_product.trader if obj.trader_product_id else None)
         if (
             not trader
@@ -434,10 +461,48 @@ class ProductSerializer(serializers.ModelSerializer):
             return None
         return trader.business_name
 
+    def _catalog_offers(self, obj):
+        if not obj.is_catalog_anchor:
+            return []
+        prefetched = getattr(obj, '_prefetched_objects_cache', {}).get('trader_offers')
+        if prefetched is None:
+            from traders.models import TraderProduct
+
+            prefetched = TraderProduct.objects.filter(
+                Q(listing_product=obj)
+                | Q(catalog_product__public_product=obj)
+                | Q(legacy_public_product=obj),
+                is_active=True,
+                review_status='approved',
+                trader__status='approved',
+                trader__is_visible=True,
+                trader__is_closed=False,
+            ).select_related('trader')
+        return [
+            offer for offer in prefetched
+            if offer.is_active
+            and offer.review_status == 'approved'
+            and offer.trader.status == 'approved'
+            and offer.trader.is_visible
+            and not offer.trader.is_closed
+        ]
+
+    def get_seller_count(self, obj):
+        if self.context.get('trader_offer') is not None:
+            return 1
+        return len(self._catalog_offers(obj))
+
+    def get_trader_offer_id(self, obj):
+        offer = self.context.get('trader_offer')
+        return offer.pk if offer is not None else None
+
     def _get_offer_value(self, obj, field, default):
-        if not obj.trader_product_id:
-            return default
-        return getattr(obj.trader_product, field, default)
+        offer = self.context.get('trader_offer')
+        if offer is not None:
+            return getattr(offer, field, default)
+        if obj.trader_product_id:
+            return getattr(obj.trader_product, field, default)
+        return default
 
     def get_availability(self, obj):
         return self._get_offer_value(obj, 'availability', 'in_stock')
@@ -619,9 +684,57 @@ class ProductSerializer(serializers.ModelSerializer):
             if catalog.category_id:
                 rep['category'] = CategorySerializer(catalog.category).data
         rep['image'] = rep.get('image_url')
-        rep['price'] = str(price_with_platform_charges(instance.price))
-        if instance.original_price:
-            rep['original_price'] = str(price_with_platform_charges(instance.original_price))
+
+        offer = self.context.get('trader_offer')
+        if offer is not None:
+            base_price = offer.price
+            rep['price'] = str(price_with_platform_charges(base_price))
+            rep['listed_price'] = str(base_price)
+            rep['original_price'] = (
+                str(price_with_platform_charges(offer.original_price))
+                if offer.original_price else None
+            )
+            rep['original_listed_price'] = (
+                str(offer.original_price) if offer.original_price else None
+            )
+            rep['stock'] = offer.stock
+            rep['delivery_fee'] = str(offer.delivery_fee)
+            rep['is_active'] = offer.is_active
+            rep['review_status'] = offer.review_status
+            rep['review_note'] = offer.review_note
+            rep['variants'] = ProductVariantSerializer(
+                offer.variants.all(), many=True, context=self.context,
+            ).data
+        elif instance.trader_product_id:
+            rep['variants'] = ProductVariantSerializer(
+                instance.trader_product.variants.all(),
+                many=True,
+                context=self.context,
+            ).data
+        elif instance.is_catalog_anchor:
+            offers = self._catalog_offers(instance)
+            available_offers = [offer for offer in offers if offer.stock > 0]
+            if available_offers:
+                lowest_offer = min(available_offers, key=lambda offer: (offer.price, offer.pk))
+                rep['price'] = str(price_with_platform_charges(lowest_offer.price))
+                rep['listed_price'] = str(lowest_offer.price)
+                rep['original_price'] = (
+                    str(price_with_platform_charges(lowest_offer.original_price))
+                    if lowest_offer.original_price else None
+                )
+                rep['original_listed_price'] = (
+                    str(lowest_offer.original_price) if lowest_offer.original_price else None
+                )
+                rep['stock'] = sum(offer.stock for offer in available_offers)
+            else:
+                rep['price'] = '0.00'
+                rep['listed_price'] = '0.00'
+                rep['stock'] = 0
+
+        if not instance.is_catalog_anchor and offer is None:
+            rep['price'] = str(price_with_platform_charges(instance.price))
+            if instance.original_price:
+                rep['original_price'] = str(price_with_platform_charges(instance.original_price))
         return rep
 
 

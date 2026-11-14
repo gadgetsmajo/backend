@@ -96,22 +96,25 @@ class CartItemSerializer(serializers.ModelSerializer):
     product_price = serializers.SerializerMethodField()
     product_image = serializers.SerializerMethodField()
     variant_id = serializers.IntegerField(read_only=True)
+    trader_offer_id = serializers.IntegerField(read_only=True)
     variant_options = serializers.SerializerMethodField()
     variant_sku = serializers.SerializerMethodField()
 
     class Meta:
         model = CartItem
         fields = (
-            'id', 'product_id', 'variant_id', 'variant_options', 'variant_sku',
+            'id', 'product_id', 'trader_offer_id', 'variant_id', 'variant_options', 'variant_sku',
             'product_name', 'product_price', 'product_image', 'product_slug',
             'product_category', 'product_rating', 'quantity', 'added_at',
         )
         read_only_fields = ('id', 'added_at')
 
     def get_product_price(self, obj):
-        price = obj.variant.price if obj.variant_id else Product.objects.filter(
-            pk=obj.product_id,
-        ).values_list('price', flat=True).first()
+        price = (
+            obj.variant.price if obj.variant_id
+            else obj.trader_offer.price if obj.trader_offer_id
+            else Product.objects.filter(pk=obj.product_id).values_list('price', flat=True).first()
+        )
         if price is None:
             price = obj.product_price
         return str(price_with_platform_charges(price))
