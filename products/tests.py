@@ -677,8 +677,8 @@ class FlashSalePermissionAPITest(TestCase):
         anchor = Product.objects.create(
             name=catalog_product.name,
             category=self.category,
-            price=120000,
-            stock=10,
+            price=0,
+            stock=0,
             catalog_product=catalog_product,
             review_status='approved',
             is_active=True,

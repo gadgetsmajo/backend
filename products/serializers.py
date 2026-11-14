@@ -895,16 +895,31 @@ class FlashSaleSerializer(serializers.ModelSerializer):
         if product is None:
             raise serializers.ValidationError({'product_id': 'Product is required.'})
 
+        reference_price = product.price
+        available_stock = product.stock
+        if product.is_catalog_anchor:
+            request = self.context.get('request')
+            trader = getattr(getattr(request, 'user', None), 'trader_application', None)
+            if trader is not None:
+                offer = product.trader_offers.filter(
+                    trader=trader,
+                    review_status='approved',
+                    is_active=True,
+                ).first()
+                if offer is not None:
+                    reference_price = offer.price
+                    available_stock = offer.stock
+
         # flash_price must be less than the product's current price
-        if flash_price is not None and flash_price >= product.price:
+        if flash_price is not None and flash_price >= reference_price:
             raise serializers.ValidationError({
-                'flash_price': f'Flash price must be less than the product price (UGX {product.price:,.0f}).'
+                'flash_price': f'Flash price must be less than the product price (UGX {reference_price:,.0f}).'
             })
 
         # stock_limit must not exceed available product stock
-        if stock_limit is not None and stock_limit > product.stock:
+        if stock_limit is not None and stock_limit > available_stock:
             raise serializers.ValidationError({
-                'stock_limit': f'Stock limit ({stock_limit}) cannot exceed available product stock ({product.stock}).'
+                'stock_limit': f'Stock limit ({stock_limit}) cannot exceed available product stock ({available_stock}).'
             })
 
         # ends_at must be in the future
