@@ -6,8 +6,8 @@ from uuid import UUID
 
 from django.core.cache import cache
 from django.db import transaction
-from django.db.models import Avg, Case, Count, Exists, F, IntegerField, OuterRef, Prefetch, Q, Subquery, Sum, Value, When
-from django.db.models.functions import Coalesce, Least
+from django.db.models import Avg, Count, Exists, F, IntegerField, OuterRef, Prefetch, Q, Sum, Value
+from django.db.models.functions import Coalesce
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django_redis.exceptions import ConnectionInterrupted
@@ -178,51 +178,8 @@ class CategoryDetailView(generics.RetrieveUpdateDestroyAPIView):
         CategoryListView._invalidate_category_cache()
 
 
-def annotate_catalog_offer_metrics(queryset):
-    from traders.models import TraderProduct
-
-    offers = TraderProduct.objects.filter(
-        Q(listing_product_id=OuterRef('pk'))
-        | Q(catalog_product__public_product_id=OuterRef('pk'))
-        | Q(legacy_public_product__pk=OuterRef('pk')),
-        is_active=True,
-        review_status='approved',
-        stock__gt=0,
-        trader__status='approved',
-        trader__is_visible=True,
-        trader__is_closed=False,
-    )
-    lowest_price = offers.order_by('price', 'pk').values('price')[:1]
-    total_stock = offers.order_by().values().annotate(
-        total=Sum('stock'),
-    ).values('total')[:1]
-    return queryset.annotate(
-        _has_available_offer=Exists(offers),
-        _marketplace_price=Case(
-            When(
-                is_catalog_anchor=True,
-                stock__gt=0,
-                price__gt=0,
-                then=Least(
-                    F('price'),
-                    Coalesce(Subquery(lowest_price), F('price')),
-                ),
-            ),
-            When(
-                is_catalog_anchor=True,
-                then=Coalesce(Subquery(lowest_price), F('price')),
-            ),
-            default=F('price'),
-        ),
-        _marketplace_stock=Case(
-            When(
-                is_catalog_anchor=True,
-                then=Coalesce(Subquery(total_stock), F('stock')),
-            ),
-            default=F('stock'),
-            output_field=IntegerField(),
-        ),
-    )
+def annotate_catalog_listing_price(queryset):
+    return queryset.annotate(_marketplace_price=F('price'))
 
 
 class ProductListView(generics.ListCreateAPIView):
@@ -282,7 +239,7 @@ class ProductListView(generics.ListCreateAPIView):
                 'created_at',
             ),
         )
-        qs = annotate_catalog_offer_metrics(qs)
+        qs = annotate_catalog_listing_price(qs)
         if not self.request.user.is_staff:
             qs = qs.filter(
                 is_active=True,
@@ -294,7 +251,6 @@ class ProductListView(generics.ListCreateAPIView):
                 | Q(trader_product__catalog_product__isnull=False)
                 | Q(trader__isnull=False, catalog_product__isnull=False),
                 Q(is_catalog_anchor=False)
-                | Q(_has_available_offer=True)
                 | Q(stock__gt=0, price__gt=0),
             )
         category = self.request.query_params.get('category')
@@ -330,7 +286,6 @@ class ProductListView(generics.ListCreateAPIView):
         if available == 'true':
             qs = qs.filter(
                 Q(is_catalog_anchor=False, stock__gt=0)
-                | Q(_has_available_offer=True)
                 | Q(is_catalog_anchor=True, stock__gt=0, price__gt=0)
             )
         min_rating = self.request.query_params.get('min_rating')
@@ -425,6 +380,11 @@ class ProductListView(generics.ListCreateAPIView):
         if not self.request.query_params.get('ordering') and not self.request.user.is_staff:
             qs = diversify_product_queryset(qs, ordering)
         return qs
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context['separate_catalog_listings'] = True
+        return context
 
     def perform_create(self, serializer):
         cover = self.request.FILES.get('image')
@@ -635,7 +595,11 @@ class RecommendedProductsView(APIView):
 
     def get(self, request):
         products = _get_recommended_products_for_user(request.user if getattr(request, 'user', None) and request.user.is_authenticated else None, limit=12)
-        serializer = ProductSerializer(products, many=True)
+        serializer = ProductSerializer(
+            products,
+            many=True,
+            context={'separate_catalog_listings': True},
+        )
         return Response(serializer.data)
 
 
@@ -673,7 +637,7 @@ def _get_recommended_products_for_user(user, limit=12):
             ).select_related('trader'),
         ),
     )
-    qs = annotate_catalog_offer_metrics(qs).annotate(
+    qs = annotate_catalog_listing_price(qs).annotate(
         _storefront_updated_at=Coalesce(
             'catalog_product__updated_at',
             'created_at',
@@ -684,7 +648,6 @@ def _get_recommended_products_for_user(user, limit=12):
         | Q(trader_product__catalog_product__isnull=False)
         | Q(trader__isnull=False, catalog_product__isnull=False),
         Q(is_catalog_anchor=False)
-        | Q(_has_available_offer=True)
         | Q(stock__gt=0, price__gt=0),
     ).order_by('-rating', '-_storefront_updated_at', '-created_at')
 

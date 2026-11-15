@@ -510,6 +510,10 @@ class ProductSerializer(serializers.ModelSerializer):
         if (
             self.context.get('trader_offer') is not None
             or self.context.get('direct_catalog_offer')
+            or (
+                self.context.get('separate_catalog_listings')
+                and obj.is_catalog_anchor
+            )
             or obj.trader_product_id is not None
         ):
             return 1
@@ -731,7 +735,10 @@ class ProductSerializer(serializers.ModelSerializer):
             rep['variants'] = ProductVariantSerializer(
                 offer.variants.all(), many=True, context=self.context,
             ).data
-        elif self.context.get('direct_catalog_offer'):
+        elif self.context.get('direct_catalog_offer') or (
+            self.context.get('separate_catalog_listings')
+            and instance.is_catalog_anchor
+        ):
             rep['price'] = str(price_with_platform_charges(instance.price))
             rep['listed_price'] = str(instance.price)
             rep['original_price'] = (

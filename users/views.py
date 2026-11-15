@@ -8,6 +8,7 @@ import uuid
 from datetime import timedelta
 from urllib.parse import urlparse
 from django.db import transaction
+from django.db.models import Q
 from rest_framework import generics, permissions, serializers, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -1437,6 +1438,8 @@ class RecommendedProductsView(APIView):
             review_status='approved',
         ).filter(
             public_marketplace_product_filter(),
+        ).filter(
+            Q(is_catalog_anchor=False) | Q(stock__gt=0, price__gt=0),
         ).select_related(
             'category', 'trader', 'trader_product__trader', 'catalog_product__category',
         ).prefetch_related(
@@ -1491,7 +1494,11 @@ class RecommendedProductsView(APIView):
         has_next = (start + page_size) < total
 
         return Response({
-            'results': ProductSerializer(page_products, many=True).data,
+            'results': ProductSerializer(
+                page_products,
+                many=True,
+                context={'separate_catalog_listings': True},
+            ).data,
             'count': total,
             'next': page + 1 if has_next else None,
         })
@@ -1575,6 +1582,8 @@ class RecommendedProductsView(APIView):
             review_status='approved',
         ).filter(
             public_marketplace_product_filter(),
+        ).filter(
+            Q(is_catalog_anchor=False) | Q(stock__gt=0, price__gt=0),
         ).select_related(
             'category', 'trader', 'trader_product__trader', 'catalog_product__category',
         ).prefetch_related(
@@ -1618,7 +1627,11 @@ class RecommendedProductsView(APIView):
         has_next = (start + page_size) < total
 
         return Response({
-            'results': ProductSerializer(page_products, many=True).data,
+            'results': ProductSerializer(
+                page_products,
+                many=True,
+                context={'separate_catalog_listings': True},
+            ).data,
             'count': total,
             'next': page + 1 if has_next else None,
         })

@@ -245,7 +245,7 @@ class SharedCatalogAPITests(APITestCase):
 
         self.client.force_authenticate(user=None)
         listing = self.client.get(reverse('product-list'))
-        self.assertIn(product.public_product_id, [item['id'] for item in listing.data['results']])
+        self.assertNotIn(product.public_product_id, [item['id'] for item in listing.data['results']])
         self.assertIn(offer.listing_product_id, [item['id'] for item in listing.data['results']])
 
     def test_admin_can_edit_request_before_approval_and_rejection_requires_reason(self):
@@ -808,8 +808,8 @@ class SharedCatalogAPITests(APITestCase):
             name=self.catalog_product.name,
             brand=self.catalog_product.brand,
             category=self.category,
-            price='0',
-            stock=0,
+            price='50000',
+            stock=7,
             catalog_product=self.catalog_product,
             review_status='approved',
             is_active=True,
@@ -852,8 +852,9 @@ class SharedCatalogAPITests(APITestCase):
         mother_data = next(item for item in response.data['results'] if item['id'] == best_product.pk)
         first_data = next(item for item in response.data['results'] if item['id'] == first_listing.pk)
         second_data = next(item for item in response.data['results'] if item['id'] == second_listing.pk)
-        self.assertEqual(mother_data['seller_count'], 2)
-        self.assertEqual(mother_data['listed_price'], '42000.00')
+        self.assertEqual(mother_data['seller_count'], 1)
+        self.assertEqual(mother_data['listed_price'], '50000.00')
+        self.assertEqual(mother_data['stock'], 7)
         self.assertEqual(first_data['seller_uuid'], str(self.trader.uuid))
         self.assertEqual(second_data['seller_uuid'], str(second_trader.uuid))
         self.assertEqual(first_data['listed_price'], '42000.00')
@@ -873,21 +874,21 @@ class SharedCatalogAPITests(APITestCase):
 
         self.assertEqual(response.status_code, 200)
         results = response.data['results']
-        self.assertEqual(len(results), len(offers) * 2)
+        self.assertEqual(len(results), len(offers))
         result_ids = {item['id'] for item in results}
         for listing in offers:
             self.assertIn(listing.pk, result_ids)
-            self.assertIn(listing.catalog_product.public_product_id, result_ids)
+            self.assertNotIn(listing.catalog_product.public_product_id, result_ids)
 
         home_recommendations = self.client.get('/api/auth/recommended/?page_size=24')
         self.assertEqual(home_recommendations.status_code, 200)
         home_ids = {item['id'] for item in home_recommendations.data['results']}
         for listing in offers:
             self.assertIn(listing.pk, home_ids)
-            self.assertIn(listing.catalog_product.public_product_id, home_ids)
+            self.assertNotIn(listing.catalog_product.public_product_id, home_ids)
         catalog_ids = [item['catalog_product_id'] for item in results]
         self.assertEqual(len(set(catalog_ids)), len(offers))
-        self.assertTrue(all(catalog_ids.count(catalog_id) == 2 for catalog_id in set(catalog_ids)))
+        self.assertTrue(all(catalog_ids.count(catalog_id) == 1 for catalog_id in set(catalog_ids)))
 
         recommendations = self.client.get(reverse('recommended-products'))
         self.assertEqual(recommendations.status_code, 200)
@@ -1002,7 +1003,7 @@ class SharedCatalogAPITests(APITestCase):
         sales = response.data.get('results', response.data)
         self.assertEqual([sale['id'] for sale in sales], [own_sale.id])
 
-    def test_recommendations_keep_mother_and_offer_as_distinct_listings(self):
+    def test_recommendations_only_include_listable_seller_products(self):
         traders = [self.trader, self._create_visible_trader(2), self._create_visible_trader(3)]
         offers = [
             self._create_catalog_offer(trader, f'recommended-{trader.pk}-{index}')
@@ -1016,12 +1017,12 @@ class SharedCatalogAPITests(APITestCase):
         self.assertEqual(response.status_code, 200)
         results = response.data if isinstance(response.data, list) else response.data['results']
         catalog_ids = [item['catalog_product_id'] for item in results]
-        self.assertEqual(len(results), len(offers) * 2)
+        self.assertEqual(len(results), len(offers))
         self.assertEqual(len(set(catalog_ids)), len(offers))
         result_ids = {item['id'] for item in results}
         for listing in offers:
             self.assertIn(listing.pk, result_ids)
-            self.assertIn(listing.catalog_product.public_product_id, result_ids)
+            self.assertNotIn(listing.catalog_product.public_product_id, result_ids)
 
     def test_new_trader_offer_requires_an_approved_catalog_product(self):
         response = self.client.post(
