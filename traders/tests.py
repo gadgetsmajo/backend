@@ -553,7 +553,9 @@ class TraderInventoryStockSyncTests(TestCase):
 		self.assertEqual(response.data['review_status'], 'pending_review')
 		trader_product = TraderProduct.objects.get(uuid=response.data['uuid'])
 		public_product = trader_product.listing_product
-		self.assertTrue(public_product.is_catalog_anchor)
+		self.assertFalse(public_product.is_catalog_anchor)
+		self.assertEqual(public_product.trader_product_id, trader_product.pk)
+		self.assertNotEqual(public_product.catalog_product.public_product_id, public_product.pk)
 		self.assertTrue(public_product.is_active)
 		self.assertEqual(trader_product.stock, 2)
 		self.assertEqual(trader_product.variants.count(), 1)

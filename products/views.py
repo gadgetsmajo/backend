@@ -193,7 +193,7 @@ def annotate_catalog_offer_metrics(queryset):
         trader__is_closed=False,
     )
     lowest_price = offers.order_by('price', 'pk').values('price')[:1]
-    total_stock = offers.values('listing_product_id').annotate(
+    total_stock = offers.order_by().values().annotate(
         total=Sum('stock'),
     ).values('total')[:1]
     return queryset.annotate(
@@ -264,6 +264,17 @@ class ProductListView(generics.ListCreateAPIView):
                     trader__is_closed=False,
                 ).select_related('trader'),
             ),
+            Prefetch(
+                'catalog_product__trader_offers',
+                queryset=TraderProduct.objects.filter(
+                    is_active=True,
+                    review_status='approved',
+                    stock__gt=0,
+                    trader__status='approved',
+                    trader__is_visible=True,
+                    trader__is_closed=False,
+                ).select_related('trader'),
+            ),
         )
         qs = qs.annotate(
             _storefront_updated_at=Coalesce(
@@ -278,7 +289,10 @@ class ProductListView(generics.ListCreateAPIView):
                 review_status='approved',
             ).filter(public_marketplace_product_filter())
             qs = qs.filter(
-                Q(catalog_product__isnull=True) | Q(is_catalog_anchor=True),
+                Q(catalog_product__isnull=True)
+                | Q(is_catalog_anchor=True)
+                | Q(trader_product__catalog_product__isnull=False)
+                | Q(trader__isnull=False, catalog_product__isnull=False),
                 Q(is_catalog_anchor=False)
                 | Q(_has_available_offer=True)
                 | Q(stock__gt=0, price__gt=0),
@@ -362,18 +376,40 @@ class ProductListView(generics.ListCreateAPIView):
                     trader_product__trader__status='approved',
                     trader_product__trader__is_visible=True,
                     trader_product__trader__is_closed=False,
+                    trader_product__is_active=True,
+                    trader_product__review_status='approved',
+                    trader_product__stock__gt=0,
                 )
                 visible_seller |= Q(
                     trader_offers__trader__business_name__icontains=seller_uuid,
                     trader_offers__trader__status='approved',
                     trader_offers__trader__is_visible=True,
                     trader_offers__trader__is_closed=False,
+                    trader_offers__is_active=True,
+                    trader_offers__review_status='approved',
+                    trader_offers__stock__gt=0,
                 )
             else:
                 visible_seller = Q(trader__uuid=seller_uuid, trader__status='approved', trader__is_visible=True, trader__is_closed=False)
-                visible_seller |= Q(trader_product__trader__uuid=seller_uuid, trader_product__trader__status='approved', trader_product__trader__is_visible=True, trader_product__trader__is_closed=False)
-                visible_seller |= Q(trader_offers__trader__uuid=seller_uuid, trader_offers__trader__status='approved', trader_offers__trader__is_visible=True, trader_offers__trader__is_closed=False)
-            qs = qs.filter(visible_seller)
+                visible_seller |= Q(
+                    trader_product__trader__uuid=seller_uuid,
+                    trader_product__trader__status='approved',
+                    trader_product__trader__is_visible=True,
+                    trader_product__trader__is_closed=False,
+                    trader_product__is_active=True,
+                    trader_product__review_status='approved',
+                    trader_product__stock__gt=0,
+                )
+                visible_seller |= Q(
+                    trader_offers__trader__uuid=seller_uuid,
+                    trader_offers__trader__status='approved',
+                    trader_offers__trader__is_visible=True,
+                    trader_offers__trader__is_closed=False,
+                    trader_offers__is_active=True,
+                    trader_offers__review_status='approved',
+                    trader_offers__stock__gt=0,
+                )
+            qs = qs.filter(visible_seller).distinct()
         if self.request.query_params.get('top_bought') == 'true':
             qs = qs.annotate(
                 bought_quantity=Coalesce(
@@ -526,13 +562,13 @@ class ProductReviewStatusView(APIView):
             offer.is_active = product.is_active
             update_fields = ['review_status', 'review_note', 'is_active', 'updated_at']
             if review_status == 'approved':
-                from .catalog_sync import ensure_catalog_public_product
-
-                public_product = ensure_catalog_public_product(catalog_product)
                 offer.catalog_product = catalog_product
-                offer.listing_product = public_product
-                update_fields.extend(('catalog_product', 'listing_product'))
+                update_fields.append('catalog_product')
             offer.save(update_fields=update_fields)
+            if review_status == 'approved':
+                from traders.views import _sync_to_product
+
+                _sync_to_product(offer)
         invalidate_product_cache(product.pk)
         invalidate_category_cache()
         return Response(ProductSerializer(product, context={'request': request}).data)
@@ -625,6 +661,17 @@ def _get_recommended_products_for_user(user, limit=12):
                 trader__is_closed=False,
             ).select_related('trader'),
         ),
+        Prefetch(
+            'catalog_product__trader_offers',
+            queryset=TraderProduct.objects.filter(
+                is_active=True,
+                review_status='approved',
+                stock__gt=0,
+                trader__status='approved',
+                trader__is_visible=True,
+                trader__is_closed=False,
+            ).select_related('trader'),
+        ),
     )
     qs = annotate_catalog_offer_metrics(qs).annotate(
         _storefront_updated_at=Coalesce(
@@ -632,7 +679,10 @@ def _get_recommended_products_for_user(user, limit=12):
             'created_at',
         ),
     ).filter(
-        Q(catalog_product__isnull=True) | Q(is_catalog_anchor=True),
+        Q(catalog_product__isnull=True)
+        | Q(is_catalog_anchor=True)
+        | Q(trader_product__catalog_product__isnull=False)
+        | Q(trader__isnull=False, catalog_product__isnull=False),
         Q(is_catalog_anchor=False)
         | Q(_has_available_offer=True)
         | Q(stock__gt=0, price__gt=0),
@@ -696,6 +746,17 @@ class FlashSaleListCreateView(generics.ListCreateAPIView):
             'product__trader_product__trader', 'product__catalog_product__category',
         ).prefetch_related(
             'product__images',
+            Prefetch(
+                'product__catalog_product__trader_offers',
+                queryset=TraderProduct.objects.filter(
+                    is_active=True,
+                    review_status='approved',
+                    stock__gt=0,
+                    trader__status='approved',
+                    trader__is_visible=True,
+                    trader__is_closed=False,
+                ).select_related('trader'),
+            ),
             Prefetch(
                 'product__trader_offers',
                 queryset=TraderProduct.objects.filter(
@@ -943,10 +1004,9 @@ def _update_product_rating(product):
         status='published',
     ).aggregate(v=Avg('overall_rating'))['v'] or 0
     rating = round(float(avg), 1)
-    if product.is_catalog_anchor and product.catalog_product_id:
+    if product.catalog_product_id:
         Product.objects.filter(
             catalog_product_id=product.catalog_product_id,
-            is_catalog_anchor=True,
         ).update(rating=rating)
     else:
         product.rating = rating
@@ -955,7 +1015,7 @@ def _update_product_rating(product):
 
 def _reviews_for_product(product):
     queryset = ProductReview.objects.all()
-    if product.is_catalog_anchor and product.catalog_product_id:
+    if product.catalog_product_id:
         return queryset.filter(
             Q(product=product)
             | Q(product__catalog_product_id=product.catalog_product_id)
@@ -965,7 +1025,7 @@ def _reviews_for_product(product):
 
 def _order_items_for_product(product):
     queryset = OrderItem.objects.all()
-    if product.is_catalog_anchor and product.catalog_product_id:
+    if product.catalog_product_id:
         return queryset.filter(
             Q(product=product)
             | Q(product__catalog_product_id=product.catalog_product_id)

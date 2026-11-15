@@ -380,11 +380,7 @@ def _sync_to_product(trader_product):
 
     catalog_product = trader_product.catalog_product if trader_product.catalog_product_id else None
     if catalog_product:
-        product = ensure_catalog_public_product(catalog_product)
-        if trader_product.listing_product_id != product.pk:
-            trader_product.listing_product = product
-            trader_product.save(update_fields=('listing_product', 'updated_at'))
-
+        anchor = ensure_catalog_public_product(catalog_product)
         submitted_variants = getattr(trader_product, '_submitted_variants', None)
         if submitted_variants is not None:
             sync_product_variants(trader_product, submitted_variants)
@@ -401,6 +397,58 @@ def _sync_to_product(trader_product):
             trader_product.review_note = ''
             trader_product.save(update_fields=('review_status', 'review_note', 'updated_at'))
 
+        product = Product.objects.filter(trader_product=trader_product).first()
+        if product is None:
+            candidate = trader_product.listing_product
+            if (
+                candidate
+                and not candidate.is_catalog_anchor
+                and candidate.catalog_product_id == catalog_product.pk
+                and candidate.trader_id == trader_product.trader_id
+                and candidate.trader_product_id is None
+            ):
+                product = candidate
+
+        image_references = (
+            trader_product.catalog_image_references
+            or catalog_product.image_references
+            or []
+        )
+        defaults = {
+            'trader': trader_product.trader,
+            'trader_product': trader_product,
+            'catalog_product': catalog_product,
+            'name': trader_product.name,
+            'brand': trader_product.brand,
+            'condition': trader_product.condition,
+            'tags': trader_product.tags,
+            'specifications': trader_product.specifications,
+            'short_description': trader_product.short_description or trader_product.description,
+            'long_description': trader_product.long_description,
+            'price': trader_product.price,
+            'original_price': trader_product.original_price,
+            'delivery_fee': trader_product.delivery_fee,
+            'stock': trader_product.stock,
+            'category': trader_product.category,
+            'image': trader_product.image or (image_references[0] if image_references else None),
+            'is_active': trader_product.is_active,
+            'review_status': trader_product.review_status,
+            'review_note': trader_product.review_note,
+            'is_catalog_anchor': False,
+            'is_featured': trader_product.is_featured,
+            'is_new_deal': trader_product.is_new_deal,
+        }
+        if product is None:
+            product = Product.objects.create(**defaults)
+        else:
+            for field, value in defaults.items():
+                setattr(product, field, value)
+            product.save()
+        if trader_product.listing_product_id != product.pk:
+            trader_product.listing_product = product
+            trader_product.save(update_fields=('listing_product', 'updated_at'))
+
+        _invalidate_product_cache(anchor, trader_product.pk)
         _invalidate_product_cache(product, trader_product.pk)
         invalidate_category_cache()
         return product
@@ -570,8 +618,11 @@ class TraderProductDetailView(APIView):
             if pub and not pub.is_catalog_anchor:
                 pub.is_active = False
                 pub.review_status = 'disabled'
-                pub.trader_product = None
-                pub.save(update_fields=('is_active', 'review_status', 'trader_product', 'updated_at'))
+                fields = ['is_active', 'review_status']
+                if not pub.catalog_product_id:
+                    pub.trader_product = None
+                    fields.append('trader_product')
+                pub.save(update_fields=fields)
             from products.cache import invalidate_category_cache
             invalidate_category_cache()
         _invalidate_product_cache(pub, product.pk)
@@ -625,24 +676,20 @@ class AdminTraderProductReviewView(APIView):
         else:
             offer.is_active = False
         offer.save(update_fields=('review_status', 'review_note', 'is_active', 'updated_at'))
-        if review_status == 'approved':
-            if offer.catalog_product_id:
-                _sync_to_product(offer)
-            else:
-                public_product = _sync_to_product(offer)
-                public_product.review_status = 'approved'
-                public_product.review_note = ''
-                public_product.is_active = offer.is_active
-                public_product.save(update_fields=('review_status', 'review_note', 'is_active'))
-                from products.catalog_sync import (
-                    ensure_catalog_public_product,
-                    sync_product_to_catalog,
-                )
+        if offer.catalog_product_id:
+            _sync_to_product(offer)
+        elif review_status == 'approved':
+            public_product = _sync_to_product(offer)
+            public_product.review_status = 'approved'
+            public_product.review_note = ''
+            public_product.is_active = offer.is_active
+            public_product.save(update_fields=('review_status', 'review_note', 'is_active'))
+            from products.catalog_sync import sync_product_to_catalog
 
-                catalog_product = sync_product_to_catalog(public_product, approve_existing=True)
-                offer.catalog_product = catalog_product
-                offer.listing_product = ensure_catalog_public_product(catalog_product)
-                offer.save(update_fields=('catalog_product', 'listing_product', 'updated_at'))
+            catalog_product = sync_product_to_catalog(public_product, approve_existing=True)
+            offer.catalog_product = catalog_product
+            offer.save(update_fields=('catalog_product', 'updated_at'))
+            _sync_to_product(offer)
         from products.cache import invalidate_category_cache
 
         _invalidate_product_cache(offer.listing_product, offer.pk)

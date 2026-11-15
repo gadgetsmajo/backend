@@ -1211,6 +1211,37 @@ class SharedTraderOfferCheckoutTests(TestCase):
         )
         self.assertFalse(CartItem.objects.filter(user=self.user).exists())
 
+    def test_trader_listing_copy_checkout_uses_its_own_offer_price(self):
+        from traders.views import _sync_to_product
+
+        offer = self.offers[0]
+        listing = _sync_to_product(offer)
+        self.assertNotEqual(listing.pk, self.product.pk)
+
+        cart = self.client.post('/api/auth/cart/', {
+            'product_id': listing.pk,
+            'trader_offer_id': offer.pk,
+            'quantity': 1,
+        }, format='json')
+        self.assertEqual(cart.status_code, 201, cart.data)
+        self.assertEqual(cart.data['trader_offer_id'], offer.pk)
+
+        quote = self.client.post('/api/orders/quote/', {
+            'district_id': self.district.pk,
+        }, format='json')
+        self.assertEqual(quote.status_code, 200, quote.data)
+        self.assertEqual(quote.data['items'][0]['product_price'], Decimal('10000.00'))
+
+        response = self.client.post('/api/orders/', {
+            'district_id': self.district.pk,
+            'phone': '+256700000000',
+        }, format='json')
+        self.assertEqual(response.status_code, 201, response.data)
+        order_item = Order.objects.get(pk=response.data['id']).items.get()
+        self.assertEqual(order_item.product_id, listing.pk)
+        self.assertEqual(order_item.trader_offer_id, offer.pk)
+        self.assertEqual(order_item.seller_price, Decimal('10000.00'))
+
     def test_in_stock_catalog_anchor_can_be_purchased_without_a_trader_offer(self):
         TraderProduct.objects.filter(pk__in=[offer.pk for offer in self.offers]).delete()
         self.product.price = Decimal('15000.00')

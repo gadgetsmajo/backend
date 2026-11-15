@@ -110,9 +110,6 @@ def merge_catalog_products(source_ids, survivor_id):
             catalog_product_id=survivor.pk,
         ).exclude(pk=catalog_anchor.pk).update(is_catalog_anchor=False)
         Product.objects.filter(pk=catalog_anchor.pk).update(is_catalog_anchor=True)
-        TraderProduct.objects.filter(catalog_product_id=survivor.pk).update(
-            listing_product_id=catalog_anchor.pk,
-        )
     for source in sources:
         if source.public_product_id:
             source.public_product.is_catalog_anchor = False
@@ -123,10 +120,6 @@ def merge_catalog_products(source_ids, survivor_id):
     TraderProduct.objects.filter(catalog_product_id__in=source_pk_list).update(
         catalog_product_id=survivor.pk,
     )
-    if catalog_anchor:
-        TraderProduct.objects.filter(catalog_product_id=survivor.pk).update(
-            listing_product_id=catalog_anchor.pk,
-        )
     CatalogProduct.objects.filter(pk__in=source_pk_list).update(
         review_status='disabled',
         is_active=False,
@@ -563,6 +556,9 @@ def _create_initial_trader_offer(product):
         offer.price = min(variant.price for variant in created_variants)
         offer.stock = sum(variant.stock for variant in created_variants)
         offer.save(update_fields=('price', 'stock', 'updated_at'))
+    from traders.views import _sync_to_product
+
+    _sync_to_product(offer)
     return offer
 
 

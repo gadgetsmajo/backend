@@ -470,14 +470,18 @@ class ProductSerializer(serializers.ModelSerializer):
     def _catalog_offers(self, obj):
         if not obj.is_catalog_anchor:
             return []
-        prefetched = getattr(obj, '_prefetched_objects_cache', {}).get('trader_offers')
+        prefetched = None
+        if obj.catalog_product_id:
+            prefetched = getattr(
+                obj.catalog_product,
+                '_prefetched_objects_cache',
+                {},
+            ).get('trader_offers')
         if prefetched is None:
             from traders.models import TraderProduct
 
             prefetched = TraderProduct.objects.filter(
-                Q(listing_product=obj)
-                | Q(catalog_product__public_product=obj)
-                | Q(legacy_public_product=obj),
+                Q(listing_product=obj) | Q(catalog_product__public_product=obj) | Q(legacy_public_product=obj),
                 is_active=True,
                 review_status='approved',
                 trader__status='approved',
@@ -503,14 +507,20 @@ class ProductSerializer(serializers.ModelSerializer):
         )
 
     def get_seller_count(self, obj):
-        if self.context.get('trader_offer') is not None or self.context.get('direct_catalog_offer'):
+        if (
+            self.context.get('trader_offer') is not None
+            or self.context.get('direct_catalog_offer')
+            or obj.trader_product_id is not None
+        ):
             return 1
         offers = self._catalog_offers(obj)
         return len(offers) + int(self._has_direct_catalog_listing(obj))
 
     def get_trader_offer_id(self, obj):
         offer = self.context.get('trader_offer')
-        return offer.pk if offer is not None else None
+        if offer is not None:
+            return offer.pk
+        return obj.trader_product_id
 
     def _get_offer_value(self, obj, field, default):
         offer = self.context.get('trader_offer')

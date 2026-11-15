@@ -90,7 +90,7 @@ class SharedCatalogAPITests(APITestCase):
         )
         catalog_product.public_product = product
         catalog_product.save(update_fields=('public_product',))
-        TraderProduct.objects.create(
+        offer = TraderProduct.objects.create(
             trader=trader,
             catalog_product=catalog_product,
             listing_product=product,
@@ -101,7 +101,9 @@ class SharedCatalogAPITests(APITestCase):
             review_status='approved',
             is_active=True,
         )
-        return product
+        from traders.views import _sync_to_product
+
+        return _sync_to_product(offer)
 
     def test_search_matches_catalog_identifiers_and_never_returns_pending_products(self):
         CatalogProduct.objects.create(
@@ -233,7 +235,8 @@ class SharedCatalogAPITests(APITestCase):
         self.assertTrue(product.variants.filter(options={'voltage': '220V'}).exists())
         self.assertEqual(approved.data['request_offer_details']['price'], '180000.00')
         offer = TraderProduct.objects.get(catalog_product=product, trader=self.trader)
-        self.assertEqual(offer.listing_product, product.public_product)
+        self.assertNotEqual(offer.listing_product, product.public_product)
+        self.assertEqual(offer.listing_product.trader_product, offer)
         self.assertEqual(offer.price, Decimal('180000.00'))
         self.assertEqual(offer.stock, 3)
         self.assertEqual(offer.review_status, 'approved')
@@ -243,6 +246,7 @@ class SharedCatalogAPITests(APITestCase):
         self.client.force_authenticate(user=None)
         listing = self.client.get(reverse('product-list'))
         self.assertIn(product.public_product_id, [item['id'] for item in listing.data['results']])
+        self.assertIn(offer.listing_product_id, [item['id'] for item in listing.data['results']])
 
     def test_admin_can_edit_request_before_approval_and_rejection_requires_reason(self):
         response = self.client.post(reverse('catalog-product-list'), {
@@ -484,7 +488,8 @@ class SharedCatalogAPITests(APITestCase):
         self.assertTrue(product.catalog_product.is_active)
         self.assertEqual(offer.review_status, 'approved')
         self.assertTrue(offer.is_active)
-        self.assertEqual(offer.listing_product_id, product.catalog_product.public_product_id)
+        self.assertEqual(offer.listing_product_id, product.pk)
+        self.assertNotEqual(offer.listing_product_id, product.catalog_product.public_product_id)
 
         catalog_response = APIClient().get(
             reverse('catalog-product-list'),
@@ -540,8 +545,8 @@ class SharedCatalogAPITests(APITestCase):
         self.catalog_product.refresh_from_db()
         self.assertEqual(offer.review_status, 'approved')
         self.assertTrue(offer.is_active)
-        self.assertEqual(offer.listing_product_id, self.catalog_product.public_product_id)
-        self.assertTrue(offer.listing_product.is_catalog_anchor)
+        self.assertNotEqual(offer.listing_product_id, self.catalog_product.public_product_id)
+        self.assertFalse(offer.listing_product.is_catalog_anchor)
         listing = APIClient().get(reverse('product-list'))
         self.assertIn(offer.listing_product_id, [item['id'] for item in listing.data['results']])
 
@@ -571,20 +576,39 @@ class SharedCatalogAPITests(APITestCase):
             category=self.category,
             image=shared_image,
             catalog_image_references=[shared_image],
+            review_status='approved',
+            is_active=True,
         )
         sync_to_product = importlib.import_module('traders.views')._sync_to_product
 
         trader_product = sync_to_product(offer)
 
         shared_product.refresh_from_db()
-        self.assertEqual(trader_product.pk, shared_product.pk)
+        self.assertNotEqual(trader_product.pk, shared_product.pk)
+        self.assertTrue(trader_product.trader_product_id)
+        self.assertEqual(trader_product.trader_product_id, offer.pk)
+        self.assertEqual(trader_product.trader_id, self.trader.pk)
+        self.assertEqual(Decimal(str(trader_product.price)), Decimal('49000'))
+        self.assertEqual(trader_product.stock, 4)
         self.assertIsNone(shared_product.trader_id)
         self.assertIsNone(shared_product.trader_product_id)
+        self.assertTrue(shared_product.is_catalog_anchor)
         self.assertEqual(offer.trader_id, self.trader.pk)
-        self.assertEqual(offer.listing_product_id, shared_product.pk)
+        self.assertEqual(offer.listing_product_id, trader_product.pk)
         self.assertEqual(offer.catalog_product_id, self.catalog_product.pk)
         self.assertEqual(offer.price, '49000')
         self.assertEqual(offer.stock, 4)
+
+        self.client.force_authenticate(user=None)
+        response = self.client.get(reverse('product-list'))
+        product_ids = [item['id'] for item in response.data['results']]
+        self.assertIn(shared_product.pk, product_ids)
+        self.assertIn(trader_product.pk, product_ids)
+        trader_listing = next(item for item in response.data['results'] if item['id'] == trader_product.pk)
+        self.assertEqual(trader_listing['seller_uuid'], str(self.trader.uuid))
+        self.assertEqual(trader_listing['seller_name'], self.trader.business_name)
+        self.assertEqual(trader_listing['listed_price'], '49000.00')
+        self.assertEqual(trader_listing['trader_offer_id'], offer.pk)
 
     def test_catalog_merge_reassigns_offers_without_deleting_public_product_ids(self):
         survivor = self.catalog_product
@@ -776,9 +800,10 @@ class SharedCatalogAPITests(APITestCase):
             {'name': 'Altered catalog name'},
             format='json',
         )
-        self.assertEqual(mutation.status_code, 403)
+        self.assertEqual(mutation.status_code, 400)
+        self.assertIn('name', mutation.data)
 
-    def test_public_product_listing_shows_one_best_offer_per_catalog_product(self):
+    def test_public_product_listing_shows_mother_and_each_trader_offer(self):
         best_product = Product.objects.create(
             name=self.catalog_product.name,
             brand=self.catalog_product.brand,
@@ -803,8 +828,11 @@ class SharedCatalogAPITests(APITestCase):
             review_status='approved',
             is_active=True,
         )
+        from traders.views import _sync_to_product
+
+        first_listing = _sync_to_product(TraderProduct.objects.get(trader=self.trader))
         second_trader = self._create_visible_trader(8)
-        TraderProduct.objects.create(
+        second_offer = TraderProduct.objects.create(
             trader=second_trader,
             catalog_product=self.catalog_product,
             listing_product=best_product,
@@ -815,14 +843,23 @@ class SharedCatalogAPITests(APITestCase):
             review_status='approved',
             is_active=True,
         )
+        second_listing = _sync_to_product(second_offer)
 
         response = self.client.get(reverse('product-list'))
 
         ids = [item['id'] for item in response.data['results']]
-        self.assertIn(best_product.pk, ids)
-        listing = next(item for item in response.data['results'] if item['id'] == best_product.pk)
-        self.assertEqual(listing['seller_count'], 2)
-        self.assertEqual(listing['listed_price'], '42000.00')
+        self.assertEqual({best_product.pk, first_listing.pk, second_listing.pk} - set(ids), set())
+        mother_data = next(item for item in response.data['results'] if item['id'] == best_product.pk)
+        first_data = next(item for item in response.data['results'] if item['id'] == first_listing.pk)
+        second_data = next(item for item in response.data['results'] if item['id'] == second_listing.pk)
+        self.assertEqual(mother_data['seller_count'], 2)
+        self.assertEqual(mother_data['listed_price'], '42000.00')
+        self.assertEqual(first_data['seller_uuid'], str(self.trader.uuid))
+        self.assertEqual(second_data['seller_uuid'], str(second_trader.uuid))
+        self.assertEqual(first_data['listed_price'], '42000.00')
+        self.assertEqual(second_data['listed_price'], '45000.00')
+        self.assertEqual(first_data['trader_offer_id'], TraderProduct.objects.get(trader=self.trader).pk)
+        self.assertEqual(second_data['trader_offer_id'], second_offer.pk)
 
     def test_public_product_list_mixes_sellers_across_distinct_catalog_products(self):
         traders = [self.trader, self._create_visible_trader(2), self._create_visible_trader(3)]
@@ -832,28 +869,77 @@ class SharedCatalogAPITests(APITestCase):
             for index in range(2)
         ]
 
-        response = self.client.get(reverse('product-list'), {'page_size': 6})
+        response = self.client.get(reverse('product-list'), {'page_size': 20})
 
         self.assertEqual(response.status_code, 200)
         results = response.data['results']
-        self.assertEqual(len(results), len(offers))
-        self.assertEqual(len({item['catalog_product_id'] for item in results}), len(offers))
-        self.assertEqual(len({item['catalog_product_id'] for item in results[:3]}), 3)
-        product_ids = [item['id'] for item in results[:3]]
-        first_page_sellers = TraderProduct.objects.filter(
-            listing_product_id__in=product_ids,
-        ).values_list('trader_id', flat=True)
-        self.assertEqual(len(set(first_page_sellers)), 3)
+        self.assertEqual(len(results), len(offers) * 2)
+        result_ids = {item['id'] for item in results}
+        for listing in offers:
+            self.assertIn(listing.pk, result_ids)
+            self.assertIn(listing.catalog_product.public_product_id, result_ids)
+
+        home_recommendations = self.client.get('/api/auth/recommended/?page_size=24')
+        self.assertEqual(home_recommendations.status_code, 200)
+        home_ids = {item['id'] for item in home_recommendations.data['results']}
+        for listing in offers:
+            self.assertIn(listing.pk, home_ids)
+            self.assertIn(listing.catalog_product.public_product_id, home_ids)
+        catalog_ids = [item['catalog_product_id'] for item in results]
+        self.assertEqual(len(set(catalog_ids)), len(offers))
+        self.assertTrue(all(catalog_ids.count(catalog_id) == 2 for catalog_id in set(catalog_ids)))
 
         recommendations = self.client.get(reverse('recommended-products'))
         self.assertEqual(recommendations.status_code, 200)
-        recommendation_ids = [item['id'] for item in recommendations.data['results'][:3]]
+        recommendation_items = (
+            recommendations.data if isinstance(recommendations.data, list)
+            else recommendations.data['results']
+        )
+        recommendation_ids = [item['id'] for item in recommendation_items]
         recommendation_sellers = TraderProduct.objects.filter(
             listing_product_id__in=recommendation_ids,
         ).values_list('trader_id', flat=True)
-        self.assertEqual(len(set(recommendation_sellers)), 3)
+        self.assertEqual(set(recommendation_sellers), {trader.pk for trader in traders})
 
-    def test_flash_sale_list_deduplicates_catalog_products_and_mixes_sellers(self):
+    def test_seller_filter_excludes_inactive_catalog_offers(self):
+        product = self._create_catalog_offer(self._create_visible_trader(2), 'seller-filter')
+        palisa_offer = TraderProduct.objects.create(
+            trader=self.trader,
+            catalog_product=product.catalog_product,
+            listing_product=product,
+            name=product.name,
+            price='8000',
+            stock=0,
+            category=self.category,
+            review_status='disabled',
+            is_active=False,
+        )
+        from traders.views import _sync_to_product
+
+        palisa_listing = _sync_to_product(palisa_offer)
+
+        response = self.client.get(
+            reverse('product-list'),
+            {'seller': str(self.trader.uuid)},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn(product.pk, [item['id'] for item in response.data['results']])
+
+        palisa_offer.stock = 4
+        palisa_offer.review_status = 'approved'
+        palisa_offer.is_active = True
+        palisa_offer.save(update_fields=('stock', 'review_status', 'is_active', 'updated_at'))
+        _sync_to_product(palisa_offer)
+        response = self.client.get(
+            reverse('product-list'),
+            {'seller': str(self.trader.uuid)},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(palisa_listing.pk, [item['id'] for item in response.data['results']])
+
+    def test_flash_sale_list_keeps_each_trader_catalog_listing(self):
         traders = [self.trader, self._create_visible_trader(2), self._create_visible_trader(3)]
         offers = [
             self._create_catalog_offer(trader, f'flash-{trader.pk}-{index}')
@@ -885,8 +971,14 @@ class SharedCatalogAPITests(APITestCase):
         self.assertEqual(response.status_code, 200)
         results = response.data.get('results', response.data)
         catalog_ids = [item['product']['catalog_product_id'] for item in results]
-        self.assertEqual(len(catalog_ids), len(set(catalog_ids)))
-        self.assertEqual(len({item['product']['catalog_product_id'] for item in results[:3]}), 3)
+        self.assertGreater(len(catalog_ids), len(set(catalog_ids)))
+        duplicate_catalog_id = offers[0].catalog_product_id
+        duplicate_sellers = {
+            item['product']['seller_uuid']
+            for item in results
+            if item['product']['catalog_product_id'] == duplicate_catalog_id
+        }
+        self.assertEqual(len(duplicate_sellers), 2)
 
     def test_trader_flash_sale_list_includes_catalog_anchor_for_its_offer_owner(self):
         own_anchor = self._create_catalog_offer(self.trader, 'owned-flash-sale')
@@ -910,38 +1002,26 @@ class SharedCatalogAPITests(APITestCase):
         sales = response.data.get('results', response.data)
         self.assertEqual([sale['id'] for sale in sales], [own_sale.id])
 
-    def test_recommendations_deduplicate_catalogs_and_exclude_seen_catalogs(self):
+    def test_recommendations_keep_mother_and_offer_as_distinct_listings(self):
         traders = [self.trader, self._create_visible_trader(2), self._create_visible_trader(3)]
         offers = [
             self._create_catalog_offer(trader, f'recommended-{trader.pk}-{index}')
             for trader in traders
             for index in range(2)
         ]
-        duplicate = Product.objects.create(
-            name=offers[0].name,
-            brand=offers[0].brand,
-            category=self.category,
-            price='12000',
-            stock=5,
-            trader=traders[1],
-            catalog_product=offers[0].catalog_product,
-            review_status='approved',
-            is_active=True,
-        )
         self.client.force_authenticate(user=None)
 
-        response = self.client.get(
-            reverse('recommended-products'),
-            {'page_size': 12, 'exclude_catalog': offers[0].catalog_product_id},
-        )
+        response = self.client.get(reverse('recommended-products'))
 
         self.assertEqual(response.status_code, 200)
-        results = response.data['results']
+        results = response.data if isinstance(response.data, list) else response.data['results']
         catalog_ids = [item['catalog_product_id'] for item in results]
-        self.assertNotIn(offers[0].catalog_product_id, catalog_ids)
-        self.assertEqual(len(catalog_ids), len(set(catalog_ids)))
-        self.assertEqual(len({item['catalog_product_id'] for item in results[:3]}), 3)
-        self.assertNotIn(duplicate.pk, [item['id'] for item in results])
+        self.assertEqual(len(results), len(offers) * 2)
+        self.assertEqual(len(set(catalog_ids)), len(offers))
+        result_ids = {item['id'] for item in results}
+        for listing in offers:
+            self.assertIn(listing.pk, result_ids)
+            self.assertIn(listing.catalog_product.public_product_id, result_ids)
 
     def test_new_trader_offer_requires_an_approved_catalog_product(self):
         response = self.client.post(
@@ -1124,9 +1204,17 @@ class SharedCatalogAPITests(APITestCase):
             apps,
             SimpleNamespace(connection=connection),
         )
+        listing_migration = importlib.import_module(
+            'products.migrations.0030_per_trader_catalog_listings',
+        )
+        listing_migration.create_per_trader_catalog_listings(
+            apps,
+            SimpleNamespace(connection=connection),
+        )
 
         offer = TraderProduct.objects.get(catalog_product=catalog, trader=self.trader)
-        self.assertEqual(offer.listing_product, anchor)
+        self.assertNotEqual(offer.listing_product, anchor)
+        self.assertEqual(offer.listing_product.trader_product_id, offer.pk)
         self.assertEqual(offer.price, Decimal('18000.00'))
         self.assertEqual(offer.stock, 2)
 
