@@ -795,7 +795,7 @@ class RegisterView(generics.CreateAPIView):
             send_welcome_sms(user.name, user.phone)
         except Exception:
             pass
-        Notification.objects.create(user=user, type='welcome', title='Welcome to Majo Gadgets!', body='Thanks for joining! Explore our latest gadgets and enjoy exclusive deals made just for you.')
+        Notification.objects.create(user=user, type='welcome', title='Welcome to Majo Market!', body='Thanks for joining! Discover quality products from trusted sellers and enjoy great marketplace deals.')
         return Response({'access': str(refresh.access_token), 'refresh': str(refresh)}, status=status.HTTP_201_CREATED)
 
 
@@ -1307,7 +1307,7 @@ class GoogleLoginView(APIView):
                 send_welcome_sms(user.name, user.phone)
             except Exception:
                 pass
-            Notification.objects.create(user=user, type='welcome', title='Welcome to Majo Gadgets!', body='Thanks for joining! Explore our latest gadgets and enjoy exclusive deals made just for you.')
+            Notification.objects.create(user=user, type='welcome', title='Welcome to Majo Market!', body='Thanks for joining! Discover quality products from trusted sellers and enjoy great marketplace deals.')
 
         if not user.phone or not user.district:
             # Issue a short-lived JWT encoding just the user pk — no server-side storage needed

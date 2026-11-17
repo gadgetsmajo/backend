@@ -286,7 +286,7 @@ class TraderApplicationTermsTests(TestCase):
 		self.assertIn('national_id', response.data)
 
 
-@override_settings(MAJO_BUSINESS_ADDRESS='Majo Gadgets, Kampala, Uganda')
+@override_settings(MAJO_BUSINESS_ADDRESS='Majo Market, Kampala, Uganda')
 class TraderApplicationApprovalTests(TestCase):
 	def setUp(self):
 		self.admin = User.objects.create_user(email='reviewer@example.com', name='Reviewer', password='Password123!', is_staff=True)
@@ -303,18 +303,107 @@ class TraderApplicationApprovalTests(TestCase):
 		)
 
 	@patch('users.emails.send_trader_agreement_email')
-	def test_approval_requires_admin_document_verification_and_issues_agreement(self, _send_email):
+	def test_approval_without_opening_documents_issues_agreement(self, _send_email):
 		url = reverse('admin-trader-approve', args=[self.application.id])
-		blocked = self.client.post(url, {}, format='json')
-		self.assertEqual(blocked.status_code, 400)
-
-		approved = self.client.post(url, {'documents_verified': True}, format='json')
+		approved = self.client.post(url, {}, format='json')
 		self.assertEqual(approved.status_code, 200)
-		self.assertTrue(approved.data['documents_verified'])
+		self.assertFalse(approved.data['documents_verified'])
 		self.assertTrue(approved.data['agreement_reference'])
 		self.assertIsNotNone(approved.data['agreement_issued_at'])
 		self.assertTrue(approved.data['agreement_required'])
 		self.assertEqual(approved.data['agreement_version'], '1.0')
+
+	@override_settings(MAJO_BUSINESS_ADDRESS='')
+	@patch('users.emails.send_trader_agreement_email')
+	def test_approval_is_not_blocked_by_missing_business_address(self, _send_email):
+		url = reverse('admin-trader-approve', args=[self.application.id])
+		approved = self.client.post(url, {}, format='json')
+		self.assertEqual(approved.status_code, 200)
+		self.assertEqual(approved.data['status'], 'approved')
+
+	def test_agreement_uses_supplied_sections_and_trader_details(self):
+		trader_user = User.objects.create_user(
+			email=self.application.email, name=self.application.full_name, password='Password123!',
+		)
+		self.application.user = trader_user
+		self.application.status = 'approved'
+		self.application.agreement_required = True
+		self.application.agreement_reference = 'MG-TRADER-000001'
+		self.application.save(update_fields=(
+			'user', 'status', 'agreement_required', 'agreement_reference',
+		))
+		self.client.force_authenticate(user=trader_user)
+
+		response = self.client.get(reverse('trader-agreement', args=[self.application.uuid]))
+
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(len(response.data['sections']), 21)
+		self.assertEqual(response.data['sections'][0]['title'], '1. PARTIES')
+		self.assertEqual(response.data['sections'][-1]['title'], '21. DECLARATION AND SIGNATURE')
+		agreement_text = '\n'.join(
+			paragraph
+			for section in response.data['sections']
+			for paragraph in section['paragraphs']
+		)
+		self.assertEqual(response.data['title'], 'TRADER PARTICIPATION AND MARKETPLACE CONTRACT')
+		self.assertIn('This Contract is entered into between:', agreement_text)
+		self.assertIn('2. PURPOSE OF THE CONTRACT', [section['title'] for section in response.data['sections']])
+		self.assertIn('return request within 24 hours', agreement_text)
+		self.assertIn('three (3) days after successful Customer purchase', agreement_text)
+		self.assertIn('greater than UGX 5,000', agreement_text)
+		self.assertEqual(response.data['trader']['phone'], self.application.phone)
+		self.assertEqual(response.data['trader']['tin'], self.application.tin)
+		section_text = '\n'.join(
+			paragraph
+			for section in response.data['sections']
+			for paragraph in section['paragraphs']
+		)
+		self.assertIn('a) Valid National ID;', section_text)
+		self.assertFalse(any(
+			paragraph.startswith('- ')
+			for section in response.data['sections']
+			for paragraph in section['paragraphs']
+		))
+
+	def test_contract_preview_uses_current_template_without_changing_signed_snapshot(self):
+		trader_user = User.objects.create_user(
+			email=self.application.email, name=self.application.full_name, password='Password123!',
+		)
+		signed_at = timezone.now()
+		signed_snapshot = {
+			'title': 'Previously Signed Agreement',
+			'reference': 'MG-TRADER-000001',
+			'version': '1.0',
+			'effective_at': signed_at.isoformat(),
+			'sections': [{'title': 'Legacy terms', 'paragraphs': ['Old signed terms']}],
+		}
+		self.application.user = trader_user
+		self.application.status = 'approved'
+		self.application.agreement_required = True
+		self.application.agreement_reference = 'MG-TRADER-000001'
+		self.application.agreement_signed_at = signed_at
+		self.application.agreement_document_snapshot = signed_snapshot
+		self.application.save(update_fields=(
+			'user', 'status', 'agreement_required', 'agreement_reference',
+			'agreement_signed_at', 'agreement_document_snapshot',
+		))
+		self.client.force_authenticate(user=trader_user)
+		url = reverse('trader-agreement', args=[self.application.uuid])
+
+		preview = self.client.get(f'{url}?preview=1')
+		signed_document = self.client.get(url)
+
+		self.assertEqual(preview.status_code, 200)
+		self.assertTrue(preview.data['is_preview'])
+		self.assertEqual(preview.data['title'], 'TRADER PARTICIPATION AND MARKETPLACE CONTRACT')
+		self.assertIsNone(preview.data['effective_at'])
+		self.assertFalse(preview.data['ready_to_sign'])
+		self.assertIsNone(preview.data['platform']['signed_at'])
+		self.assertEqual(preview.data['trader']['signed_name'], '')
+		self.assertIsNone(preview.data['trader']['signed_at'])
+		self.assertEqual(signed_document.data['title'], 'Previously Signed Agreement')
+		self.application.refresh_from_db()
+		self.assertEqual(self.application.agreement_document_snapshot, signed_snapshot)
 
 	@patch('users.emails.send_trader_agreement_email')
 	def test_unsigned_trader_cannot_access_portal_and_can_sign_by_name(self, _send_email):
@@ -854,6 +943,28 @@ class TraderInventoryStockSyncTests(TestCase):
 		self.assertEqual(profile_response.status_code, 200)
 		self.assertEqual(products_response.status_code, 200)
 		self.assertEqual([item['uuid'] for item in products_response.data], [str(self.product.uuid)])
+
+	def test_changing_linked_user_email_preserves_trader_portal_access(self):
+		self.user.email = 'inventory-seller-new@example.com'
+		self.user.save(update_fields=['email'])
+
+		me_response = self.client.get(reverse('trader-me'))
+		self.assertEqual(me_response.status_code, 200)
+		self.assertEqual(me_response.data['uuid'], str(self.trader.uuid))
+
+		for endpoint in (
+			'trader-profile',
+			'trader-products',
+			'trader-sales',
+			'trader-expenses',
+			'trader-inventory',
+			'trader-account',
+			'trader-wallet',
+			'trader-orders',
+		):
+			with self.subTest(endpoint=endpoint):
+				response = self.client.get(reverse(endpoint, args=[self.trader.uuid]))
+				self.assertEqual(response.status_code, 200, response.data)
 
 	def test_trader_can_edit_own_product_details_and_public_product_stays_in_sync(self):
 		public_product = Product.objects.create(

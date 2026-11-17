@@ -1007,9 +1007,9 @@ def ProductShareView(request, slug):
         slug=slug,
     )
     image_url = product.image.url if product.image else ''
-    description = f'Shop {product.name} on Majo Gadgets for UGX {product.price:,.0f}.'
+    description = f'Buy {product.name} on Majo Market. Compare available seller offers, prices, stock, delivery, warranty, and return options.'
     app_url = f'shopmajo://shop/{product.slug}'
-    title = escape(f'{product.name} | Majo Gadgets')
+    title = escape(f'{product.name} | Majo Market')
     safe_description = escape(description)
     safe_image = escape(image_url, quote=True)
     safe_app_url = escape(app_url, quote=True)
@@ -1021,17 +1021,19 @@ def ProductShareView(request, slug):
         <meta property="og:title" content="{title}">
         <meta property="og:description" content="{safe_description}">
         <meta property="og:type" content="product">
+        <meta property="og:site_name" content="Majo Market">
         <meta property="og:url" content="{request.build_absolute_uri()}">
         {f'<meta property="og:image" content="{safe_image}">' if safe_image else ''}
         <meta name="twitter:card" content="summary_large_image">
         <meta name="twitter:title" content="{title}">
         <meta name="twitter:description" content="{safe_description}">
+        <meta name="twitter:image:alt" content="{escape(product.name, quote=True)}">
         {f'<meta name="twitter:image" content="{safe_image}">' if safe_image else ''}
         <meta http-equiv="refresh" content="0;url={safe_app_url}">
         <title>{title}</title>
     </head>
     <body>
-        <p>Opening {escape(product.name)} in Majo Gadgets...</p>
+        <p>Opening {escape(product.name)} in Majo Market...</p>
         <p><a href="{safe_app_url}">Open product</a></p>
     </body>
 </html>'''

@@ -9,10 +9,10 @@ def _send(payload: dict):
     payload.setdefault('reply_to', settings.SUPPORT_EMAIL)
     resend.Emails.send(payload)
 
-FROM = 'Majo Gadgets <support@majogadgets.com>'
-LOGO = 'https://res.cloudinary.com/fhklnn0f/image/upload/v1789111152/Majo_Gadgets_logo_an2hbc.png'
+FROM = 'Majo Market <support@majogadgets.com>'
+LOGO = 'https://res.cloudinary.com/fhklnn0f/image/upload/v1794853987/Majo_market_logo.png'
 IMG_CART = 'https://res.cloudinary.com/fhklnn0f/image/upload/v1789551363/shopping_cart.png'
-IMG_WELCOME = 'https://res.cloudinary.com/fhklnn0f/image/upload/v1789298565/OG.png'
+IMG_WELCOME = 'https://res.cloudinary.com/fhklnn0f/image/upload/v1794851607/Majo_Market_Shopping_email_hero.png'
 
 # ── Icon paths ───────────────────────────────────────────────────────────────
 ICO_CHECK       = '<polyline points="20 6 9 17 4 12"/>'
@@ -65,7 +65,7 @@ BASE = '''
       <table width="580" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,0.07)">
         <tr>
           <td style="background:#ffffff;padding:28px 40px;text-align:center;border-bottom:1px solid #E2E8F0">
-            <img src="{logo}" height="48" alt="Majo Gadgets" style="display:block;margin:0 auto" />
+            <img src="{logo}" height="48" alt="Majo Market" style="display:block;margin:0 auto" />
           </td>
         </tr>
         {hero}
@@ -73,8 +73,8 @@ BASE = '''
         <tr><td style="padding:0 40px"><hr style="border:none;border-top:1px solid #E2E8F0;margin:0" /></td></tr>
         <tr>
           <td style="padding:20px 40px;text-align:center">
-            <p style="margin:0 0 4px;font-size:13px;color:#111111">Majo Gadgets &mdash; Quality gadgets, great value.</p>
-            <p style="margin:0;font-size:11px;color:#333333">&copy; 2026 Majo Gadgets. All rights reserved.</p>
+            <p style="margin:0 0 4px;font-size:13px;color:#111111">Majo Market &mdash; Quality Products, Great Value.</p>
+            <p style="margin:0;font-size:11px;color:#333333">&copy; 2026 Majo Market. All rights reserved.</p>
           </td>
         </tr>
       </table>
@@ -150,7 +150,7 @@ def send_welcome_email(name: str, email: str):
     hero = f'''
         <tr>
           <td style="padding:0;text-align:center;line-height:0">
-            <img src="{IMG_WELCOME}" width="580" alt="Majo Gadgets" style="display:block;width:100%;max-width:580px;height:auto;margin:0 auto" />
+            <img src="{IMG_WELCOME}" width="580" alt="Majo Market" style="display:block;width:100%;max-width:580px;height:auto;margin:0 auto" />
           </td>
         </tr>
     '''
@@ -160,10 +160,10 @@ def send_welcome_email(name: str, email: str):
         <p style="margin:0;font-size:14px;color:#333333">Your account has been created successfully</p>
       </div>
       <p style="margin:0 0 20px;font-size:15px;color:#111111;line-height:1.7">
-        We&#39;re thrilled to have you join the <strong>Majo Gadgets</strong> family. You&#39;re all set to start shopping.
+        We&#39;re thrilled to have you join the <strong>Majo Market</strong> family. You&#39;re all set to start shopping.
       </p>
       <div style="padding:16px 20px;margin-bottom:28px">
-        {_info_row(ICO_CHECK,    'Browse hundreds of quality gadgets')}
+        {_info_row(ICO_CHECK,    'Browse quality products from trusted sellers')}
         {_info_row(ICO_STAR,     'Grab flash deals and exclusive offers')}
         {_info_row(ICO_HEART,    'Save your favourite items to your wishlist')}
         {_info_row(ICO_TRUCK,    'Fast and reliable delivery to your doorstep')}
@@ -175,7 +175,7 @@ def send_welcome_email(name: str, email: str):
       </div>
       <p style="margin:28px 0 0;font-size:13px;color:#333333">If you have any questions, just reply to this email — we&#39;re always happy to help.</p>
     '''
-    _send({'from': FROM, 'to': email, 'subject': 'Welcome to Majo Gadgets!', 'html': _wrap(body, hero=hero)})
+    _send({'from': FROM, 'to': email, 'subject': 'Welcome to Majo Market!', 'html': _wrap(body, hero=hero)})
 
 
 def send_admin_new_order_email(order_code: str, customer_name: str, customer_email: str, total: str, items: list, delivery_address: str):
@@ -313,7 +313,7 @@ def send_cart_reminder_email(name: str, email: str, items: list, subtotal, deliv
     body = f'''
       <div style="text-align:center;margin-bottom:24px">
         <h2 style="margin:0 0 8px;font-size:22px;color:#111111">Your cart is waiting</h2>
-        <p style="margin:0;font-size:14px;color:#475569">Hi {escape(name)}, you left these items in your Majo Gadgets cart.</p>
+        <p style="margin:0;font-size:14px;color:#475569">Hi {escape(name)}, you left these items in your Majo Market cart.</p>
       </div>
       <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse">
         <thead>
@@ -334,10 +334,10 @@ def send_cart_reminder_email(name: str, email: str, items: list, subtotal, deliv
       </div>
     '''
     _send({
-        'from': 'Majo Gadgets Orders <order@majogadgets.com>',
+        'from': 'Majo Market Orders <order@majogadgets.com>',
         'to': email,
         'reply_to': 'order@majogadgets.com',
-        'subject': 'Your Majo Gadgets cart is waiting',
+        'subject': 'Your Majo Market cart is waiting',
         'html': _wrap(body),
     })
 
@@ -373,8 +373,8 @@ def send_order_placed_email(name: str, email: str, order_code: str, total: str, 
         </table>
       </div>
 
-      <p style="margin:0 0 12px;font-size:15px;color:#111111;line-height:1.7">Thank you for shopping with Majo Gadgets!</p>
-      <p style="margin:0;font-size:13px;color:#333333;line-height:1.6">— The Majo Gadgets Team</p>
+      <p style="margin:0 0 12px;font-size:15px;color:#111111;line-height:1.7">Thank you for shopping with Majo Market!</p>
+      <p style="margin:0;font-size:13px;color:#333333;line-height:1.6">— The Majo Market Team</p>
     '''
     _send({'from': FROM, 'to': email, 'subject': f'Order Placed — #{order_code}', 'html': _wrap(body, hero=_status_hero('pending'))})
 
@@ -415,8 +415,8 @@ def send_order_confirmed_email(name: str, email: str, order_code: str, total: st
         </table>
       </div>
 
-      <p style="margin:0 0 12px;font-size:15px;color:#475569;line-height:1.7">Thank you for shopping with Majo Gadgets! {_icon(ICO_SHOPPING, '#475569', 16)}</p>
-      <p style="margin:0;font-size:13px;color:#94A3B8;line-height:1.6">— The Majo Gadgets Team</p>
+      <p style="margin:0 0 12px;font-size:15px;color:#475569;line-height:1.7">Thank you for shopping with Majo Market! {_icon(ICO_SHOPPING, '#475569', 16)}</p>
+      <p style="margin:0;font-size:13px;color:#94A3B8;line-height:1.6">— The Majo Market Team</p>
     '''
     _send({'from': FROM, 'to': email, 'subject': f'Order Confirmed — #{order_code}', 'html': _wrap(body, hero=_status_hero('processing'))})
 
@@ -480,13 +480,13 @@ def send_order_delivered_email(name: str, email: str, order_code: str, total: st
         Your order <strong>#{order_code}</strong> has been delivered!
       </p>
       <p style="margin:0 0 16px;font-size:15px;color:#475569;line-height:1.7">
-        We hope you enjoy your new purchase from Majo Gadgets.
+        We hope you enjoy your new purchase from Majo Market.
       </p>
       <p style="margin:0 0 16px;font-size:15px;color:#475569;line-height:1.7">
         Thank you for trusting us with your order. We truly appreciate your support and hope to see you again soon.
       </p>
       <p style="margin:0 0 24px;font-size:15px;color:#475569;line-height:1.7">
-        Enjoy your new gadget!
+        Enjoy your purchase!
       </p>
 
       <div style="padding:16px 20px;margin-bottom:24px">
@@ -506,7 +506,7 @@ def send_order_delivered_email(name: str, email: str, order_code: str, total: st
       <div style="text-align:center">
         <a href="{settings.FRONTEND_URL}/rate/{order_code}" style="display:inline-block;padding:14px 32px;background:#071A2B !important;background-color:#071A2B !important;color:#ffffff !important;border:1px solid #071A2B;border-radius:0;font-weight:700;font-size:15px;text-decoration:none !important;line-height:1.4;vertical-align:middle">Rate Your Order</a>
       </div>
-      <p style="margin:28px 0 0;font-size:13px;color:#94A3B8;line-height:1.6">— The Majo Gadgets Team</p>
+      <p style="margin:28px 0 0;font-size:13px;color:#94A3B8;line-height:1.6">— The Majo Market Team</p>
     '''
     _send({'from': FROM, 'to': email, 'subject': f'Order Delivered — #{order_code}', 'html': _wrap(body, hero=_status_hero('delivered'))})
 
@@ -546,7 +546,7 @@ def send_product_rating_email(name: str, email: str, order_code: str, items: lis
           {item_blocks}
         </table>
       </div>
-      <p style="margin:0;font-size:13px;color:#94A3B8;line-height:1.6">Thank you for shopping with Majo Gadgets!</p>
+      <p style="margin:0;font-size:13px;color:#94A3B8;line-height:1.6">Thank you for shopping with Majo Market!</p>
     '''
     _send({'from': FROM, 'to': email, 'subject': f'Rate your products from order #{order_code}', 'html': _wrap(body)})
 
@@ -559,7 +559,7 @@ def send_order_rating_email(name: str, email: str, order_code: str, rating_url: 
       </div>
 
       <p style="margin:0 0 16px;font-size:15px;color:#475569;line-height:1.7">
-        We’d love to hear about your experience with Majo Gadgets.
+        We’d love to hear about your experience with Majo Market.
       </p>
       <p style="margin:0 0 16px;font-size:15px;color:#475569;line-height:1.7">
         Your order <strong>#{order_code}</strong> has been delivered, and we’d appreciate it if you could take a moment to rate the <strong>service and delivery experience</strong>.
@@ -574,8 +574,8 @@ def send_order_rating_email(name: str, email: str, order_code: str, rating_url: 
         </a>
       </div>
 
-      <p style="margin:0 0 12px;font-size:15px;color:#475569;line-height:1.7">Thank you for shopping with Majo Gadgets!</p>
-      <p style="margin:0;font-size:13px;color:#94A3B8;line-height:1.6">— The Majo Gadgets Team</p>
+      <p style="margin:0 0 12px;font-size:15px;color:#475569;line-height:1.7">Thank you for shopping with Majo Market!</p>
+      <p style="margin:0;font-size:13px;color:#94A3B8;line-height:1.6">— The Majo Market Team</p>
     '''
     _send({'from': FROM, 'to': email, 'subject': f'Rate Your Experience — #{order_code}', 'html': _wrap(body)})
 
@@ -596,7 +596,7 @@ def send_order_cancelled_email(name: str, email: str, order_code: str, reason: s
       <div style="text-align:center">
         <a href="{settings.FRONTEND_URL}" style="display:inline-block;padding:14px 32px;background:#071A2B !important;background-color:#071A2B !important;color:#ffffff !important;border:1px solid #071A2B;border-radius:0;font-weight:700;font-size:15px;text-decoration:none !important;line-height:1.4;vertical-align:middle">Continue Shopping &rarr;</a>
       </div>
-      <p style="margin:28px 0 0;font-size:13px;color:#94A3B8;line-height:1.6">We hope to serve you again soon. Thank you for choosing Majo Gadgets.</p>
+      <p style="margin:28px 0 0;font-size:13px;color:#94A3B8;line-height:1.6">We hope to serve you again soon. Thank you for choosing Majo Market.</p>
     '''
     _send({'from': FROM, 'to': email, 'subject': f'Order Cancelled — #{order_code}', 'html': _wrap(body)})
 
@@ -608,7 +608,7 @@ def send_password_reset_email(name: str, email: str, reset_url: str):
         <p style="margin:0;font-size:14px;color:#64748B">We received a request to reset your password</p>
       </div>
       <p style="margin:0 0 16px;font-size:15px;color:#475569;line-height:1.7">
-        Hi <strong>{name}</strong>, no worries — it happens to the best of us! Click the button below to create a new password for your Majo Gadgets account.
+        Hi <strong>{name}</strong>, no worries — it happens to the best of us! Click the button below to create a new password for your Majo Market account.
       </p>
       <div style="padding:20px;margin-bottom:28px">
         <p style="margin:0 0 10px;font-size:12px;font-weight:700;color:#94A3B8;text-transform:uppercase;letter-spacing:0.5px">Security Notice</p>
@@ -625,7 +625,7 @@ def send_password_reset_email(name: str, email: str, reset_url: str):
       <p style="margin:0 0 24px;font-size:12px;color:#16A34A;word-break:break-all">{reset_url}</p>
       <p style="margin:0;font-size:13px;color:#94A3B8;line-height:1.6">If you didn't request a password reset, you can safely ignore this email.</p>
     '''
-    _send({'from': FROM, 'to': email, 'subject': 'Reset your Majo Gadgets password', 'html': _wrap(body)})
+    _send({'from': FROM, 'to': email, 'subject': 'Reset your Majo Market password', 'html': _wrap(body)})
 
 
 def send_password_changed_email(name: str, email: str):
@@ -635,7 +635,7 @@ def send_password_changed_email(name: str, email: str):
         <p style="margin:0;font-size:14px;color:#64748B">Your account password was successfully updated</p>
       </div>
       <p style="margin:0 0 16px;font-size:15px;color:#475569;line-height:1.7">
-        Hi <strong>{name}</strong>, this is a confirmation that the password for your Majo Gadgets account has just been changed.
+        Hi <strong>{name}</strong>, this is a confirmation that the password for your Majo Market account has just been changed.
       </p>
       <div style="padding:20px;margin-bottom:28px">
         <p style="margin:0 0 10px;font-size:12px;font-weight:700;color:#94A3B8;text-transform:uppercase;letter-spacing:0.5px">Security Notice</p>
@@ -655,7 +655,7 @@ def send_login_verification_email(name: str, email: str, code: str):
         <p style="margin:0;font-size:14px;color:#64748B">Secure access to your account</p>
       </div>
       <p style="margin:0 0 16px;font-size:15px;color:#475569;line-height:1.7">Hi there,</p>
-      <p style="margin:0 0 16px;font-size:15px;color:#475569;line-height:1.7">We received a request to sign in to your <strong>Majo Gadgets</strong> account.</p>
+      <p style="margin:0 0 16px;font-size:15px;color:#475569;line-height:1.7">We received a request to sign in to your <strong>Majo Market</strong> account.</p>
       <p style="margin:0 0 20px;font-size:15px;color:#475569;line-height:1.7">To securely access your account, please enter the verification code below:</p>
       <p style="margin:0 0 10px;font-size:14px;font-weight:700;color:#0F172A">Your verification code</p>
       <table role="presentation" style="margin:0 0 8px;border-collapse:collapse">
@@ -668,13 +668,13 @@ def send_login_verification_email(name: str, email: str, code: str):
         </tr>
       </table>
       <p style="margin:0 0 24px;font-size:12px;color:#64748B">Select the code to copy it. On a phone, press and hold the code, then tap Copy.</p>
-      <p style="margin:0 0 20px;font-size:13px;color:#475569;line-height:1.7">This code expires in <strong>10 minutes</strong> and can only be used once. For your security, never share this code with anyone, including anyone claiming to represent Majo Gadgets.</p>
+      <p style="margin:0 0 20px;font-size:13px;color:#475569;line-height:1.7">This code expires in <strong>10 minutes</strong> and can only be used once. For your security, never share this code with anyone, including anyone claiming to represent Majo Market.</p>
       <p style="margin:0 0 8px;font-size:14px;font-weight:700;color:#0F172A">Didn't request this code?</p>
       <p style="margin:0 0 20px;font-size:13px;color:#475569;line-height:1.7">If you didn't attempt to sign in, you can safely ignore this email. Your account remains secure unless someone has access to your login credentials. If you suspect unauthorized activity, we recommend changing your password.</p>
-      <p style="margin:0 0 16px;font-size:13px;color:#475569;line-height:1.7">Thank you for choosing Majo Gadgets. We're committed to keeping your account safe and your shopping experience secure.</p>
-      <p style="margin:0;font-size:13px;color:#475569;line-height:1.7">Best regards,<br><strong>The Majo Gadgets Team</strong><br><em>Quality gadgets, great value.</em></p>
+      <p style="margin:0 0 16px;font-size:13px;color:#475569;line-height:1.7">Thank you for choosing Majo Market. We're committed to keeping your account safe and your shopping experience secure.</p>
+      <p style="margin:0;font-size:13px;color:#475569;line-height:1.7">Best regards,<br><strong>The Majo Market Team</strong><br><em>Quality Products, Great Value.</em></p>
     '''
-    _send({'from': FROM, 'to': email, 'subject': 'Your Majo Gadgets sign-in code', 'html': _wrap(body)})
+    _send({'from': FROM, 'to': email, 'subject': 'Your Majo Market sign-in code', 'html': _wrap(body)})
 
 
 def send_signin_alert_email(name: str, email: str, device_name: str, location: str, signed_in_at: str):
@@ -682,7 +682,7 @@ def send_signin_alert_email(name: str, email: str, device_name: str, location: s
     body = f'''
       <div style="text-align:center;margin-bottom:28px">
         <h2 style="margin:0 0 8px;font-size:22px;color:#0F172A">New sign-in to your account</h2>
-        <p style="margin:0;font-size:14px;color:#64748B">A successful sign-in to your Majo Gadgets account was detected</p>
+        <p style="margin:0;font-size:14px;color:#64748B">A successful sign-in to your Majo Market account was detected</p>
       </div>
       <p style="margin:0 0 20px;font-size:15px;color:#475569;line-height:1.7">Hi <strong>{escape(name or 'there')}</strong>, here are the details of the sign-in:</p>
       <table role="presentation" style="width:100%;margin:0 0 24px;border-collapse:collapse;background:#F8FAFC">
@@ -697,7 +697,7 @@ def send_signin_alert_email(name: str, email: str, device_name: str, location: s
       </div>
       <p style="margin:0;font-size:12px;color:#64748B;line-height:1.6">Location is shared by your device only if you granted location permission. It may be unavailable or approximate.</p>
     '''
-    _send({'from': FROM, 'to': email, 'subject': 'New sign-in to your Majo Gadgets account', 'html': _wrap(body)})
+    _send({'from': FROM, 'to': email, 'subject': 'New sign-in to your Majo Market account', 'html': _wrap(body)})
 
 
 def send_payment_successful_email(name: str, email: str, order_code: str, total: str, items: list, payment_method: str = ''):
@@ -729,7 +729,7 @@ def send_payment_successful_email(name: str, email: str, order_code: str, total:
           Track Your Order &rarr;
         </a>
       </div>
-      <p style="margin:28px 0 0;font-size:13px;color:#94A3B8">Thank you for shopping with Majo Gadgets!</p>
+      <p style="margin:28px 0 0;font-size:13px;color:#94A3B8">Thank you for shopping with Majo Market!</p>
     '''
     _send({'from': FROM, 'to': email, 'subject': f'Payment Confirmed — Order #{order_code}', 'html': _wrap(body, hero=_status_hero('processing'))})
 
@@ -772,8 +772,8 @@ def send_return_approved_email(email: str, order_code: str):
       <p style="margin:0 0 16px;font-size:13px;color:#64748B;line-height:1.7">
         Good news! Your return request for order <strong>#{safe_order_code}</strong> has been reviewed and approved. We’ll guide you through the next steps to ensure your return process is as smooth and convenient as possible.
       </p>
-      <p style="margin:0 0 16px;font-size:13px;color:#64748B;line-height:1.7">Thank you for your patience and for giving us the opportunity to make things right. We truly appreciate your trust in Majo Gadgets!</p>
-      <p style="margin:24px 0 0;font-size:14px;color:#334155;font-weight:700">Thank you for choosing Majo Gadgets — your next great upgrade awaits!</p>
+      <p style="margin:0 0 16px;font-size:13px;color:#64748B;line-height:1.7">Thank you for your patience and for giving us the opportunity to make things right. We truly appreciate your trust in Majo Market!</p>
+      <p style="margin:24px 0 0;font-size:14px;color:#334155;font-weight:700">Thank you for choosing Majo Market — Quality Products, Great Value.</p>
     '''
     _send({'from': FROM, 'to': email, 'subject': f'Return Request Approved — Order #{safe_order_code}', 'html': _wrap(body)})
 
@@ -793,8 +793,8 @@ def send_refund_processed_email(email: str, order_code: str):
       </ul>
       <p style="margin:0 0 16px;font-size:13px;color:#64748B;line-height:1.7">Please note that the actual time may depend on your payment provider. Weekends and public holidays are not counted as business days.</p>
       <p style="margin:0 0 16px;font-size:13px;color:#64748B;line-height:1.7">Thank you for your patience and understanding. We’re sorry things didn’t work out as expected, and we appreciate the opportunity to serve you.</p>
-      <p style="margin:0 0 16px;font-size:13px;color:#64748B;line-height:1.7">We hope to welcome you back to Majo Gadgets soon for an even better shopping experience!</p>
-      <p style="margin:24px 0 0;font-size:14px;color:#334155;font-weight:700">Majo Gadgets — your next great upgrade awaits!</p>
+      <p style="margin:0 0 16px;font-size:13px;color:#64748B;line-height:1.7">We hope to welcome you back to Majo Market soon for an even better shopping experience!</p>
+      <p style="margin:24px 0 0;font-size:14px;color:#334155;font-weight:700">Majo Market — Quality Products, Great Value.</p>
     '''
     _send({'from': FROM, 'to': email, 'subject': f'Refund Processed — Order #{safe_order_code}', 'html': _wrap(body)})
 
@@ -807,11 +807,11 @@ def send_trader_approved_email(name: str, email: str, business_name: str, trader
         <p style="margin:0;font-size:14px;color:#64748B">Your trader application has been approved</p>
       </div>
       <p style="margin:0 0 16px;font-size:15px;color:#475569;line-height:1.7">
-        We're excited to welcome <strong>{business_name}</strong> to the Majo Gadgets platform!
+        We're excited to welcome <strong>{business_name}</strong> to the Majo Market platform!
         Your application has been reviewed and approved by our team.
       </p>
       <ul style="margin:0 0 28px;padding-left:22px;list-style:disc">
-        {_bullet_row('List and sell your products on Majo Gadgets')}
+        {_bullet_row('List and sell your products on Majo Market')}
         {_bullet_row('Track your sales and revenue in real time')}
         {_bullet_row('Manage your trader account from your portal')}
       </ul>

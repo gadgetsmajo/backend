@@ -454,9 +454,9 @@ class ProductSerializer(serializers.ModelSerializer):
             trader = offer.trader
             return trader.business_name if trader.is_visible and not trader.is_closed else None
         if self.context.get('direct_catalog_offer') and self._has_direct_catalog_listing(obj):
-            return 'Majo Gadgets'
+            return 'Majo Market'
         if self._has_direct_catalog_listing(obj):
-            return 'Majo Gadgets'
+            return 'Majo Market'
         trader = obj.trader or (obj.trader_product.trader if obj.trader_product_id else None)
         if (
             not trader

@@ -2,7 +2,7 @@ from django.http import HttpResponse
 from django.conf import settings
 
 SAMPLE_ITEMS = [
-    {'name': 'Samsung Galaxy A54', 'qty': 1, 'price': '850,000', 'image': 'https://res.cloudinary.com/d5qqtsou/image/upload/v1788691351/Majo_Gadgets_logo_an2hbc.png'},
+    {'name': 'Samsung Galaxy A54', 'qty': 1, 'price': '850,000', 'image': 'https://www.majogadgets.com/pwa-512.png'},
     {'name': 'Wireless Earbuds Pro', 'qty': 2, 'price': '120,000', 'image': ''},
 ]
 
@@ -19,7 +19,7 @@ def _get_emails():
         hero = f'''
           <tr>
             <td style="padding:0;text-align:center;line-height:0">
-              <img src="{IMG_WELCOME}" width="580" alt="Majo Gadgets" style="display:block;width:100%;max-width:580px;height:auto;margin:0 auto" />
+              <img src="{IMG_WELCOME}" width="580" alt="Majo Market" style="display:block;width:100%;max-width:580px;height:auto;margin:0 auto" />
             </td>
           </tr>
         '''
@@ -29,10 +29,10 @@ def _get_emails():
             <p style="margin:0;font-size:14px;color:#64748B">Your account has been created successfully</p>
           </div>
           <p style="margin:0 0 20px;font-size:15px;color:#475569;line-height:1.7">
-            We're thrilled to have you join the <strong>Majo Gadgets</strong> family. You're all set to start shopping.
+            We're thrilled to have you join the <strong>Majo Market</strong> family. You're all set to start shopping.
           </p>
           <div style="padding:16px 20px;margin-bottom:28px">
-            {_info_row(ICO_CHECK,    'Browse hundreds of quality gadgets')}
+            {_info_row(ICO_CHECK,    'Browse quality products from trusted sellers')}
             {_info_row(ICO_STAR,     'Grab flash deals and exclusive offers')}
             {_info_row(ICO_HEART,    'Save your favourite items to your wishlist')}
             {_info_row(ICO_TRUCK,    'Fast and reliable delivery to your doorstep')}
@@ -99,7 +99,7 @@ def _get_emails():
           <div style="padding:16px 20px;margin-bottom:24px">
             {_info_row(ICO_CHECK,    'Order successfully delivered', '#065F46')}
             {_info_row(ICO_STAR,     "We'd love to hear your feedback", '#065F46')}
-            {_info_row(ICO_SHOPPING, 'Thank you for shopping with Majo Gadgets', '#065F46')}
+            {_info_row(ICO_SHOPPING, 'Thank you for shopping with Majo Market', '#065F46')}
           </div>
           <p style="margin:0 0 20px;font-size:15px;color:#475569;line-height:1.7">Enjoyed your experience? Please take a moment to rate your order.</p>
           <div style="text-align:center">
@@ -131,8 +131,8 @@ def _get_emails():
           </div>
           <p style="margin:0 0 16px;font-size:15px;color:#475569;line-height:1.7">Hi there!</p>
           <p style="margin:0 0 16px;font-size:13px;color:#64748B;line-height:1.7">Good news! Your return request for order <strong>#12345678-ABCDE</strong> has been reviewed and approved. We’ll guide you through the next steps to ensure your return process is as smooth and convenient as possible.</p>
-          <p style="margin:0 0 16px;font-size:13px;color:#64748B;line-height:1.7">Thank you for your patience and for giving us the opportunity to make things right. We truly appreciate your trust in Majo Gadgets!</p>
-          <p style="margin:24px 0 0;font-size:14px;color:#334155;font-weight:700">Thank you for choosing Majo Gadgets — your next great upgrade awaits!</p>
+          <p style="margin:0 0 16px;font-size:13px;color:#64748B;line-height:1.7">Thank you for your patience and for giving us the opportunity to make things right. We truly appreciate your trust in Majo Market!</p>
+          <p style="margin:24px 0 0;font-size:14px;color:#334155;font-weight:700">Thank you for choosing Majo Market — your next great upgrade awaits!</p>
         ''')
 
     def refund_processed():
@@ -149,8 +149,8 @@ def _get_emails():
           </ul>
           <p style="margin:0 0 16px;font-size:13px;color:#64748B;line-height:1.7">Please note that the actual time may depend on your payment provider. Weekends and public holidays are not counted as business days.</p>
           <p style="margin:0 0 16px;font-size:13px;color:#64748B;line-height:1.7">Thank you for your patience and understanding. We’re sorry things didn’t work out as expected, and we appreciate the opportunity to serve you.</p>
-          <p style="margin:0 0 16px;font-size:13px;color:#64748B;line-height:1.7">We hope to welcome you back to Majo Gadgets soon for an even better shopping experience!</p>
-          <p style="margin:24px 0 0;font-size:14px;color:#334155;font-weight:700">Majo Gadgets — your next great upgrade awaits!</p>
+          <p style="margin:0 0 16px;font-size:13px;color:#64748B;line-height:1.7">We hope to welcome you back to Majo Market soon for an even better shopping experience!</p>
+          <p style="margin:24px 0 0;font-size:14px;color:#334155;font-weight:700">Majo Market — your next great upgrade awaits!</p>
         ''')
 
     def password_reset():

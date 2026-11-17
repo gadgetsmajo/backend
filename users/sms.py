@@ -22,5 +22,5 @@ def send_sms(phone: str, message: str) -> bool:
 def send_welcome_sms(name: str, phone: str) -> bool:
     if not phone:
         return False
-    message = f"Hi {name}, welcome to Majo Gadgets! 🎉 Explore the latest gadgets and enjoy exclusive deals. Shop now at majogadgets.com"
+    message = f"Hi {name}, welcome to Majo Market! 🎉 Discover quality products from trusted sellers and marketplace deals. Shop now at majogadgets.com"
     return send_sms(phone, message)

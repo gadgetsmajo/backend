@@ -22,6 +22,16 @@ User = get_user_model()
 
 
 class EmailStatusHeroTests(TestCase):
+    def test_welcome_email_uses_the_shopping_hero_image(self):
+        with patch.object(emails, '_send') as send:
+            emails.send_welcome_email('Customer', 'customer@example.com')
+
+        html = send.call_args.args[0]['html']
+        self.assertIn(emails.IMG_WELCOME, html)
+        self.assertIn(f'src="{emails.LOGO}"', html)
+        self.assertIn('width="580"', html)
+        self.assertIn('Welcome aboard, Customer!', html)
+
     def test_email_templates_contain_no_emoji_characters(self):
         email_senders = (
             (emails.send_welcome_email, ('Customer', 'customer@example.com')),
@@ -62,7 +72,7 @@ class EmailStatusHeroTests(TestCase):
 
         self.assertIn('<ul', html)
         self.assertIn('<li', html)
-        self.assertIn('List and sell your products on Majo Gadgets', html)
+        self.assertIn('List and sell your products on Majo Market', html)
         self.assertNotIn('>+<', html)
 
     def test_status_hero_uses_matching_image_and_full_width_layout(self):
@@ -142,7 +152,7 @@ class CartReminderEmailTests(TestCase):
             )
 
         payload = send.call_args.args[0]
-        self.assertEqual(payload['from'], 'Majo Gadgets Orders <order@majogadgets.com>')
+        self.assertEqual(payload['from'], 'Majo Market Orders <order@majogadgets.com>')
         self.assertEqual(payload['reply_to'], 'order@majogadgets.com')
         self.assertEqual(payload['to'], 'customer@example.com')
         self.assertIn('&lt;Customer&gt;', payload['html'])
@@ -397,7 +407,7 @@ class EmailMfaLoginTests(TestCase):
         self.assertIn('&lt;123&gt;', payload['html'])
         self.assertNotIn('<123>', payload['html'])
         self.assertIn("Didn't request this code?", payload['html'])
-        self.assertIn('The Majo Gadgets Team', payload['html'])
+        self.assertIn('The Majo Market Team', payload['html'])
         self.assertEqual(payload['to'], 'staff@example.com')
 
     @patch('users.emails._send')

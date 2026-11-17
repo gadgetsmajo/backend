@@ -5,7 +5,7 @@ python manage.py migrate --noinput
 
 if [ -n "${ADMIN_PASSWORD:-}" ]; then
     ADMIN_EMAIL="${ADMIN_EMAIL:-majogadgets@admin.com}" \
-    ADMIN_NAME="${ADMIN_NAME:-Majo Gadgets}" \
+    ADMIN_NAME="${ADMIN_NAME:-Majo Market}" \
         python manage.py create_admin
 fi
 

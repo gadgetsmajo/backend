@@ -50,12 +50,16 @@ def _get_trader_by_uuid(uuid_str):
     ).first()
 
 
-def _is_trader_owner(request, trader):
+def _is_trader_user_owner(user, trader):
     return (
-        request.user.is_staff
-        or trader.user_id == request.user.pk
-        or trader.email.casefold() == (request.user.email or '').casefold()
+        user.is_staff
+        or trader.user_id == user.pk
+        or trader.email.casefold() == (user.email or '').casefold()
     )
+
+
+def _is_trader_owner(request, trader):
+    return _is_trader_user_owner(request.user, trader)
 
 
 class IsTraderOwner(permissions.BasePermission):
@@ -146,7 +150,18 @@ class TraderAgreementView(APIView):
         application = self.get_application(request, trader_uuid)
         if not application:
             return Response({'detail': 'Agreement not found.'}, status=status.HTTP_404_NOT_FOUND)
-        document = application.agreement_document_snapshot or build_agreement_document(application)
+        preview = request.query_params.get('preview') == '1'
+        document = build_agreement_document(application) if preview else (
+            application.agreement_document_snapshot or build_agreement_document(application)
+        )
+        if preview:
+            document['is_preview'] = True
+            document['effective_at'] = None
+            document['ready_to_sign'] = False
+            document['platform']['signed_at'] = None
+            document['trader']['signed_name'] = ''
+            document['trader']['signed_at'] = None
+            document['trader']['has_signature_image'] = False
         return Response(document)
 
     def post(self, request, trader_uuid):
@@ -159,7 +174,7 @@ class TraderAgreementView(APIView):
         document = build_agreement_document(application)
         if not document['ready_to_sign']:
             return Response(
-                {'detail': 'Majo Gadgets registered business address has not been configured.'},
+                {'detail': 'Majo Market registered business address has not been configured.'},
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
 
@@ -188,7 +203,7 @@ class TraderAgreementView(APIView):
                 user=application.user,
                 type='system',
                 title='Trader agreement signed',
-                body='Your Majo Gadgets trader agreement is signed. Your trader account is now active.',
+                body='Your Majo Market trader agreement is signed. Your trader account is now active.',
                 action_url=f'/agreement/{application.uuid}',
             )
         return Response(application.agreement_document_snapshot)
@@ -706,7 +721,7 @@ class TraderSaleListView(APIView):
         trader = _get_trader_by_uuid(trader_uuid)
         if not trader:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
-        if trader.email != request.user.email and not request.user.is_staff:
+        if not _is_trader_owner(request, trader):
             return Response({'detail': 'Forbidden.'}, status=status.HTTP_403_FORBIDDEN)
         return Response(TraderSaleSerializer(trader.sales.all(), many=True).data)
 
@@ -714,7 +729,7 @@ class TraderSaleListView(APIView):
         trader = _get_trader_by_uuid(trader_uuid)
         if not trader:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
-        if trader.email != request.user.email and not request.user.is_staff:
+        if not _is_trader_owner(request, trader):
             return Response({'detail': 'Forbidden.'}, status=status.HTTP_403_FORBIDDEN)
         data = request.data.copy()
         # auto-compute total if not provided
@@ -738,7 +753,7 @@ class TraderExpenseListView(APIView):
         trader = _get_trader_by_uuid(trader_uuid)
         if not trader:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
-        if trader.email != request.user.email and not request.user.is_staff:
+        if not _is_trader_owner(request, trader):
             return Response({'detail': 'Forbidden.'}, status=status.HTTP_403_FORBIDDEN)
         return Response(TraderExpenseSerializer(trader.expenses.all(), many=True).data)
 
@@ -746,7 +761,7 @@ class TraderExpenseListView(APIView):
         trader = _get_trader_by_uuid(trader_uuid)
         if not trader:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
-        if trader.email != request.user.email and not request.user.is_staff:
+        if not _is_trader_owner(request, trader):
             return Response({'detail': 'Forbidden.'}, status=status.HTTP_403_FORBIDDEN)
         serializer = TraderExpenseSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -940,21 +955,13 @@ class AdminTraderApproveView(APIView):
         if app.status == 'approved':
             return Response({'detail': 'Already approved.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        if not settings.MAJO_BUSINESS_ADDRESS.strip():
-            return Response(
-                {'detail': 'Configure MAJO_BUSINESS_ADDRESS before approving trader applications.'},
-                status=status.HTTP_503_SERVICE_UNAVAILABLE,
-            )
-
         if not app.national_id_document or not app.business_location_proof:
             return Response({'detail': 'Required identity and business location documents are missing.'}, status=status.HTTP_400_BAD_REQUEST)
         if not app.ura_certificate_document and not app.tin.strip():
             return Response({'detail': 'A URA certificate or TIN is required before approval.'}, status=status.HTTP_400_BAD_REQUEST)
-        if request.data.get('documents_verified') is not True:
-            return Response({'detail': 'Confirm that you reviewed the documents and verified the ID before approval.'}, status=status.HTTP_400_BAD_REQUEST)
 
         app.status = 'approved'
-        app.documents_verified = True
+        app.documents_verified = request.data.get('documents_verified') is True
         app.admin_note = request.data.get('admin_note', '')
         app.reviewed_by = request.user
         app.reviewed_at = timezone.now()
@@ -1025,14 +1032,14 @@ class TraderInventoryListView(APIView):
 
     def get(self, request, trader_uuid):
         trader = _get_trader_by_uuid(trader_uuid)
-        if not trader or (trader.email != request.user.email and not request.user.is_staff):
+        if not trader or not _is_trader_owner(request, trader):
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         items = TraderInventoryItem.objects.filter(trader=trader).select_related('product', 'variant')
         return Response(TraderInventoryItemSerializer(items, many=True).data)
 
     def post(self, request, trader_uuid):
         trader = _get_trader_by_uuid(trader_uuid)
-        if not trader or (trader.email != request.user.email and not request.user.is_staff):
+        if not trader or not _is_trader_owner(request, trader):
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         product_id = request.data.get('product')
         try:
@@ -1080,7 +1087,7 @@ class TraderInventoryItemDetailView(APIView):
 
     def _get(self, trader_uuid, pk, user):
         trader = _get_trader_by_uuid(trader_uuid)
-        if not trader or (trader.email != user.email and not user.is_staff):
+        if not trader or not _is_trader_user_owner(user, trader):
             return None, None
         try:
             return trader, TraderInventoryItem.objects.select_related('product', 'variant').get(pk=pk, trader=trader)
@@ -1110,7 +1117,7 @@ class TraderStockMovementView(APIView):
 
     def post(self, request, trader_uuid, pk):
         trader = _get_trader_by_uuid(trader_uuid)
-        if not trader or (trader.email != request.user.email and not request.user.is_staff):
+        if not trader or not _is_trader_owner(request, trader):
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         try:
             item = TraderInventoryItem.objects.select_related('product', 'variant').get(pk=pk, trader=trader)
@@ -1186,7 +1193,7 @@ class TraderAccountView(APIView):
         trader = _get_trader_by_uuid(trader_uuid)
         if not trader:
             return None
-        if trader.email != user.email and not user.is_staff:
+        if not _is_trader_user_owner(user, trader):
             return None
         return trader
 
@@ -1275,7 +1282,7 @@ class TraderWalletView(APIView):
 
     def _get_trader(self, trader_uuid, user):
         trader = _get_trader_by_uuid(trader_uuid)
-        if not trader or (trader.email != user.email and not user.is_staff):
+        if not trader or not _is_trader_user_owner(user, trader):
             return None
         return trader
 
@@ -1321,7 +1328,7 @@ class TraderWalletView(APIView):
             ).first()
             if not trader:
                 return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
-            if trader.email != request.user.email and not request.user.is_staff:
+            if not _is_trader_owner(request, trader):
                 return Response({'detail': 'Forbidden.'}, status=status.HTTP_403_FORBIDDEN)
             if not all((
                 trader.payout_method,
@@ -1388,7 +1395,7 @@ class TraderOrderListView(APIView):
         trader = _get_trader_by_uuid(trader_uuid)
         if not trader:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
-        if trader.email != request.user.email and not request.user.is_staff:
+        if not _is_trader_owner(request, trader):
             return Response({'detail': 'Forbidden.'}, status=status.HTTP_403_FORBIDDEN)
 
         # Find all order items whose product belongs to this trader's store products
@@ -1437,7 +1444,7 @@ class TraderOrderItemUpdateView(APIView):
         trader = _get_trader_by_uuid(trader_uuid)
         if not trader:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
-        if trader.email != request.user.email and not request.user.is_staff:
+        if not _is_trader_owner(request, trader):
             return Response({'detail': 'Forbidden.'}, status=status.HTTP_403_FORBIDDEN)
 
         try:

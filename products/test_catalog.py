@@ -1115,7 +1115,7 @@ class SharedCatalogAPITests(APITestCase):
         self.assertEqual(result['listed_price'], '49000.00')
         self.assertEqual(result['stock'], 4)
         self.assertEqual(result['seller_count'], 1)
-        self.assertEqual(result['seller_name'], 'Majo Gadgets')
+        self.assertEqual(result['seller_name'], 'Majo Market')
         available = self.client.get(reverse('product-list'), {'available': 'true'})
         self.assertIn(listed.pk, [item['id'] for item in available.data['results']])
         recommendations = self.client.get(reverse('recommended-products'))
