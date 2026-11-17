@@ -149,6 +149,43 @@ class EmailMfaTrustedDevice(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
 
+class EmailDelivery(models.Model):
+    DEPARTMENT_CHOICES = [
+        ('support', 'Support'),
+        ('orders', 'Orders'),
+        ('traders', 'Trader Relations'),
+        ('admin', 'Administration'),
+        ('customer', 'Customer Relations'),
+        ('info', 'General Enquiries'),
+        ('noreply', 'Automated Notifications'),
+    ]
+    STATUS_CHOICES = [
+        ('sending', 'Sending'),
+        ('sent', 'Accepted by provider'),
+        ('delivered', 'Delivered'),
+        ('bounced', 'Bounced'),
+        ('failed', 'Failed'),
+    ]
+
+    idempotency_key = models.CharField(max_length=64, unique=True)
+    department = models.CharField(max_length=16, choices=DEPARTMENT_CHOICES)
+    sender = models.EmailField()
+    recipient = models.EmailField()
+    subject = models.CharField(max_length=255)
+    provider_message_id = models.CharField(max_length=120, blank=True, db_index=True)
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default='sending')
+    error_type = models.CharField(max_length=120, blank=True)
+    sent_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=('department', 'created_at'), name='email_delivery_dept_time_idx'),
+        ]
+
+
 class CartItem(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='cart_items')
     product_id = models.IntegerField()

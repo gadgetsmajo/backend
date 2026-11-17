@@ -194,7 +194,6 @@ def _send_paid_order_followups(order_id, payment_method):
                     trader.email,
                     order.code,
                     entry['items'],
-                    order.delivery_address,
                     f'{settings.FRONTEND_URL.rstrip("/")}/trader/{trader.uuid}/orders',
                 )
             except Exception:

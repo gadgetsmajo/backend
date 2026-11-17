@@ -1,18 +1,142 @@
+import hashlib
 from html import escape
+import logging
+from datetime import timedelta
 
 import resend
 from django.conf import settings
+from django.core.exceptions import ImproperlyConfigured
+from django.db import transaction
+from django.utils import timezone
+from .models import EmailDelivery
+
+logger = logging.getLogger(__name__)
 
 
-def _send(payload: dict):
-    resend.api_key = settings.RESEND_API_KEY
-    payload.setdefault('reply_to', settings.SUPPORT_EMAIL)
-    resend.Emails.send(payload)
-
-FROM = 'Majo Market <support@majogadgets.com>'
-LOGO = 'https://res.cloudinary.com/fhklnn0f/image/upload/v1794853987/Majo_market_logo.png'
+EMAIL_ROLES = frozenset(settings.EMAIL_ROLE_ADDRESSES)
+LOGO = 'https://www.majomarket-uganda.com/OG.png'
 IMG_CART = 'https://res.cloudinary.com/fhklnn0f/image/upload/v1789551363/shopping_cart.png'
 IMG_WELCOME = 'https://res.cloudinary.com/fhklnn0f/image/upload/v1794851607/Majo_Market_Shopping_email_hero.png'
+ROUTING_NOTICE = '<!-- MAJO_EMAIL_ROUTING_NOTICE -->'
+
+
+def _sender_header(department: str) -> str:
+    label = settings.EMAIL_ROLE_LABELS[department]
+    return f'Majo Market {label} <{settings.EMAIL_ROLE_ADDRESSES[department]}>'
+
+
+def _routing_notice(department: str, reply_to_department: str | None) -> str:
+    if department == 'noreply':
+        contact = reply_to_department or 'support'
+        address = escape(settings.EMAIL_ROLE_ADDRESSES[contact])
+        label = escape(settings.EMAIL_ROLE_LABELS[contact])
+        return (
+            '<p style="margin:0;font-size:12px;line-height:1.6;color:#475569">'
+            'This is an automated email from a mailbox that is not monitored. '
+            f'For assistance, contact <a href="mailto:{address}" style="color:#1E3A8A !important">'
+            f'{label}</a>.</p>'
+        )
+    if department == 'admin':
+        return (
+            '<p style="margin:0;font-size:11px;line-height:1.5;color:#64748B">'
+            'Internal administrative notification. Do not forward customer information outside Majo Market.</p>'
+        )
+    return (
+        '<p style="margin:0;font-size:12px;line-height:1.6;color:#475569">'
+        'For assistance, reply to this email to reach the responsible Majo Market team.</p>'
+    )
+
+
+def _send(payload: dict, *, department: str = 'support', reply_to_department: str | None = None):
+    if department not in EMAIL_ROLES:
+        raise ValueError(f'Unsupported email department: {department}')
+    if reply_to_department is not None and reply_to_department not in EMAIL_ROLES - {'noreply'}:
+        raise ValueError(f'Unsupported Reply-To department: {reply_to_department}')
+    if not settings.RESEND_API_KEY:
+        logger.error('Cannot send %s email because RESEND_API_KEY is not configured', department)
+        raise ImproperlyConfigured('RESEND_API_KEY is required to send email.')
+
+    recipient = payload.get('to')
+    if not isinstance(recipient, str) or not recipient.strip():
+        raise ValueError('Email recipient must be a single non-empty address.')
+
+    payload = dict(payload)
+    payload['from'] = _sender_header(department)
+    payload['reply_to'] = settings.EMAIL_ROLE_ADDRESSES.get(
+        reply_to_department or (None if department == 'noreply' else department),
+        '',
+    )
+    if not payload['reply_to']:
+        payload.pop('reply_to')
+    payload['html'] = payload.get('html', '').replace(
+        ROUTING_NOTICE,
+        _routing_notice(department, reply_to_department),
+    )
+
+    now = timezone.now()
+    idempotency_key = hashlib.sha256(
+        '\0'.join((
+            department,
+            recipient.strip().lower(),
+            payload['subject'],
+            payload['html'],
+            str(int(now.timestamp() // 600)),
+        )).encode('utf-8')
+    ).hexdigest()
+    with transaction.atomic():
+        delivery, created = EmailDelivery.objects.get_or_create(
+            idempotency_key=idempotency_key,
+            defaults={
+                'department': department,
+                'sender': settings.EMAIL_ROLE_ADDRESSES[department],
+                'recipient': recipient.strip(),
+                'subject': payload['subject'][:255],
+                'status': 'sending',
+            },
+        )
+        delivery = EmailDelivery.objects.select_for_update().get(pk=delivery.pk)
+        if not created:
+            if delivery.status in ('sent', 'delivered', 'bounced'):
+                logger.info('Skipped duplicate email delivery %s for %s', delivery.pk, department)
+                return delivery.provider_message_id
+            if delivery.status == 'sending' and delivery.updated_at >= now - timedelta(minutes=10):
+                logger.info('Skipped in-flight duplicate email delivery %s for %s', delivery.pk, department)
+                return delivery.provider_message_id
+        delivery.status = 'sending'
+        delivery.error_type = ''
+        delivery.save(update_fields=('status', 'error_type', 'updated_at'))
+
+    resend.api_key = settings.RESEND_API_KEY
+    try:
+        response = resend.Emails.send(payload, {'idempotency_key': idempotency_key})
+    except Exception as error:
+        EmailDelivery.objects.filter(pk=delivery.pk).update(
+            status='failed',
+            error_type=type(error).__name__,
+            updated_at=timezone.now(),
+        )
+        logger.exception('Resend failed for email delivery %s (%s)', delivery.pk, department)
+        raise
+
+    provider_message_id = getattr(response, 'id', '') or (
+        response.get('id', '') if isinstance(response, dict) else ''
+    )
+    EmailDelivery.objects.filter(pk=delivery.pk).update(
+        status='sent',
+        provider_message_id=provider_message_id,
+        sent_at=timezone.now(),
+        updated_at=timezone.now(),
+    )
+    logger.info(
+        'Email accepted by Resend: delivery=%s department=%s provider_message_id=%s',
+        delivery.pk,
+        department,
+        provider_message_id,
+    )
+    return provider_message_id
+
+
+FROM = _sender_header('support')
 
 # ── Icon paths ───────────────────────────────────────────────────────────────
 ICO_CHECK       = '<polyline points="20 6 9 17 4 12"/>'
@@ -64,8 +188,8 @@ BASE = '''
     <tr><td align="center">
       <table width="580" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,0.07)">
         <tr>
-          <td style="background:#ffffff;padding:28px 40px;text-align:center;border-bottom:1px solid #E2E8F0">
-            <img src="{logo}" height="48" alt="Majo Market" style="display:block;margin:0 auto" />
+          <td style="background:#071A2B;padding:12px 40px;text-align:center;border-bottom:1px solid #E2E8F0">
+            <img src="{logo}" width="180" alt="Majo Market" style="display:block;width:180px;height:auto;margin:0 auto" />
           </td>
         </tr>
         {hero}
@@ -74,6 +198,7 @@ BASE = '''
         <tr>
           <td style="padding:20px 40px;text-align:center">
             <p style="margin:0 0 4px;font-size:13px;color:#111111">Majo Market &mdash; Quality Products, Great Value.</p>
+            <div style="margin:10px 0"><!-- MAJO_EMAIL_ROUTING_NOTICE --></div>
             <p style="margin:0;font-size:11px;color:#333333">&copy; 2026 Majo Market. All rights reserved.</p>
           </td>
         </tr>
@@ -173,9 +298,13 @@ def send_welcome_email(name: str, email: str):
           Start Shopping &rarr;
         </a>
       </div>
-      <p style="margin:28px 0 0;font-size:13px;color:#333333">If you have any questions, just reply to this email — we&#39;re always happy to help.</p>
+      <p style="margin:28px 0 0;font-size:13px;color:#333333">For help, contact our support team at {settings.EMAIL_ROLE_ADDRESSES['support']}.</p>
     '''
-    _send({'from': FROM, 'to': email, 'subject': 'Welcome to Majo Market!', 'html': _wrap(body, hero=hero)})
+    _send(
+        {'to': email, 'subject': 'Welcome to Majo Market!', 'html': _wrap(body, hero=hero)},
+        department='noreply',
+        reply_to_department='support',
+    )
 
 
 def send_admin_new_order_email(order_code: str, customer_name: str, customer_email: str, total: str, items: list, delivery_address: str):
@@ -212,7 +341,10 @@ def send_admin_new_order_email(order_code: str, customer_name: str, customer_ema
       </div>
       <p style="margin:16px 0 0;font-size:13px;color:#333333">Or track it at: <a href="{settings.FRONTEND_URL}/orders/{order_code}" style="color:#1E3A8A !important">{settings.FRONTEND_URL}/orders/{order_code}</a></p>
     '''
-    _send({'from': FROM, 'to': settings.ADMIN_EMAIL, 'reply_to': settings.ADMIN_EMAIL, 'subject': f'New Order #{order_code} — UGX {total}', 'html': _wrap(body)})
+    _send(
+        {'to': settings.EMAIL_ROLE_ADDRESSES['orders'], 'subject': f'New Order #{order_code} — UGX {total}', 'html': _wrap(body)},
+        department='orders',
+    )
 
 
 def send_trader_paid_order_email(
@@ -220,7 +352,6 @@ def send_trader_paid_order_email(
     email: str,
     order_code: str,
     items: list,
-    delivery_address: str,
     orders_url: str,
 ):
     safe_items = [
@@ -238,7 +369,6 @@ def send_trader_paid_order_email(
         <h2 style="margin:0 0 6px;font-size:22px;color:#0F172A">Paid order — prepare your items</h2>
         <p style="margin:0;font-size:14px;color:#64748B">Hi <strong>{escape(trader_name)}</strong>, payment is confirmed for order #{escape(order_code)}.</p>
       </div>
-      <p style="margin:0 0 12px;font-size:13px;color:#334155"><strong>Delivery address:</strong> {escape(delivery_address)}</p>
       <table width="100%" cellpadding="0" cellspacing="0">{_item_rows(safe_items)}</table>
       <div style="text-align:center;margin-top:24px">
         <a href="{escape(orders_url, quote=True)}" style="display:inline-block;padding:14px 32px;background:#071A2B;color:#ffffff;border-radius:6px;font-size:14px;font-weight:700;text-decoration:none">
@@ -250,11 +380,10 @@ def send_trader_paid_order_email(
       </p>
     '''
     _send({
-        'from': FROM,
         'to': email,
         'subject': f'Prepare paid order #{order_code}',
         'html': _wrap(body, hero=_status_hero('processing')),
-    })
+    }, department='traders')
 
 
 def send_admin_new_support_message_email(customer_name: str, customer_email: str):
@@ -276,12 +405,10 @@ def send_admin_new_support_message_email(customer_name: str, customer_email: str
       </div>
     '''
     _send({
-        'from': FROM,
-        'to': settings.ADMIN_EMAIL,
-        'reply_to': settings.ADMIN_EMAIL,
+        'to': settings.SUPPORT_EMAIL,
         'subject': 'New customer message — Majo Support',
         'html': _wrap(body),
-    })
+    }, department='support')
 
 
 def send_cart_reminder_email(name: str, email: str, items: list, subtotal, delivery, total):
@@ -334,12 +461,10 @@ def send_cart_reminder_email(name: str, email: str, items: list, subtotal, deliv
       </div>
     '''
     _send({
-        'from': 'Majo Market Orders <order@majogadgets.com>',
         'to': email,
-        'reply_to': 'order@majogadgets.com',
         'subject': 'Your Majo Market cart is waiting',
         'html': _wrap(body),
-    })
+    }, department='noreply', reply_to_department='orders')
 
 
 def send_order_placed_email(name: str, email: str, order_code: str, total: str, items: list, delivery_address: str):
@@ -376,7 +501,7 @@ def send_order_placed_email(name: str, email: str, order_code: str, total: str, 
       <p style="margin:0 0 12px;font-size:15px;color:#111111;line-height:1.7">Thank you for shopping with Majo Market!</p>
       <p style="margin:0;font-size:13px;color:#333333;line-height:1.6">— The Majo Market Team</p>
     '''
-    _send({'from': FROM, 'to': email, 'subject': f'Order Placed — #{order_code}', 'html': _wrap(body, hero=_status_hero('pending'))})
+    _send({'to': email, 'subject': f'Order Placed — #{order_code}', 'html': _wrap(body, hero=_status_hero('pending'))}, department='orders')
 
 
 def send_order_confirmed_email(name: str, email: str, order_code: str, total: str, items: list, delivery_address: str):
@@ -418,7 +543,7 @@ def send_order_confirmed_email(name: str, email: str, order_code: str, total: st
       <p style="margin:0 0 12px;font-size:15px;color:#475569;line-height:1.7">Thank you for shopping with Majo Market! {_icon(ICO_SHOPPING, '#475569', 16)}</p>
       <p style="margin:0;font-size:13px;color:#94A3B8;line-height:1.6">— The Majo Market Team</p>
     '''
-    _send({'from': FROM, 'to': email, 'subject': f'Order Confirmed — #{order_code}', 'html': _wrap(body, hero=_status_hero('processing'))})
+    _send({'to': email, 'subject': f'Order Confirmed — #{order_code}', 'html': _wrap(body, hero=_status_hero('processing'))}, department='orders')
 
 
 def send_order_shipped_email(name: str, email: str, order_code: str, delivery_address: str):
@@ -442,7 +567,7 @@ def send_order_shipped_email(name: str, email: str, order_code: str, delivery_ad
 
       <p style="margin:0;font-size:13px;color:#94A3B8;line-height:1.6">If you have any questions about your delivery, reply to this email and we&#39;ll be happy to help.</p>
     '''
-    _send({'from': FROM, 'to': email, 'subject': f'Your Order is Shipped — #{order_code}', 'html': _wrap(body, hero=_status_hero('shipped'))})
+    _send({'to': email, 'subject': f'Your Order is Shipped — #{order_code}', 'html': _wrap(body, hero=_status_hero('shipped'))}, department='orders')
 
 
 def send_order_ready_for_pickup_email(name: str, email: str, order_code: str, pickup_address: str = ''):
@@ -464,7 +589,7 @@ def send_order_ready_for_pickup_email(name: str, email: str, order_code: str, pi
 
       <p style="margin:0;font-size:13px;color:#94A3B8;line-height:1.6">If you have any questions, reply to this email and we&#39;ll be happy to help.</p>
     '''
-    _send({'from': FROM, 'to': email, 'subject': f'Your Order is Ready for Pickup — #{order_code}', 'html': _wrap(body, hero=_status_hero('ready_for_pickup'))})
+    _send({'to': email, 'subject': f'Your Order is Ready for Pickup — #{order_code}', 'html': _wrap(body, hero=_status_hero('ready_for_pickup'))}, department='orders')
 
 
 def send_order_delivered_email(name: str, email: str, order_code: str, total: str = '', items: list | None = None, delivery_address: str = ''):
@@ -508,7 +633,7 @@ def send_order_delivered_email(name: str, email: str, order_code: str, total: st
       </div>
       <p style="margin:28px 0 0;font-size:13px;color:#94A3B8;line-height:1.6">— The Majo Market Team</p>
     '''
-    _send({'from': FROM, 'to': email, 'subject': f'Order Delivered — #{order_code}', 'html': _wrap(body, hero=_status_hero('delivered'))})
+    _send({'to': email, 'subject': f'Order Delivered — #{order_code}', 'html': _wrap(body, hero=_status_hero('delivered'))}, department='orders')
 
 
 def send_product_rating_email(name: str, email: str, order_code: str, items: list):
@@ -548,7 +673,7 @@ def send_product_rating_email(name: str, email: str, order_code: str, items: lis
       </div>
       <p style="margin:0;font-size:13px;color:#94A3B8;line-height:1.6">Thank you for shopping with Majo Market!</p>
     '''
-    _send({'from': FROM, 'to': email, 'subject': f'Rate your products from order #{order_code}', 'html': _wrap(body)})
+    _send({'to': email, 'subject': f'Rate your products from order #{order_code}', 'html': _wrap(body)}, department='noreply', reply_to_department='customer')
 
 
 def send_order_rating_email(name: str, email: str, order_code: str, rating_url: str):
@@ -577,7 +702,7 @@ def send_order_rating_email(name: str, email: str, order_code: str, rating_url: 
       <p style="margin:0 0 12px;font-size:15px;color:#475569;line-height:1.7">Thank you for shopping with Majo Market!</p>
       <p style="margin:0;font-size:13px;color:#94A3B8;line-height:1.6">— The Majo Market Team</p>
     '''
-    _send({'from': FROM, 'to': email, 'subject': f'Rate Your Experience — #{order_code}', 'html': _wrap(body)})
+    _send({'to': email, 'subject': f'Rate Your Experience — #{order_code}', 'html': _wrap(body)}, department='noreply', reply_to_department='customer')
 
 
 def send_order_cancelled_email(name: str, email: str, order_code: str, reason: str):
@@ -598,7 +723,7 @@ def send_order_cancelled_email(name: str, email: str, order_code: str, reason: s
       </div>
       <p style="margin:28px 0 0;font-size:13px;color:#94A3B8;line-height:1.6">We hope to serve you again soon. Thank you for choosing Majo Market.</p>
     '''
-    _send({'from': FROM, 'to': email, 'subject': f'Order Cancelled — #{order_code}', 'html': _wrap(body)})
+    _send({'to': email, 'subject': f'Order Cancelled — #{order_code}', 'html': _wrap(body)}, department='orders')
 
 
 def send_password_reset_email(name: str, email: str, reset_url: str):
@@ -625,7 +750,7 @@ def send_password_reset_email(name: str, email: str, reset_url: str):
       <p style="margin:0 0 24px;font-size:12px;color:#16A34A;word-break:break-all">{reset_url}</p>
       <p style="margin:0;font-size:13px;color:#94A3B8;line-height:1.6">If you didn't request a password reset, you can safely ignore this email.</p>
     '''
-    _send({'from': FROM, 'to': email, 'subject': 'Reset your Majo Market password', 'html': _wrap(body)})
+    _send({'to': email, 'subject': 'Reset your Majo Market password', 'html': _wrap(body)}, department='noreply', reply_to_department='support')
 
 
 def send_password_changed_email(name: str, email: str):
@@ -645,7 +770,7 @@ def send_password_changed_email(name: str, email: str):
       </div>
       <p style="margin:0;font-size:13px;color:#94A3B8;line-height:1.6">If you did not change your password, please <a href="{settings.FRONTEND_URL}/forgot-password" style="color:#1E3A8A !important">reset it immediately</a>.</p>
     '''
-    _send({'from': FROM, 'to': email, 'subject': 'Your password has been changed', 'html': _wrap(body)})
+    _send({'to': email, 'subject': 'Your password has been changed', 'html': _wrap(body)}, department='noreply', reply_to_department='support')
 
 
 def send_login_verification_email(name: str, email: str, code: str):
@@ -674,7 +799,7 @@ def send_login_verification_email(name: str, email: str, code: str):
       <p style="margin:0 0 16px;font-size:13px;color:#475569;line-height:1.7">Thank you for choosing Majo Market. We're committed to keeping your account safe and your shopping experience secure.</p>
       <p style="margin:0;font-size:13px;color:#475569;line-height:1.7">Best regards,<br><strong>The Majo Market Team</strong><br><em>Quality Products, Great Value.</em></p>
     '''
-    _send({'from': FROM, 'to': email, 'subject': 'Your Majo Market sign-in code', 'html': _wrap(body)})
+    _send({'to': email, 'subject': 'Your Majo Market sign-in code', 'html': _wrap(body)}, department='noreply', reply_to_department='support')
 
 
 def send_signin_alert_email(name: str, email: str, device_name: str, location: str, signed_in_at: str):
@@ -697,7 +822,7 @@ def send_signin_alert_email(name: str, email: str, device_name: str, location: s
       </div>
       <p style="margin:0;font-size:12px;color:#64748B;line-height:1.6">Location is shared by your device only if you granted location permission. It may be unavailable or approximate.</p>
     '''
-    _send({'from': FROM, 'to': email, 'subject': 'New sign-in to your Majo Market account', 'html': _wrap(body)})
+    _send({'to': email, 'subject': 'New sign-in to your Majo Market account', 'html': _wrap(body)}, department='noreply', reply_to_department='support')
 
 
 def send_payment_successful_email(name: str, email: str, order_code: str, total: str, items: list, payment_method: str = ''):
@@ -731,7 +856,7 @@ def send_payment_successful_email(name: str, email: str, order_code: str, total:
       </div>
       <p style="margin:28px 0 0;font-size:13px;color:#94A3B8">Thank you for shopping with Majo Market!</p>
     '''
-    _send({'from': FROM, 'to': email, 'subject': f'Payment Confirmed — Order #{order_code}', 'html': _wrap(body, hero=_status_hero('processing'))})
+    _send({'to': email, 'subject': f'Payment Confirmed — Order #{order_code}', 'html': _wrap(body, hero=_status_hero('processing'))}, department='noreply', reply_to_department='orders')
 
 
 def send_payment_failed_email(name: str, email: str, order_code: str, total: str, reason: str = 'failed'):
@@ -757,7 +882,7 @@ def send_payment_failed_email(name: str, email: str, order_code: str, total: str
       </div>
       <p style="margin:28px 0 0;font-size:13px;color:#94A3B8">Need help? Reply to this email and we'll sort it out.</p>
     '''
-    _send({'from': FROM, 'to': email, 'subject': f'Payment Failed — Order #{order_code}', 'html': _wrap(body)})
+    _send({'to': email, 'subject': f'Payment Failed — Order #{order_code}', 'html': _wrap(body)}, department='noreply', reply_to_department='orders')
 
 
 def send_return_approved_email(email: str, order_code: str):
@@ -775,7 +900,7 @@ def send_return_approved_email(email: str, order_code: str):
       <p style="margin:0 0 16px;font-size:13px;color:#64748B;line-height:1.7">Thank you for your patience and for giving us the opportunity to make things right. We truly appreciate your trust in Majo Market!</p>
       <p style="margin:24px 0 0;font-size:14px;color:#334155;font-weight:700">Thank you for choosing Majo Market — Quality Products, Great Value.</p>
     '''
-    _send({'from': FROM, 'to': email, 'subject': f'Return Request Approved — Order #{safe_order_code}', 'html': _wrap(body)})
+    _send({'to': email, 'subject': f'Return Request Approved — Order #{safe_order_code}', 'html': _wrap(body)}, department='orders')
 
 
 def send_refund_processed_email(email: str, order_code: str):
@@ -796,7 +921,7 @@ def send_refund_processed_email(email: str, order_code: str):
       <p style="margin:0 0 16px;font-size:13px;color:#64748B;line-height:1.7">We hope to welcome you back to Majo Market soon for an even better shopping experience!</p>
       <p style="margin:24px 0 0;font-size:14px;color:#334155;font-weight:700">Majo Market — Quality Products, Great Value.</p>
     '''
-    _send({'from': FROM, 'to': email, 'subject': f'Refund Processed — Order #{safe_order_code}', 'html': _wrap(body)})
+    _send({'to': email, 'subject': f'Refund Processed — Order #{safe_order_code}', 'html': _wrap(body)}, department='orders')
 
 
 def send_trader_approved_email(name: str, email: str, business_name: str, trader_uuid: str):
@@ -822,7 +947,7 @@ def send_trader_approved_email(name: str, email: str, business_name: str, trader
       </div>
       <p style="margin:28px 0 0;font-size:13px;color:#94A3B8">If you have any questions, just reply to this email — we're always happy to help.</p>
     '''
-    _send({'from': FROM, 'to': email, 'subject': f'Your Trader Application is Approved — {business_name}', 'html': _wrap(body)})
+    _send({'to': email, 'subject': f'Your Trader Application is Approved — {business_name}', 'html': _wrap(body)}, department='traders')
 
 
 def send_trader_agreement_email(name: str, email: str, business_name: str, agreement_url: str, reference: str, version: str):
@@ -838,4 +963,4 @@ def send_trader_agreement_email(name: str, email: str, business_name: str, agree
       </div>
       <p style="font-size:12px;line-height:1.6;color:#64748B">Your National ID copy is retained for private verification and is not included in the agreement.</p>
     '''
-    _send({'from': FROM, 'to': email, 'subject': f'Trader Agreement Ready — {reference}', 'html': _wrap(body)})
+    _send({'to': email, 'subject': f'Trader Agreement Ready — {reference}', 'html': _wrap(body)}, department='traders')

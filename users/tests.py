@@ -1,5 +1,7 @@
 import json
 import re
+import hashlib
+import hmac
 from unittest.mock import Mock, patch
 
 import base64
@@ -8,13 +10,13 @@ from datetime import timedelta
 from decimal import Decimal
 
 from django.contrib.auth import get_user_model
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework.test import APIClient
 
 from users import emails
-from users.models import CartItem, EmailMfaChallenge, EmailMfaTrustedDevice, SupportConversation, SupportMessage
+from users.models import CartItem, EmailDelivery, EmailMfaChallenge, EmailMfaTrustedDevice, SupportConversation, SupportMessage
 from products.models import Product
 from settings_app.models import PlatformSettings
 
@@ -103,33 +105,102 @@ class EmailStatusHeroTests(TestCase):
                 self.assertNotIn('🚚', html)
                 self.assertNotIn('Order Progress', html)
 
-    def test_admin_new_order_email_uses_admin_alias_for_recipient_and_reply(self):
+    def test_new_order_email_uses_orders_department(self):
         with patch.object(emails, '_send') as send:
             emails.send_admin_new_order_email('ORD-1', 'Customer', 'customer@example.com', '1000', [], 'Kampala')
 
         payload = send.call_args.args[0]
-        self.assertEqual(payload['to'], emails.settings.ADMIN_EMAIL)
-        self.assertEqual(payload['reply_to'], emails.settings.ADMIN_EMAIL)
+        self.assertEqual(payload['to'], emails.settings.EMAIL_ROLE_ADDRESSES['orders'])
+        self.assertEqual(send.call_args.kwargs['department'], 'orders')
 
-    def test_admin_support_message_email_contains_no_message_content(self):
+    def test_support_message_email_contains_no_message_content(self):
         with patch.object(emails, '_send') as send:
             emails.send_admin_new_support_message_email('Customer', 'customer@example.com')
 
         payload = send.call_args.args[0]
-        self.assertEqual(payload['to'], emails.settings.ADMIN_EMAIL)
-        self.assertEqual(payload['reply_to'], emails.settings.ADMIN_EMAIL)
+        self.assertEqual(payload['to'], emails.settings.EMAIL_ROLE_ADDRESSES['support'])
+        self.assertEqual(send.call_args.kwargs['department'], 'support')
         self.assertIn('New Support Message', payload['html'])
         self.assertIn('customer@example.com', payload['html'])
         self.assertIn('end-to-end encrypted', payload['html'])
         self.assertIn('/admin/support', payload['html'])
         self.assertNotIn('ciphertext', payload['html'])
 
+    @override_settings(RESEND_API_KEY='re_test')
     def test_customer_transactional_email_replies_to_support_alias(self):
-        with patch.object(emails.resend.Emails, 'send') as send:
+        with patch.object(emails.resend.Emails, 'send', return_value=Mock(id='resend-message-1')) as send:
             emails._send({'from': emails.FROM, 'to': 'customer@example.com', 'subject': 'Test', 'html': 'Test'})
 
         payload = send.call_args.args[0]
+        self.assertEqual(payload['from'], 'Majo Market Support <support@majomarket-uganda.com>')
         self.assertEqual(payload['reply_to'], emails.settings.SUPPORT_EMAIL)
+        self.assertEqual(len(send.call_args.args), 2)
+
+    @override_settings(RESEND_API_KEY='re_test')
+    def test_noreply_email_is_marked_unmonitored_and_sets_department_reply_to(self):
+        with patch.object(emails.resend.Emails, 'send', return_value=Mock(id='resend-message-1')) as send:
+            emails._send(
+                {'to': 'customer@example.com', 'subject': 'Welcome', 'html': emails.ROUTING_NOTICE},
+                department='noreply',
+                reply_to_department='support',
+            )
+
+        payload = send.call_args.args[0]
+        self.assertEqual(payload['from'], 'Majo Market Automated Notifications <noreply@majomarket-uganda.com>')
+        self.assertEqual(payload['reply_to'], emails.settings.EMAIL_ROLE_ADDRESSES['support'])
+        self.assertIn('mailbox that is not monitored', payload['html'])
+        self.assertNotIn(emails.ROUTING_NOTICE, payload['html'])
+
+    @override_settings(RESEND_API_KEY='re_test')
+    def test_email_delivery_is_tracked_and_duplicate_sends_are_suppressed(self):
+        response = Mock(id='resend-message-1')
+        with patch.object(emails.resend.Emails, 'send', return_value=response) as send:
+            first_id = emails._send({
+                'to': 'customer@example.com',
+                'subject': 'Tracked',
+                'html': emails.ROUTING_NOTICE,
+            }, department='support')
+            second_id = emails._send({
+                'to': 'customer@example.com',
+                'subject': 'Tracked',
+                'html': emails.ROUTING_NOTICE,
+            }, department='support')
+
+        self.assertEqual(first_id, 'resend-message-1')
+        self.assertEqual(second_id, 'resend-message-1')
+        send.assert_called_once()
+        delivery = emails.EmailDelivery.objects.get()
+        self.assertEqual(delivery.status, 'sent')
+        self.assertEqual(delivery.provider_message_id, 'resend-message-1')
+
+    @override_settings(RESEND_API_KEY='re_test')
+    def test_failed_email_delivery_is_recorded_and_error_is_raised(self):
+        with patch.object(emails.resend.Emails, 'send', side_effect=RuntimeError('provider unavailable')):
+            with self.assertRaisesRegex(RuntimeError, 'provider unavailable'):
+                emails._send({
+                    'to': 'customer@example.com',
+                    'subject': 'Failure',
+                    'html': emails.ROUTING_NOTICE,
+                }, department='support')
+
+        delivery = emails.EmailDelivery.objects.get()
+        self.assertEqual(delivery.status, 'failed')
+        self.assertEqual(delivery.error_type, 'RuntimeError')
+
+    @override_settings(RESEND_API_KEY='re_test')
+    def test_trader_paid_order_email_does_not_include_customer_delivery_address(self):
+        with patch.object(emails, '_send') as send:
+            emails.send_trader_paid_order_email(
+                'Trader',
+                'trader@example.com',
+                'ORD-1',
+                [{'name': 'Product', 'qty': 1, 'price': '1000', 'image': ''}],
+                'https://www.majomarket-uganda.com/trader/orders',
+            )
+
+        html = send.call_args.args[0]['html']
+        self.assertNotIn('Delivery address', html)
+        self.assertEqual(send.call_args.kwargs['department'], 'traders')
 
 
 class CartReminderEmailTests(TestCase):
@@ -152,8 +223,8 @@ class CartReminderEmailTests(TestCase):
             )
 
         payload = send.call_args.args[0]
-        self.assertEqual(payload['from'], 'Majo Market Orders <order@majogadgets.com>')
-        self.assertEqual(payload['reply_to'], 'order@majogadgets.com')
+        self.assertEqual(send.call_args.kwargs['department'], 'noreply')
+        self.assertEqual(send.call_args.kwargs['reply_to_department'], 'orders')
         self.assertEqual(payload['to'], 'customer@example.com')
         self.assertIn('&lt;Customer&gt;', payload['html'])
         self.assertIn('&lt;Phone&gt;', payload['html'])
@@ -161,6 +232,60 @@ class CartReminderEmailTests(TestCase):
         self.assertIn('UGX 2,000', payload['html'])
         self.assertIn('UGX 12,000', payload['html'])
         self.assertIn('https://images.example.com/phone.png', payload['html'])
+
+
+class ResendWebhookTests(TestCase):
+    def setUp(self):
+        self.secret = b'resend-webhook-test-secret'
+        self.secret_header = 'whsec_' + base64.b64encode(self.secret).decode()
+        self.delivery = EmailDelivery.objects.create(
+            idempotency_key='a' * 64,
+            department='orders',
+            sender='orders@majomarket-uganda.com',
+            recipient='customer@example.com',
+            subject='Order update',
+            provider_message_id='resend-message-1',
+            status='sent',
+        )
+
+    def _post_signed_event(self, event, *, signature_override=None):
+        body = json.dumps(event).encode()
+        message_id = 'webhook-message-1'
+        timestamp = str(int(timezone.now().timestamp()))
+        signed_content = b'.'.join((message_id.encode(), timestamp.encode(), body))
+        signature = base64.b64encode(
+            hmac.new(self.secret, signed_content, hashlib.sha256).digest()
+        ).decode()
+        return self.client.post(
+            '/api/webhooks/resend/',
+            data=body,
+            content_type='application/json',
+            HTTP_SVIX_ID=message_id,
+            HTTP_SVIX_TIMESTAMP=timestamp,
+            HTTP_SVIX_SIGNATURE=signature_override or f'v1,{signature}',
+        )
+
+    def test_delivery_webhook_updates_resend_status(self):
+        with override_settings(RESEND_WEBHOOK_SECRET=self.secret_header):
+            response = self._post_signed_event({
+                'type': 'email.delivered',
+                'data': {'email_id': 'resend-message-1'},
+            })
+
+        self.assertEqual(response.status_code, 200)
+        self.delivery.refresh_from_db()
+        self.assertEqual(self.delivery.status, 'delivered')
+
+    def test_invalid_webhook_signature_is_rejected(self):
+        with override_settings(RESEND_WEBHOOK_SECRET=self.secret_header):
+            response = self._post_signed_event(
+                {'type': 'email.delivered', 'data': {'email_id': 'resend-message-1'}},
+                signature_override='v1,invalid-signature',
+            )
+
+        self.assertEqual(response.status_code, 401)
+        self.delivery.refresh_from_db()
+        self.assertEqual(self.delivery.status, 'sent')
 
 
 class CartReminderEndpointTests(TestCase):

@@ -119,6 +119,8 @@ CORS_ALLOWED_ORIGINS = [
         *_configured_cors_origins,
         'https://majogadgets.com',
         'https://www.majogadgets.com',
+        'https://majomarket-uganda.com',
+        'https://www.majomarket-uganda.com',
     )
     if origin.strip()
 ]
@@ -195,9 +197,35 @@ GOOGLE_CLIENT_ID = config('GOOGLE_CLIENT_ID', default='')
 
 # Resend email
 RESEND_API_KEY = config('RESEND_API_KEY', default='')
-FRONTEND_URL = config('FRONTEND_URL', default='https://www.majogadgets.com')
-ADMIN_EMAIL = config('ADMIN_EMAIL', default='admin@majogadgets.com')
-SUPPORT_EMAIL = config('SUPPORT_EMAIL', default='support@majogadgets.com')
+RESEND_WEBHOOK_SECRET = config('RESEND_WEBHOOK_SECRET', default='')
+FRONTEND_URL = config('FRONTEND_URL', default='https://www.majomarket-uganda.com')
+EMAIL_SUPPORT_FROM = config('EMAIL_SUPPORT_FROM', default='support@majomarket-uganda.com')
+EMAIL_ORDERS_FROM = config('EMAIL_ORDERS_FROM', default='orders@majomarket-uganda.com')
+EMAIL_TRADERS_FROM = config('EMAIL_TRADERS_FROM', default='traders@majomarket-uganda.com')
+EMAIL_ADMIN_FROM = config('EMAIL_ADMIN_FROM', default='admin@majomarket-uganda.com')
+EMAIL_CUSTOMER_FROM = config('EMAIL_CUSTOMER_FROM', default='customer@majomarket-uganda.com')
+EMAIL_INFO_FROM = config('EMAIL_INFO_FROM', default='info@majomarket-uganda.com')
+EMAIL_NOREPLY_FROM = config('EMAIL_NOREPLY_FROM', default='noreply@majomarket-uganda.com')
+EMAIL_ROLE_ADDRESSES = {
+    'support': EMAIL_SUPPORT_FROM,
+    'orders': EMAIL_ORDERS_FROM,
+    'traders': EMAIL_TRADERS_FROM,
+    'admin': EMAIL_ADMIN_FROM,
+    'customer': EMAIL_CUSTOMER_FROM,
+    'info': EMAIL_INFO_FROM,
+    'noreply': EMAIL_NOREPLY_FROM,
+}
+EMAIL_ROLE_LABELS = {
+    'support': 'Support',
+    'orders': 'Orders',
+    'traders': 'Trader Relations',
+    'admin': 'Administration',
+    'customer': 'Customer Relations',
+    'info': 'General Enquiries',
+    'noreply': 'Automated Notifications',
+}
+ADMIN_EMAIL = config('EMAIL_ADMIN_RECIPIENT', default=EMAIL_ADMIN_FROM)
+SUPPORT_EMAIL = EMAIL_SUPPORT_FROM
 MAJO_LEGAL_OPERATOR_NAME = config('MAJO_LEGAL_OPERATOR_NAME', default='Walunsimbi John')
 MAJO_LEGAL_OPERATOR_TITLE = config('MAJO_LEGAL_OPERATOR_TITLE', default='CEO')
 MAJO_BUSINESS_ADDRESS = config('MAJO_BUSINESS_ADDRESS', default='')
